@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 r"""Рисует все позы маскота в одну картинку, не запуская его на рабочем столе.
 
-    Windows: %LOCALAPPDATA%\claude-mascot\venv\Scripts\python.exe preview.py [out.png]
-    Linux:   ~/.local/share/claude-mascot/venv/bin/python preview.py [out.png]
+    Windows: %LOCALAPPDATA%\claude-mascot\venv\Scripts\python.exe preview.py [out.png] [скин]
+    Linux:   ~/.local/share/claude-mascot/venv/bin/python preview.py [out.png] [скин]
+
+Скин — ключ из SKINS в mascot.py (claude, tagilla, ...); по умолчанию claude.
 
 Нужен после любых правок внешнего вида: открой картинку и проверь каждую позу.
 """
@@ -18,13 +20,14 @@ from PyQt6.QtGui import QColor, QFont, QImage, QPainter  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 out_path = sys.argv[1] if len(sys.argv) > 1 else "preview.png"
+skin = sys.argv[2] if len(sys.argv) > 2 else "claude"
 app = QApplication([])
 m.World.set_state({"areas": [], "windows": [
     dict(id="win", x=300, y=300, w=300, h=400, cls="demo", df="", cap="", fs=False, act=False)]})
 cursor = [QPoint(450, 260)]
 m.QCursor.pos = staticmethod(lambda: cursor[0])
 
-pet = m.Pet()
+pet = m.Pet(skin=skin)
 pet.clock = type("FixedClock", (), {"restart": lambda self: 16})()  # ровно 16 мс на кадр
 pet.next_talk = 1e9
 
@@ -85,13 +88,20 @@ def pose_peek():
 def pose_hold():
     pet.chase = True
     pet.grab_cd = 0
-    pet.x, pet.y = cursor[0].x(), cursor[0].y() + m.HOLD_DY
+    pet.x, pet.y = cursor[0].x(), cursor[0].y() + pet.skin.hold_dy
     pet.try_catch_cursor(cursor[0])
+
+
+def pose_smash():
+    pet.start_smash("down")
 
 
 POSES = [("idle", pose_idle), ("walk", pose_walk), ("sit", pose_sit), ("sleep", pose_sleep),
          ("happy", pose_happy), ("drag", pose_drag), ("jump", pose_jump), ("dizzy", pose_dizzy),
          ("ledge", pose_ledge), ("cling", pose_cling), ("peek", pose_peek), ("hold", pose_hold)]
+if pet.skin.smashes:
+    POSES += [("smash: замах", pose_smash), ("smash: удар", pose_smash)]
+TICKS = {"jump": 12, "smash: замах": 26, "smash: удар": 40}
 
 COLS = 4
 rows = (len(POSES) + COLS - 1) // COLS
@@ -105,8 +115,9 @@ for i, (name, setup) in enumerate(POSES):
     pet.x, pet.y, pet.vx, pet.vy = 150.0, 800.0, 0.0, 0.0
     pet.surface = pet.cling = pet.peek = None
     pet.tilt = pet.squash = pet.squash_v = 0.0
+    pet.hammer_a = -45.0
     setup()
-    for _ in range(12 if name == "jump" else 30):
+    for _ in range(TICKS.get(name, 30)):
         pet.tick()
     x, y = (i % COLS) * m.W, (i // COLS) * (m.H + 20)
     painter.drawImage(x, y + 20, pet.grab().toImage())
