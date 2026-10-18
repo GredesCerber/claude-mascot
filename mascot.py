@@ -42,6 +42,7 @@ T_MASK_D = QColor("#5a5f64")
 T_STRAP = QColor("#2a2a2a")
 T_VISOR = QColor("#121212")
 T_GLOW = QColor("#ff8a2a")
+T_RAGE = QColor("#ff2a1a")
 T_RED = QColor("#b3261e")
 T_CLOTH = QColor("#2b2f33")
 T_CLOTH_D = QColor("#22262a")
@@ -90,6 +91,16 @@ LINES = {
     "peek_end": ["ну всё, кончилось", "а дальше?", "эх"],
     "bonk": ["бум!", "ай!"],
     "smash": ["бах!"],
+    # охота Тагиллы на других маскотов
+    "spotted": ["ТАГИЛЛА!", "а?! это он!", "мама...", "опять он!"],
+    "flee": ["ААА!", "помогите!", "только не молотом!", "бежим!", "я быстрый, я быстрый!"],
+    "bonked": ["АЙ!", "за что?!", "ой-ой-ой", "больно же!", "ну ёлки..."],
+    "dodge": ["мимо!", "не догонишь!", "хе-хе, промазал", "оп!"],
+    "relief": ["фух...", "кажется, отстал", "живой!"],
+    "rage": ["ГРАААА!", "стоять!"],
+    "gloat": ["ха", "следующий"],
+    "miss": ["мимо"],
+    "taunt_up": ["слезай!"],
 }
 
 TAGILLA_LINES = {
@@ -110,6 +121,10 @@ TAGILLA_LINES = {
     "flung": ["ГРАААА!", "я вернусь"],
     "summit": ["забрался", "теперь крушить"],
     "smash": ["БАХ!", "УБЕЙ!", "ГРРА!", "на!", "крушу!"],
+    "rage": ["ГРАААА!", "УБЕЙ!", "вижу тебя!", "стоять!", "иди сюда!"],
+    "gloat": ["ГРА-ХА-ХА", "ещё хочешь?", "лежать", "следующий", "*довольно пыхтит*"],
+    "miss": ["ГРР! мимо", "стой!", "не уйдёшь!"],
+    "taunt_up": ["слезай!", "я подожду", "ГРРР", "достану!"],
 }
 
 
@@ -137,7 +152,8 @@ BROWSERS = ("firefox", "chrom", "brave", "vivaldi", "opera", "edge", "librewolf"
 VIDEO_HINT = re.compile(r"youtube|twitch|netflix|кинопоиск|rutube|vk видео|видео|video|anime|аниме", re.I)
 
 GROUNDED = {"idle", "walk", "run", "chase", "sit", "sleep", "happy", "land", "dizzy",
-            "ledge", "goto", "crouch", "smash"}
+            "ledge", "goto", "crouch", "smash", "hunt", "flee", "gloat"}
+MOVING = {"walk", "run", "chase", "goto", "hunt", "flee"}  # перебирает ногами
 AIR = {"jump", "fall", "thrown", "leap"}
 CALM = {"idle", "walk", "run", "sit", "land", "ledge", "sleep"}
 
@@ -391,6 +407,11 @@ class Pet(QWidget):
         self.hammer_a = -45.0  # угол руки с кувалдой (0 — вниз, 180 — вверх, 270 — вперёд)
         self.smash = None
         self.shake_t = 0.0
+        self.prey = None       # Тагилла: за кем гонится
+        self.hunt_cd = 4.0     # Тагилла: пауза перед следующей охотой
+        self.hit_result = None  # Тагилла: чем кончился последний удар по маскоту
+        self.spin = 0.0        # кувыркается в полёте после удара, град/с
+        self.bounces = 0       # сколько раз ещё отскочит от пола
         self.grab_cd = 0.0    # пауза, прежде чем снова схватить курсор
         self.hold_prev = None  # прошлая позиция курсора, когда висим на нём
         self.cv = (0.0, 0.0)  # сглаженная скорость курсора
@@ -465,6 +486,19 @@ class Pet(QWidget):
         self.state, self.state_t, self.state_len = st, 0.0, length
 
     def pick_next(self):
+        if self.skin.smashes:
+            result, self.hit_result = self.hit_result, None
+            if result == "hit":
+                self.set_state("gloat", 1.6)
+                self.hunt_cd = 3.2  # даёт жертве очухаться и чуть-чуть форы
+                self.say(self.line("gloat"), 1.6)
+                return
+            if self.hunt_cd <= 0 and self.hunt_target():
+                self.start_hunt()
+                return
+        elif self.hunter_near():
+            self.start_flee()
+            return
         if self.chase:
             self.set_state("chase")
             return
@@ -540,9 +574,9 @@ class Pet(QWidget):
         self.facing = 1 if tx > self.x else -1
         self.set_state("crouch", 0.22)
 
-    def leap_to(self, tx, ty, arrive=None):
+    def leap_to(self, tx, ty, arrive=None, extra=None):
         h = self.y - ty
-        apex = max(h, 0) + rnd(50, 90)
+        apex = max(h, 0) + (extra if extra is not None else rnd(50, 90))
         vy0 = -math.sqrt(2 * GRAVITY * apex)
         t_up = -vy0 / GRAVITY
         t_down = math.sqrt(2 * max(apex - h, 1) / GRAVITY)
@@ -681,8 +715,20 @@ class Pet(QWidget):
     def land(self, ground, win):
         impact = self.vy
         self.y = ground
-        self.tilt = 0
         self.leap = None
+        if self.bounces > 0 and impact > 250:
+            # отскакивает от пола, как мячик
+            self.bounces -= 1
+            self.vy = -impact * 0.55
+            self.vx *= 0.7
+            self.spin *= 0.6
+            self.squash = 0.5
+            self.dust(6)
+            self.set_state("thrown")
+            return
+        self.tilt = 0
+        self.spin = 0.0
+        self.bounces = 0
         if impact > 1300 and self.state not in ("jump", "leap"):
             self.vy = -impact * 0.35
             self.vx *= 0.6
@@ -871,6 +917,15 @@ class Pet(QWidget):
                     self.x += w.x - self.surf_pos[0]
                 self.track_window(w, dt)
 
+        # Тагилла видит другого маскота — охота; тот видит Тагиллу — бежать
+        self.hunt_cd -= dt
+        if self.state in CALM or self.state in ("chase", "peek"):
+            if self.skin.smashes:
+                if self.hunt_cd <= 0 and self.hunt_target():
+                    self.start_hunt()
+            elif self.hunter_near():
+                self.start_flee()
+
         # заметили видео — идём подглядывать
         if self.state in CALM and self.peek_cd <= 0:
             vw = World.video_window()
@@ -885,6 +940,12 @@ class Pet(QWidget):
 
         if st == "chase":
             self.tick_chase(dt, cur)
+
+        elif st == "hunt":
+            self.tick_hunt(dt)
+
+        elif st == "flee":
+            self.tick_flee(dt)
 
         elif st in ("walk", "run", "goto"):
             speed = WALK_SPEED if st == "walk" else RUN_SPEED
@@ -942,9 +1003,14 @@ class Pet(QWidget):
                 self.y, self.vy = vg.top() + 70.0, -self.vy * 0.4
             if self.vx:
                 self.facing = 1 if self.vx > 0 else -1
-            self.tilt += (max(-20, min(20, self.vx * 0.03)) - self.tilt) * min(1, dt * 6)
+            if self.spin:
+                self.tilt += self.spin * dt  # кувыркается после удара кувалдой
+            else:
+                self.tilt += (max(-20, min(20, self.vx * 0.03)) - self.tilt) * min(1, dt * 6)
 
             if self.chase and self.try_catch_cursor(cur):
+                pass
+            elif st == "jump" and self.skin.smashes and self.prey and self.try_air_bonk():
                 pass
             elif st == "leap" and self.leap and self.leap[2] and self.vy > 0 and self.y >= self.leap[1]:
                 self.x, self.y = self.leap[0], self.leap[1]
@@ -1046,7 +1112,7 @@ class Pet(QWidget):
                 p.vx *= 1 - dt * 4
             elif p.kind == "heart":
                 p.vx = math.sin(self.t * 4 + p.size * 10) * 30
-            elif p.kind == "shard":
+            elif p.kind in ("shard", "sweat"):
                 p.vy += 1400 * dt
         self.particles = [p for p in self.particles if p.life > 0]
 
@@ -1231,14 +1297,20 @@ class Pet(QWidget):
 
     def tick_smash(self, dt):
         t, sm, f = self.state_t, self.smash, self.facing
-        end = 270 if sm["kind"] == "side" else 315  # вперёд / вперёд-вниз в пол
-        if t < 0.45:  # замах: кувалда уходит назад и вверх
-            k = t / 0.45
+        # по живой цели бьёт быстро и с выпадом, иначе она успевает убежать
+        end, wind, strike = {"side": (270, 0.45, 0.13), "down": (315, 0.45, 0.13),
+                             "victim": (290, 0.22, 0.08)}[sm["kind"]]
+        if sm["kind"] == "victim" and t < wind + strike:
+            lo, hi = self.bounds()
+            self.x = max(lo, min(hi, self.x + f * 240 * dt))
+            self.leg_phase += dt * 20
+        if t < wind:  # замах: кувалда уходит назад и вверх
+            k = t / wind
             k = k * k * (3 - 2 * k)
             self.hammer_a = -45 + 205 * k
             self.tilt = -f * 8 * k
-        elif t < 0.58:  # удар через верх
-            k = (t - 0.45) / 0.13
+        elif t < wind + strike:  # удар через верх
+            k = (t - wind) / strike
             self.hammer_a = 160 + (end - 160) * k
             self.tilt = f * 10 * k
         else:
@@ -1250,6 +1322,20 @@ class Pet(QWidget):
 
     def smash_impact(self):
         sm, f = self.smash, self.facing
+        if sm["kind"] == "victim":
+            v = sm["victim"]
+            hx = self.x + f * 68
+            if v in pets and v.state not in AIR and v.state not in ("drag", "hold") \
+                    and abs(v.x - hx) < 60 and abs(v.y - self.y) < 45:
+                self.bonk(v, f)
+                return
+            # промазал — кувалда в пол
+            self.hit_result = "miss"
+            sm["kind"] = "down"
+            if v in pets and random.random() < 0.6:
+                v.say(v.line("dodge"), 1.3)
+            if random.random() < 0.6:
+                self.say(self.line("miss"), 1.2)
         if sm["kind"] == "side":
             hx, hy = self.x + f * 74, self.y - 47
             _, w = World.get(sm["wid"])
@@ -1271,17 +1357,204 @@ class Pet(QWidget):
         if random.random() < 0.5:
             self.say(self.line("smash"), 1.2)
 
+    # ---------- охота Тагиллы на других маскотов ----------
+    def hunt_target(self):
+        if not self.skin.smashes:
+            return None
+        prey = [p for p in pets if p is not self and not p.skin.smashes and not p.hidden]
+        return min(prey, key=lambda p: abs(p.x - self.x) + abs(p.y - self.y), default=None)
+
+    def hunter_near(self):
+        if self.skin.smashes:
+            return None
+        for p in pets:
+            if p is not self and p.prey is self and p.state in ("hunt", "smash") \
+                    and not p.hidden and abs(p.x - self.x) < 1100:
+                return p
+        return None
+
+    def start_hunt(self):
+        if self.state == "peek":
+            self.end_peek()
+            return
+        self.prey = self.hunt_target()
+        self.chase_v = 0.0
+        self.chase_cd = 0.0
+        self.set_state("hunt")
+        self.say(self.line("rage"), 1.4)
+        self.shake_t = 0.2
+
+    def start_flee(self):
+        if self.state == "peek":
+            self.end_peek()
+            return
+        if self.state == "hold":
+            return  # на курсоре он и так в безопасности (почти)
+        self.chase_cd = 0.3
+        if self.state == "sleep" or random.random() < 0.6:
+            self.say(self.line("spotted"), 1.4)
+        self.set_state("flee")
+
+    def tick_hunt(self, dt):
+        v = self.hunt_target()
+        if v is None:
+            self.prey = None
+            self.set_state("idle", 1)
+            return
+        self.prey = v
+        self.chase_cd -= dt
+        ground = self.ground_y()
+        gap = v.x - self.x
+        if random.random() < dt * 0.2:
+            self.say(self.line("rage"), 1.3)
+        out_of_reach = v.state in ("hold", "cling", "drag") or (v.state == "peek" and v.peek and v.peek["hang"])
+        if out_of_reach:
+            # жертва на курсоре / на краю окна — встаём под ней и прыгаем
+            rise = ground - (v.y - 30)
+            if abs(gap) < 70 and self.chase_cd <= 0 and v.state != "drag" and 0 < rise < 700:
+                self.chase_cd = 1.6
+                self.jump(math.sqrt(2 * GRAVITY * (rise + 25)), gap * 2.5)
+                if random.random() < 0.5:
+                    self.say(self.line("taunt_up"), 1.2)
+                return
+        elif v.state not in AIR:
+            if abs(v.y - ground) > 25 and self.chase_cd <= 0 and abs(gap) < 900:
+                # жертва на другой высоте (на окне / на полу) — прыгаем туда же
+                tx = v.x - math.copysign(55, gap)
+                _, vw = v.surface_win()
+                if vw:
+                    tx = max(vw.x + 20, min(vw.right - 20, tx))
+                self.chase_cd = 1.0
+                self.chase_v = 0.0
+                self.leap_to(tx, v.y)
+                return
+            if abs(v.y - ground) <= 25 and abs(gap) < 75:
+                self.facing = 1 if gap > 0 else -1
+                self.start_smash("victim")
+                self.smash["victim"] = v
+                return
+
+        # бег к жертве — быстрее, чем она убегает
+        want = 0.0 if abs(gap) < 10 else math.copysign(min(abs(gap) * 4.0, 480.0 * self.skin.speed), gap)
+        step = 3000 * dt
+        self.chase_v += max(-step, min(step, want - self.chase_v))
+        if abs(self.chase_v) > 5:
+            self.facing = 1 if self.chase_v > 0 else -1
+        self.x += self.chase_v * dt
+        speed = abs(self.chase_v)
+        self.leg_phase += dt * min(speed / 9, 22)
+        if speed > 350 and random.random() < dt * 12:
+            self.particles.append(Particle("dust", self.x - self.facing * 20, self.y - 2,
+                                           -self.facing * rnd(20, 60), rnd(-25, -5), 0.4, 0.8))
+        if self.surface is not None:
+            idx, w = self.surface_win()
+            lo, hi = w.x + 18, w.right - 18
+            if self.x < lo or self.x > hi:
+                self.x = max(lo, min(hi, self.x))
+                if (gap > 0) == (self.facing > 0) and abs(gap) > 40:
+                    self.step_off()  # жертва внизу за краем окна — спрыгиваем
+                    return
+                self.chase_v = 0.0
+        else:
+            vg = self.virtual_geo()
+            self.x = max(vg.left() + 45.0, min(vg.right() - 45.0, self.x))
+            ground = self.floor_y()
+        self.y = ground
+
+    def tick_flee(self, dt):
+        h = self.hunter_near()
+        if not h:
+            if random.random() < 0.5:
+                self.say(self.line("relief"), 1.5)
+            self.set_state("idle", 1.5)
+            return
+        self.chase_cd -= dt
+        ground = self.ground_y()
+        away = 1 if self.x >= h.x else -1
+        if self.surface is not None:
+            lo, hi = self.bounds()
+        else:  # по полу удираем хоть на другой монитор
+            vg = self.virtual_geo()
+            lo, hi = vg.left() + 45.0, vg.right() - 45.0
+        dist = abs(h.x - self.x)
+        cornered = (away > 0 and self.x >= hi - 25) or (away < 0 and self.x <= lo + 25)
+        same_level = abs(h.y - self.y) < 30
+        if self.chase_cd <= 0 and same_level and h.state == "hunt" and dist < 260:
+            if cornered or random.random() < dt * 1.2:
+                # перепрыгнуть через Тагиллу
+                self.chase_cd = 1.4
+                tx = max(lo, min(hi, h.x - away * rnd(170, 260)))
+                self.leap_to(tx, ground, extra=rnd(140, 200))
+                if random.random() < 0.4:
+                    self.say(self.line("dodge"), 1.2)
+                return
+            if random.random() < dt * 0.6 and self.plan_explore():
+                self.chase_cd = 1.4  # удрать на окно
+                return
+        if cornered and self.surface is not None:
+            self.facing = away
+            self.step_off()  # с окна — вниз
+            return
+        speed = 270.0 if dist < 400 else 170.0
+        self.facing = away
+        self.x = max(lo, min(hi, self.x + away * speed * dt))
+        self.leg_phase += dt * min(speed / 9, 20)
+        self.y = ground
+        if random.random() < dt * 3:  # пот ручьём
+            self.particles.append(Particle("sweat", self.x - away * 8 + rnd(-10, 10), self.y - 55,
+                                           -away * rnd(20, 60), rnd(-140, -70), 0.7, 1.0))
+        if random.random() < dt * 0.25:
+            self.say(self.line("flee"), 1.3)
+
+    def try_air_bonk(self):
+        """Тагилла в прыжке сбивает жертву с курсора / с края окна."""
+        v = self.prey
+        if v not in pets or v.state not in ("hold", "cling", "peek"):
+            return False
+        if math.hypot(v.x - self.x, (v.y - 30) - (self.y - 60)) > 60:
+            return False
+        self.hammer_a = 230
+        self.bonk(v, 1 if v.x >= self.x else -1, 0.8)
+        return True
+
+    def bonk(self, v, d, power=1.0):
+        self.hit_result = "hit"
+        for _ in range(8):
+            self.particles.append(Particle("spark", v.x + rnd(-15, 15), v.y - rnd(25, 45),
+                                           rnd(-160, 160), rnd(-220, -60), rnd(0.5, 0.8), rnd(0.8, 1.3)))
+        self.shake_t = 0.3
+        self.squash = 0.25
+        v.get_bonked(d, power)
+        if random.random() < 0.6:
+            self.say(self.line("smash"), 1.0)
+
+    def get_bonked(self, d, power=1.0):
+        """По этому маскоту прилетело кувалдой: улетает кувырком и отскакивает от пола."""
+        if self.state == "hold":
+            self.grab_cd = 4.0
+        self.leave_surface(0.5)
+        self.cling = self.peek = self.leap = None
+        self.vx = d * rnd(800, 1200) * power
+        self.vy = -rnd(650, 950) * power
+        self.spin = d * rnd(540, 900)
+        self.bounces = 2
+        self.dizzy_next = True
+        self.squash = -0.35
+        self.set_state("thrown")
+        self.burst("spark", 5, 0.7)
+        self.say(self.line("bonked"), 1.6)
+
     def update_hammer(self, dt):
         if self.state == "smash":
             return
         st = self.state
-        if st in ("walk", "run", "chase", "goto"):
+        if st in MOVING:
             target = 155   # на плече
         elif st in AIR:
             target = 130
         elif st in ("drag", "hold", "cling"):
             target = 8 + self.tilt * 0.6  # болтается в опущенной руке
-        elif st == "happy":
+        elif st in ("happy", "gloat"):
             target = 180 + math.sin(self.t * 12) * 15  # победно над головой
         elif st == "sleep":
             target = -85
@@ -1480,7 +1753,7 @@ class Pet(QWidget):
             return "happy"
         if st == "dizzy":
             return "dizzy"
-        if st in ("drag", "thrown"):
+        if st in ("drag", "thrown", "flee"):
             return "surprised"
         if st == "hold":
             return "surprised" if len(self.grip_hits) >= 3 else "happy"
@@ -1491,7 +1764,7 @@ class Pet(QWidget):
             p.fillRect(QRectF(cx * P, cy * P, w * P, h * P), col)
 
         sitting = st in ("sit", "sleep", "dizzy", "ledge")
-        walking = st in ("walk", "run", "chase", "goto")
+        walking = st in MOVING
         top = -8 if sitting else -11  # верхний ряд тела
         bob = 0
         if walking:
@@ -1583,7 +1856,7 @@ class Pet(QWidget):
             p.fillRect(QRectF(cx * P, cy * P, w * P, h * P), col)
 
         sitting = st in ("sit", "sleep", "dizzy", "ledge")
-        walking = st in ("walk", "run", "chase", "goto")
+        walking = st in MOVING
         bob = -0.5 if walking and int(self.leg_phase) % 2 else 0
         o = (3 if sitting else 0) + bob  # насколько опущен корпус
 
@@ -1644,7 +1917,10 @@ class Pet(QWidget):
         mode = self.eye_mode(st)
         ex = self.eye_dx * 0.5
         gy = -13.9 + o + self.eye_dy * 0.2
-        if mode == "open":
+        if st in ("hunt", "smash", "gloat") and self.prey:  # озверел
+            px(-0.1 + ex, gy - 0.2, 1.1, 0.9, T_RAGE)
+            px(2.2 + ex, gy - 0.2, 1.1, 0.9, T_RAGE)
+        elif mode == "open":
             px(0.1 + ex, gy, 0.8, 0.6, T_GLOW)
             px(2.4 + ex, gy, 0.8, 0.6, T_GLOW)
         elif mode == "happy":
@@ -1705,6 +1981,10 @@ class Pet(QWidget):
                 p.setFont(f)
                 p.setPen(QColor(90, 110, 200, int(255 * min(1, k * 2))))
                 p.drawText(QPointF(lx, ly), "z")
+            elif pt.kind == "sweat":
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(140, 200, 255, int(220 * k)))
+                p.drawEllipse(QPointF(lx, ly), 2.2 * pt.size, 3.2 * pt.size)
             elif pt.kind == "shard":
                 c = QColor(225, 240, 255, int(230 * min(1, k * 2)))
                 s = 3.2 * pt.size
@@ -1825,7 +2105,10 @@ class Pet(QWidget):
             act = QAction(skin.title, who, checkable=True, checked=skin is self.skin)
             act.triggered.connect(lambda _=False, n=name: self.set_skin(n))
             who.addAction(act)
-        m.addAction("Позвать друга").triggered.connect(lambda: pets.append(Pet(skin=self.skin.name)))
+        friend = m.addMenu("Позвать друга")
+        for name, skin in SKINS.items():
+            friend.addAction(skin.title).triggered.connect(
+                lambda _=False, n=name: pets.append(Pet(skin=n)))
         if len(pets) > 1:
             m.addAction("Убрать этого").triggered.connect(self.remove)
         m.addAction("Выход").triggered.connect(QApplication.quit)
@@ -1834,6 +2117,8 @@ class Pet(QWidget):
     def set_skin(self, name):
         self.skin = SKINS[name]
         QSettings("claude-mascot", "mascot").setValue("skin", name)  # новые маскоты — такие же
+        self.prey = None
+        self.hunt_cd = 3.0
         self.last_mask = None
         self.hammer_a = -45.0
         self.smash = None
