@@ -35,6 +35,18 @@ AUDIO_PLAYERS = {"spotify", "music.ui", "zunemusic", "applemusic", "yandex.music
 FIREFOX_IDS = {"308046b0af4a39cb", "6f193ccc56814779", "e7cf176e110c211b"}
 
 
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.UINT), ("dwTime", wt.DWORD)]
+
+
+def idle_seconds():
+    """Сколько секунд пользователь не трогал мышь и клавиатуру (GetLastInputInfo)."""
+    info = LASTINPUTINFO(ctypes.sizeof(LASTINPUTINFO), 0)
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return ((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
 class MONITORINFO(ctypes.Structure):
     _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
                 ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
@@ -60,6 +72,7 @@ kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 kernel32.OpenProcess.restype = wt.HANDLE
 kernel32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
 kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.GetTickCount.restype = wt.DWORD
 if dwmapi:
     dwmapi.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD]
 

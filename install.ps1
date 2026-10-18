@@ -56,7 +56,7 @@ Write-Host "→ Копирую файлы в $Dest"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item -Force (Join-Path $Src 'mascot.py'), (Join-Path $Src 'platform_windows.py') $Dest
 New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'assets') | Out-Null
-Copy-Item -Force (Join-Path $Src 'assets\tagilla.png') (Join-Path $Dest 'assets')
+Copy-Item -Force (Join-Path $Src 'assets\tagilla_frames.png'), (Join-Path $Src 'assets\tagilla_frames.json') (Join-Path $Dest 'assets')
 
 if (-not (Test-Path $VenvPython)) {
     Write-Host '→ Создаю виртуальное окружение'

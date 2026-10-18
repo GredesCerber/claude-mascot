@@ -28,7 +28,7 @@ from PyQt6.QtGui import (QAction, QColor, QCursor, QFont, QFontMetrics, QImage, 
 from PyQt6.QtWidgets import QApplication, QMenu, QWidget
 
 P = 5  # размер "пикселя"
-W, H = 280, 210  # размер окна
+W, H = 280, 240  # размер окна
 AX, AY = W // 2, H - 24  # где в окне стоят ноги
 
 BODY = QColor("#D97757")
@@ -37,30 +37,17 @@ LIGHT = QColor("#E8957A")
 EYE = QColor("#1b1b1b")
 BLUSH = QColor(255, 140, 150, 170)
 
-# Тагилла
-# Тагилла: тело — спрайт assets/tagilla.png (нарисован GPT, см. tools/make_sprite.py),
-# ближняя рука с кувалдой — кодом, чтобы замахиваться и бить
+# Тагилла: целиком из кадров assets/tagilla_frames.png (нарисованы GPT)
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-T_CX, T_HIP = 20, 70        # в спрайте: x середины между ступнями и y, где начинаются ноги
-T_SHOULDER = (11, -83)      # плечо ближней руки относительно точки между ступнями
-T_VISOR = ((7, -99), (10, -99))  # где в смотровой щели маски светятся глаза
-T_GLOW = QColor("#ff8a2a")
-T_RAGE = QColor("#ff2a1a")
+T_SHOULDER = (11, -83)      # плечо относительно точки между ступнями (для удара по курсору)
 T_HEAD_DIST = 72            # от плеча до центра бойка кувалды
-T_SKIN = QColor("#b5764f")
-T_SKIN_D = QColor("#7a4a30")
-T_OUTLINE = QColor("#2e1c12")
-T_GLOVE = QColor("#8a1e14")
-T_GLOVE_L = QColor("#b5372a")
-T_HANDLE = QColor("#6b4a2b")
-T_HANDLE_L = QColor("#8f6a43")
-T_STEEL = QColor("#4f555b")
-T_STEEL_L = QColor("#8a939b")
-T_STEEL_D = QColor("#30353a")
+T_STRIKE = (48, -12)        # куда приходится боёк в кадре «удар», от точки между ступнями
 
 GRAVITY = 2200.0
 WALK_SPEED = 55.0
 RUN_SPEED = 150.0
+BLOCK_CHANCE = 0.2  # шанс, что жертва поймает кувалду Тагиллы и отбросит его
+IDLE_SLEEP = 60.0  # через сколько секунд бездействия пользователя маскоты засыпают
 RAGE_PAUSE = (10.0, 120.0)  # Тагилла: сколько секунд спокоен между приступами буйства
 RAGE_LENGTH = (15.0, 40.0)  # ...и сколько длится приступ
 CLING_OFF = 26  # насколько центр маскота отстоит от края окна, когда он висит
@@ -106,6 +93,10 @@ LINES = {
     "miss": ["мимо"],
     "taunt_up": ["слезай!"],
     "calm": ["устал"],
+    "yawn": ["*зевает*", "пойду вздремну", "что-то тихо стало...", "zzz"],
+    "wake": ["а? я не сплю!", "о, ты вернулся!", "*потягивается*", "доброе утро!"],
+    "block": ["не в этот раз!", "ХА! поймал!", "а вот и нет!", "держи сдачи!"],
+    "blocked": ["ГРА?!", "ЧТО?!", "как?!"],
 }
 
 TAGILLA_LINES = {
@@ -131,6 +122,9 @@ TAGILLA_LINES = {
     "miss": ["ГРР! мимо", "стой!", "не уйдёшь!"],
     "taunt_up": ["слезай!", "я подожду", "ГРРР", "достану!"],
     "calm": ["*тяжело дышит*", "...устал", "ладно, живи пока", "перекур"],
+    "yawn": ["*зевает в маску*", "...отдых", "ГРр... zzz"],
+    "wake": ["ГРА! кто тут?", "*скрежет кувалды*", "проснулся злой"],
+    "blocked": ["ГРА?!", "ЧТО?!", "как?!", "ГРРРР!!"],
 }
 
 
@@ -149,8 +143,8 @@ class Skin:
 
 SKINS = {
     "claude": Skin("claude", "Клод", 64, QRect(AX - 60, AY - 95, 120, 118), {}),
-    "tagilla": Skin("tagilla", "Тагилла", 114, QRect(AX - 100, AY - 170, 200, 193),
-                    TAGILLA_LINES, speed=1.35, smashes=True, bubble_dy=132),
+    "tagilla": Skin("tagilla", "Тагилла", 128, QRect(AX - 100, AY - 135, 200, 158),
+                    TAGILLA_LINES, speed=1.35, smashes=True, bubble_dy=146),
 }
 
 BROWSERS = ("firefox", "chrom", "brave", "vivaldi", "opera", "edge", "librewolf", "zen",
@@ -158,7 +152,7 @@ BROWSERS = ("firefox", "chrom", "brave", "vivaldi", "opera", "edge", "librewolf"
 VIDEO_HINT = re.compile(r"youtube|twitch|netflix|кинопоиск|rutube|vk видео|видео|video|anime|аниме", re.I)
 
 GROUNDED = {"idle", "walk", "run", "chase", "sit", "sleep", "happy", "land", "dizzy",
-            "ledge", "goto", "crouch", "smash", "hunt", "flee", "gloat"}
+            "ledge", "goto", "crouch", "smash", "hunt", "flee", "gloat", "block"}
 MOVING = {"walk", "run", "chase", "goto", "hunt", "flee"}  # перебирает ногами
 AIR = {"jump", "fall", "thrown", "leap"}
 CALM = {"idle", "walk", "run", "sit", "land", "ledge", "sleep"}
@@ -171,26 +165,16 @@ flings = []    # курсоры, которые сейчас летят от у�
 _tagilla = None
 
 
-def tagilla_parts():
-    """Спрайт Тагиллы, разрезанный на верх (голова, торс, дальняя рука) и две ноги."""
+def tagilla_frames():
+    """Кадры Тагиллы: assets/tagilla_frames.png (полоса кадров, нарисовано GPT) и разметка
+    assets/tagilla_frames.json: имя кадра -> [x, y, ширина, высота, x точки между ступнями]."""
     global _tagilla
     if _tagilla is None:
-        img = QImage(os.path.join(ASSETS, "tagilla.png")).convertToFormat(QImage.Format.Format_ARGB32)
-        # ближний кулак убираем — руку с кувалдой рисуем кодом
-        for y in range(54, 70):
-            for x in range(31, img.width()):
-                c = img.pixelColor(x, y)
-                if x >= 33:
-                    img.setPixelColor(x, y, QColor(0, 0, 0, 0))
-                elif c.alpha() and c.red() > c.green() + 25:
-                    img.setPixelColor(x, y, img.pixelColor(29, y))
-        h = img.height()
-        _tagilla = {
-            "upper": img.copy(0, 0, img.width(), T_HIP),
-            "back": img.copy(0, T_HIP, T_CX, h - T_HIP),
-            "front": img.copy(T_CX, T_HIP, img.width() - T_CX, h - T_HIP),
-            "h": h,
-        }
+        import json
+        img = QImage(os.path.join(ASSETS, "tagilla_frames.png")).convertToFormat(QImage.Format.Format_ARGB32)
+        with open(os.path.join(ASSETS, "tagilla_frames.json"), encoding="utf-8") as f:
+            frames = json.load(f)["frames"]
+        _tagilla = {"img": img, "frames": frames}
     return _tagilla
 
 
@@ -444,7 +428,7 @@ class CursorFling(QWidget):
         self.close()
 
     def step(self):
-        dt = min(self.clock.restart() / 1000.0, 0.05)
+        dt = max(0.004, min(self.clock.restart() / 1000.0, 0.05))  # 0 бывает, когда кадры слиплись
         self.life += dt
         if self.v is None:  # ждём удара, держимся под курсором
             c = cursor_pos()
@@ -576,10 +560,11 @@ class Pet(QWidget):
         self.hit_result = None  # Тагилла: чем кончился последний удар по маскоту
         self.spin = 0.0        # кувыркается в полёте после удара, град/с
         self.bounces = 0       # сколько раз ещё отскочит от пола
-        self.fling = None      # Тагилла: окно-ловушка под курсором перед ударом по нему
+        self.cursor_fling = None      # Тагилла: окно-ловушка под курсором перед ударом по нему
         self.rage_until = 0.0  # Тагилла: до какого self.t длится приступ буйства
         self.next_rage = None  # ...и когда начнётся следующий
         self.rage_forever = False  # буйство без перерыва (галочка в меню)
+        self.idle_sleep = False  # спит, потому что пользователь отошёл
         self.grab_cd = 0.0    # пауза, прежде чем снова схватить курсор
         self.hold_prev = None  # прошлая позиция курсора, когда висим на нём
         self.cv = (0.0, 0.0)  # сглаженная скорость курсора
@@ -694,7 +679,7 @@ class Pet(QWidget):
         elif roll < 0.91:
             self.jump(rnd(500, 750), rnd(-80, 80))
         else:
-            self.set_state("sleep", rnd(8, 18))
+            self.set_state("sit", rnd(5, 10))  # спят только когда пользователь отошёл
 
     def jump(self, power, vx=0.0):
         self.leave_surface()
@@ -1045,7 +1030,7 @@ class Pet(QWidget):
 
     # ---------- главный цикл ----------
     def tick(self):
-        dt = min(self.clock.restart() / 1000.0, 0.05)
+        dt = max(0.004, min(self.clock.restart() / 1000.0, 0.05))  # 0 бывает, когда кадры слиплись
         self.update_visibility()
         if self.hidden:
             return
@@ -1085,17 +1070,20 @@ class Pet(QWidget):
                     self.x += w.x - self.surf_pos[0]
                 self.track_window(w, dt)
 
+        self.update_idle_sleep()
+
         # Тагилла видит другого маскота — охота; тот видит Тагиллу — бежать
         self.hunt_cd -= dt
-        self.update_rage()
-        if self.state in CALM or self.state in ("chase", "peek"):
+        if not self.idle_sleep:
+            self.update_rage()
+        if not self.idle_sleep and (self.state in CALM or self.state in ("chase", "peek")):
             if self.skin.smashes:
                 if self.raging() and self.hunt_cd <= 0 and self.hunt_target():
                     self.start_hunt()
             elif self.hunter_near():
                 self.start_flee()
 
-        # заметили видео — идём подглядывать
+        # заметили видео — идём подглядывать (видео смотрят и когда пользователь «бездействует»)
         if self.state in CALM and self.peek_cd <= 0:
             vw = World.video_window()
             if vw and not vw.fs or vw and vw.act:
@@ -1382,7 +1370,7 @@ class Pet(QWidget):
             return False
         self.facing = 1 if gap > 0 else -1
         self.start_smash("cursor")
-        self.fling = CursorFling(cur)  # след от курсора; заодно готовим, чем его двигать
+        self.cursor_fling = CursorFling(cur)  # след от курсора; заодно готовим, чем его двигать
         return True
 
     def try_hit_cursor_air(self, cur):
@@ -1478,7 +1466,7 @@ class Pet(QWidget):
             self.start_smash("down")
             return True
         ground = self.ground_y()
-        hy = ground + self.hammer_head(270)[1]  # удар вперёд на уровне плеча
+        hy = ground + T_STRIKE[1]  # кувалда бьёт низко, у земли
         lo, hi = self.bounds()
         best = None
         for idx, w in enumerate(World.windows):
@@ -1488,7 +1476,7 @@ class Pet(QWidget):
                 ex = self.edge_x(w, d)
                 if World.covered(ex + d * 4, hy, idx):
                     continue
-                stand = ex - d * self.hammer_head(270)[0]  # отсюда боёк достаёт до края окна
+                stand = ex - d * T_STRIKE[0]  # отсюда боёк достаёт до края окна
                 dist = abs(stand - self.x)
                 if lo <= stand <= hi and dist < 1200 and (best is None or dist < best[0]):
                     best = (dist, stand, w.id, d)
@@ -1539,7 +1527,7 @@ class Pet(QWidget):
         sm, f = self.smash, self.facing
         if sm["kind"] == "cursor":
             cur = cursor_pos()
-            fling, self.fling = self.fling, None
+            fling, self.cursor_fling = self.cursor_fling, None
             hx, hy = self.hammer_head(280)
             if abs(cur.x() - (self.x + f * hx)) < 95 and abs(cur.y() - (self.y + hy)) < 90:
                 if fling in flings:
@@ -1557,10 +1545,14 @@ class Pet(QWidget):
                 self.say(self.line("miss"), 1.2)
         if sm["kind"] == "victim":
             v = sm["victim"]
-            hx = self.x + f * self.hammer_head(290)[0]
+            hx = self.x + f * T_STRIKE[0]
+            # выпад с замахом: достаёт всё, что перед ним на расстоянии до 140 px
             if v in pets and v.state not in AIR and v.state not in ("drag", "hold") \
-                    and abs(v.x - hx) < 60 and abs(v.y - self.y) < 45:
-                self.bonk(v, f)
+                    and 0 <= (v.x - self.x) * f < 140 and abs(v.y - self.y) < 45:
+                if random.random() < BLOCK_CHANCE:
+                    v.block_hammer(self)  # поймал кувалду — Тагилла отлетает сам
+                else:
+                    self.bonk(v, f)
                 return
             # промазал — кувалда в пол
             self.hit_result = "miss"
@@ -1570,12 +1562,12 @@ class Pet(QWidget):
             if random.random() < 0.6:
                 self.say(self.line("miss"), 1.2)
         if sm["kind"] == "side":
-            ox, oy = self.hammer_head(270)
+            ox, oy = T_STRIKE
             hx, hy = self.x + f * ox, self.y + oy
             _, w = World.get(sm["wid"])
             clip = w.rect() if w else None
         else:
-            hx, hy = self.x + f * self.hammer_head(345)[0], self.y
+            hx, hy = self.x + f * T_STRIKE[0], self.y
             _, w = self.surface_win()
             # по окну — трещины по окну; по полу — по панели задач под ногами
             clip = w.rect() if w else QRect(int(hx - 200), int(hy), 400, 250)
@@ -1597,6 +1589,28 @@ class Pet(QWidget):
             return None
         prey = [p for p in pets if p is not self and not p.skin.smashes and not p.hidden]
         return min(prey, key=lambda p: abs(p.x - self.x) + abs(p.y - self.y), default=None)
+
+    def update_idle_sleep(self):
+        """Пользователь отошёл (не трогает мышь и клавиатуру) — спим; вернулся — просыпаемся."""
+        idle = platform_backend.idle_seconds()
+        if self.idle_sleep:
+            if idle < 1.0:
+                self.idle_sleep = False
+                if self.state == "sleep":
+                    self.set_state("idle", 1.5)
+                    self.squash = -0.2
+                    if random.random() < 0.6:
+                        self.say(self.line("wake"), 1.8)
+            elif self.state != "sleep" and self.state in CALM | {"chase", "hunt", "flee", "gloat"}:
+                self.set_state("sleep")  # разбудили (видео кончилось и т.п.) — досыпаем
+            return
+        if idle > IDLE_SLEEP and self.state in CALM | {"chase", "hunt", "flee", "gloat"} \
+                and not World.video_window():
+            self.idle_sleep = True
+            self.prey = None
+            self.set_state("sleep")  # без длительности — до возвращения пользователя
+            if random.random() < 0.5:
+                self.say(self.line("yawn"), 1.8)
 
     def raging(self):
         return self.skin.smashes and (self.rage_forever or self.t < self.rage_until)
@@ -1793,6 +1807,32 @@ class Pet(QWidget):
         v.get_bonked(d, power)
         if random.random() < 0.6:
             self.say(self.line("smash"), 1.0)
+
+    def block_hammer(self, hunter):
+        """Жертва поймала кувалду руками и отшвырнула Тагиллу."""
+        self.facing = 1 if hunter.x >= self.x else -1
+        self.set_state("block", 0.9)
+        self.squash = 0.35
+        for _ in range(10):
+            self.particles.append(Particle("spark", self.x + self.facing * 30 + rnd(-10, 10), self.y - rnd(40, 70),
+                                           rnd(-200, 200), rnd(-260, -80), rnd(0.5, 0.9), rnd(0.9, 1.4)))
+        self.say(self.line("block"), 1.6)
+        hunter.get_knocked_back(self.facing)
+
+    def get_knocked_back(self, d):
+        """Тагиллу отбросили: летит кувырком назад, потом лежит со звёздочками."""
+        self.hit_result = None
+        self.hunt_cd = 4.0
+        self.leave_surface(0.5)
+        self.vx = d * rnd(750, 1050)
+        self.vy = -rnd(550, 750)
+        self.spin = d * rnd(300, 520)
+        self.bounces = 1
+        self.dizzy_next = True
+        self.squash = -0.3
+        self.shake_t = 0.4
+        self.set_state("thrown")
+        self.say(self.line("blocked"), 1.6)
 
     def get_bonked(self, d, power=1.0):
         """По этому маскоту прилетело кувалдой: улетает кувырком и отскакивает от пола."""
@@ -2021,6 +2061,8 @@ class Pet(QWidget):
             return "dizzy"
         if st in ("drag", "thrown", "flee"):
             return "surprised"
+        if st == "block":
+            return "happy"
         if st == "hold":
             return "surprised" if len(self.grip_hits) >= 3 else "happy"
         return "closed" if self.blink > 0 else "open"
@@ -2070,7 +2112,7 @@ class Pet(QWidget):
             px(-8, top + ph * 1.5, 2, 2, BODY)
             px(6, top + (1 - ph) * 1.5, 2, 2, BODY)
         else:
-            arms_up = st in ("drag", "happy", "jump", "thrown", "hold") or hanging \
+            arms_up = st in ("drag", "happy", "jump", "thrown", "hold", "block") or hanging \
                 or (st in ("fall", "leap") and self.vy < 0)
             ay = top + (0 if arms_up else 3)
             if walking:
@@ -2116,103 +2158,39 @@ class Pet(QWidget):
                 a = self.t * 4 + i * 2.09
                 self.star(p, math.cos(a) * 7 * P, (top - 2) * P + math.sin(a) * 1.5 * P, 4)
 
+    def tagilla_frame(self, st, hanging):
+        """Какой кадр Тагиллы показать сейчас."""
+        if hanging or st in ("drag", "hold", "cling"):
+            return "hang"
+        if st == "smash" and self.smash:
+            wind = 0.22 if self.smash["kind"] in ("victim", "cursor") else 0.45
+            return "windup" if self.state_t < wind else "strike"
+        if st in AIR:
+            return "jump"
+        if st in MOVING:
+            return "walk1" if int(self.leg_phase) % 2 else "walk2"
+        if st in ("sit", "ledge", "dizzy"):
+            return "sit"
+        if st == "sleep":
+            return "sleep"
+        if st in ("gloat", "happy"):
+            return "windup"  # победно задрал кувалду
+        return "idle"
+
     def draw_tagilla(self, p, st, hanging):
-        """Тагилла: спрайт по частям (верх, две ноги) + ближняя рука с кувалдой кодом."""
-        parts = tagilla_parts()
-        h = parts["h"]
-        leg_h = h - T_HIP
+        """Тагилла: целиком кадрами из спрайт-листа (нарисован GPT)."""
+        fr = tagilla_frames()
+        x, y, w, h, ax = fr["frames"][self.tagilla_frame(st, hanging)]
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)  # чёткие пиксели
-        sitting = st in ("sit", "sleep", "dizzy")
-        walking = st in MOVING
-        ph = int(self.leg_phase) % 2
-        bob = -1 if walking and ph else 0
-        # насколько опущен корпус: сидя — на полноги, на краю окна — ноги целиком свисают
-        body_dy = leg_h if st == "ledge" else (int(leg_h * 0.55) if sitting else bob)
-
-        def leg(img, x0, dx=0.0, dy=0.0, angle=0.0, sy=1.0):
-            p.save()
-            p.translate(x0 - T_CX + dx, -leg_h + body_dy + dy)
-            if angle:
-                p.rotate(angle)
-            if sy != 1.0:
-                p.scale(1, sy)
-            p.drawImage(0, 0, img)
-            p.restore()
-
-        # ноги
-        if hanging:
-            for i, (img, x0) in enumerate(((parts["back"], 0), (parts["front"], T_CX))):
-                leg(img, x0, angle=math.sin(self.leg_phase * 2 + i * 1.6) * 9)
-        elif st == "ledge":
-            for i, (img, x0) in enumerate(((parts["back"], 0), (parts["front"], T_CX))):
-                leg(img, x0, angle=math.sin(self.leg_phase * 2 + i * 1.7) * 6)
-        elif sitting:
-            leg(parts["back"], 0, sy=0.45)
-            leg(parts["front"], T_CX, dx=3, sy=0.45)
-        elif st in AIR:
-            leg(parts["back"], 0, dx=-2, dy=-3)
-            leg(parts["front"], T_CX, dx=2, dy=-5)
-        else:
-            lift_back, lift_front = (walking and ph == 0), (walking and ph == 1)
-            leg(parts["back"], 0, dx=(2 if lift_back else -1) if walking else 0, dy=-2 if lift_back else 0)
-            leg(parts["front"], T_CX, dx=(2 if lift_front else -1) if walking else 0, dy=-2 if lift_front else 0)
-
-        # голова, торс, дальняя рука
-        p.drawImage(-T_CX, -h + body_dy, parts["upper"])
-
-        # огоньки глаз в смотровой щели
-        raging = st in ("hunt", "smash", "gloat") and self.prey
-        if raging or st in ("happy", "drag", "thrown", "hold"):
-            col = T_RAGE if raging else T_GLOW
-            for gx, gy in T_VISOR:
-                p.fillRect(QRectF(gx, gy + body_dy, 2, 1.5), col)
-
-        # ближняя рука с кувалдой — поворачиваются вместе вокруг плеча;
-        # когда висит (на курсоре, на краю окна, в руке у пользователя) — рука вверх, кувалда за поясом
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        sx, sy = T_SHOULDER[0], T_SHOULDER[1] + body_dy
-        up = hanging or st in ("hold", "drag", "cling")
-        if up:
-            self.draw_hammer(p, -4, -48 + body_dy, 160 + math.sin(self.leg_phase) * 4, behind=True)
-            self.draw_arm(p, sx, sy, 180 - self.tilt)
-        else:
-            self.draw_hammer(p, sx, sy, self.hammer_a)
-            self.draw_arm(p, sx, sy, self.hammer_a)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
+        p.drawImage(QPointF(-ax, -h), fr["img"], QRectF(x, y, w, h))
         if st == "dizzy":
             for i in range(3):
                 a = self.t * 4 + i * 2.09
-                self.star(p, math.cos(a) * 22, -h - 6 + body_dy + math.sin(a) * 6, 4)
-
-    def draw_arm(self, p, x, y, angle):
-        """Ближняя рука Тагиллы от плеча (x, y): толстая, с тенью и окровавленным кулаком."""
-        p.save()
-        p.translate(x, y)
-        p.rotate(angle)
-        p.fillRect(QRectF(-6, -3, 12, 26), T_OUTLINE)
-        p.fillRect(QRectF(-5, -3, 10, 25), T_SKIN)
-        p.fillRect(QRectF(2, -3, 3, 25), T_SKIN_D)
-        p.fillRect(QRectF(-7, 20, 14, 12), T_OUTLINE)    # кулак
-        p.fillRect(QRectF(-6, 21, 12, 10), T_GLOVE)
-        p.fillRect(QRectF(-6, 21, 4, 3), T_GLOVE_L)
-        p.restore()
-
-    def draw_hammer(self, p, x, y, angle, behind=False):
-        """Кувалда; (x, y) — где её держит кулак (или где висит за поясом)."""
-        p.save()
-        p.translate(x, y)
-        p.rotate(angle)
-        grip = 0 if behind else 24  # в руке рукоять начинается у кулака
-        p.fillRect(QRectF(-2.5, grip - 2, 5, 52), T_OUTLINE)
-        p.fillRect(QRectF(-1.5, grip - 2, 3, 52), T_HANDLE)
-        p.fillRect(QRectF(-1.5, grip - 2, 1, 52), T_HANDLE_L)
-        hy = grip + 40
-        p.fillRect(QRectF(-11, hy - 1, 22, 18), T_OUTLINE)  # боёк
-        p.fillRect(QRectF(-10, hy, 20, 16), T_STEEL)
-        p.fillRect(QRectF(-10, hy, 20, 3), T_STEEL_L)
-        p.fillRect(QRectF(-10, hy + 13, 20, 3), T_STEEL_D)
-        p.restore()
+                self.star(p, math.cos(a) * 22, -h - 6 + math.sin(a) * 6, 4)
+        if st in ("hunt", "smash", "gloat") and self.prey and int(self.t * 6) % 2:
+            p.setPen(QColor(255, 60, 40))  # озверел
+            p.setFont(ui_font(12))
+            p.drawText(QPointF(-6, -h - 4), "!")
 
     def star(self, p, x, y, r):
         path = QPainterPath()
@@ -2297,9 +2275,9 @@ class Pet(QWidget):
         if (e.globalPosition() - self.press_pos).manhattanLength() > 5:
             self.leave_surface()
             self.cling = self.peek = self.leap = None
-            if self.fling in flings:
-                self.fling.finish()
-            self.fling = None
+            if self.cursor_fling in flings:
+                self.cursor_fling.finish()
+            self.cursor_fling = None
             self.peek_cd = 15
             self.set_state("drag")
             self.mouse_hist = []

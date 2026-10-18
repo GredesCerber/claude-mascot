@@ -3,9 +3,11 @@
 Без KDE список окон просто пустой — маскот гуляет по низу экрана.
 """
 import fcntl
+import glob
 import json
 import os
 import struct
+import time
 
 from PyQt6.QtCore import QObject, QTimer, pyqtClassInfo, pyqtSlot
 from PyQt6.QtDBus import (QDBusConnection, QDBusInterface, QDBusMessage,
@@ -21,6 +23,7 @@ AUDIO_PLAYERS = {"spotify", "elisa", "rhythmbox", "strawberry", "audacious", "am
 
 _keep = []  # держим ссылки, чтобы сборщик мусора не убил мост и таймер
 _pointer = None  # виртуальный указатель для удара по курсору (None — ещё не создан, False — нельзя)
+_last_input = time.monotonic()  # когда пользователь последний раз трогал мышь или клавиатуру
 
 
 def setup_env():
@@ -53,15 +56,20 @@ def start(app, world):
         def cursor(self, payload):
             try:
                 x, y = payload.split(",")
-                world.cursor = (float(x), float(y))
+                pos = (float(x), float(y))
             except ValueError:
-                pass
+                return
+            if world.cursor is None or abs(pos[0] - world.cursor[0]) + abs(pos[1] - world.cursor[1]) > 1:
+                note_input()
+            world.cursor = pos
 
     bridge = Bridge()
     bus.registerObject("/", bridge, QDBusConnection.RegisterOption.ExportAllSlots)
     start_kwin_script()
     app.aboutToQuit.connect(stop_kwin_script)
     app.aboutToQuit.connect(release_cursor)
+
+    watch_input_devices()
 
     media = QTimer()
     media.timeout.connect(lambda: poll_media(world))
@@ -144,6 +152,61 @@ def release_cursor():
     if _pointer:
         _pointer.close()
     _pointer = None
+
+
+def note_input():
+    global _last_input
+    _last_input = time.monotonic()
+
+
+def idle_seconds():
+    """Сколько секунд пользователь не трогал мышь и клавиатуру."""
+    return time.monotonic() - _last_input
+
+
+def watch_input_devices():
+    """Следим за клавиатурами и мышами через /dev/input — только за ФАКТОМ событий.
+
+    Wayland не говорит приложениям, бездействует ли пользователь, а KDE не отдаёт
+    GetSessionIdleTime. Содержимое событий (какие клавиши) сразу выбрасываем, не храним.
+    Нет доступа к /dev/input — остаётся только движение курсора от KWin.
+    """
+    from PyQt6.QtCore import QSocketNotifier
+    ioc_read = 2
+    eviocgname = (ioc_read << 30) | (256 << 16) | (ord("E") << 8) | 0x06
+    eviocgbit_key = (ioc_read << 30) | (96 << 16) | (ord("E") << 8) | (0x20 + 1)  # EV_KEY
+    key_a, btn_left = 30, 0x110
+
+    def has(bits, code):
+        return bits[code // 8] & (1 << (code % 8))
+
+    def drain(fd):
+        try:
+            while os.read(fd, 4096):
+                pass
+        except OSError:
+            pass
+        note_input()
+
+    for path in sorted(glob.glob("/dev/input/event*")):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            name = bytearray(256)
+            fcntl.ioctl(fd, eviocgname, name)
+            bits = bytearray(96)
+            fcntl.ioctl(fd, eviocgbit_key, bits)
+        except OSError:
+            os.close(fd)
+            continue
+        if b"claude-mascot" in bytes(name) or not (has(bits, key_a) or has(bits, btn_left)):
+            os.close(fd)  # не клавиатура и не мышь — или наш собственный виртуальный указатель
+            continue
+        notifier = QSocketNotifier(fd, QSocketNotifier.Type.Read)
+        notifier.activated.connect(lambda _sock=None, fd=fd: drain(fd))
+        _keep.append(notifier)
 
 
 def kwin_scripting():
