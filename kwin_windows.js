@@ -34,6 +34,16 @@ function send() {
     callDBus(SVC, "/", SVC, "update", JSON.stringify({windows: out, areas: areas}));
 }
 
+// Под XWayland Qt видит курсор, только пока тот над X11-окнами, — поэтому шлём его отсюда.
+var lastCursor = 0;
+function sendCursor() {
+    const now = Date.now();
+    if (now - lastCursor < 12) return;  // не чаще ~80 раз в секунду
+    lastCursor = now;
+    const c = workspace.cursorPos;
+    callDBus(SVC, "/", SVC, "cursor", Math.round(c.x) + "," + Math.round(c.y));
+}
+
 function hook(w) {
     w.frameGeometryChanged.connect(send);
     w.minimizedChanged.connect(send);
@@ -48,4 +58,6 @@ workspace.windowActivated.connect(send);
 workspace.currentDesktopChanged.connect(send);
 if (workspace.screensChanged) workspace.screensChanged.connect(send);
 if (workspace.stackingOrderChanged) workspace.stackingOrderChanged.connect(send);
+if (workspace.cursorPosChanged) workspace.cursorPosChanged.connect(sendCursor);
 send();
+sendCursor();

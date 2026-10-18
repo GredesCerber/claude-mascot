@@ -46,6 +46,14 @@ def start(app, world):
             except (ValueError, KeyError, TypeError):
                 pass
 
+        @pyqtSlot(str)
+        def cursor(self, payload):
+            try:
+                x, y = payload.split(",")
+                world.cursor = (float(x), float(y))
+            except ValueError:
+                pass
+
     bridge = Bridge()
     bus.registerObject("/", bridge, QDBusConnection.RegisterOption.ExportAllSlots)
     start_kwin_script()

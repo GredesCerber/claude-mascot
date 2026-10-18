@@ -59,6 +59,8 @@ T_STEEL_L = QColor("#8a939b")
 GRAVITY = 2200.0
 WALK_SPEED = 55.0
 RUN_SPEED = 150.0
+RAGE_PAUSE = (10.0, 120.0)  # Тагилла: сколько секунд спокоен между приступами буйства
+RAGE_LENGTH = (15.0, 40.0)  # ...и сколько длится приступ
 CLING_OFF = 26  # насколько центр маскота отстоит от края окна, когда он висит
 SHAKE_OFF_HITS = 7  # сколько резких рывков туда-сюда за 1.5 с нужно, чтобы стряхнуть
 
@@ -101,6 +103,7 @@ LINES = {
     "gloat": ["ха", "следующий"],
     "miss": ["мимо"],
     "taunt_up": ["слезай!"],
+    "calm": ["устал"],
 }
 
 TAGILLA_LINES = {
@@ -125,6 +128,7 @@ TAGILLA_LINES = {
     "gloat": ["ГРА-ХА-ХА", "ещё хочешь?", "лежать", "следующий", "*довольно пыхтит*"],
     "miss": ["ГРР! мимо", "стой!", "не уйдёшь!"],
     "taunt_up": ["слезай!", "я подожду", "ГРРР", "достану!"],
+    "calm": ["*тяжело дышит*", "...устал", "ладно, живи пока", "перекур"],
 }
 
 
@@ -159,6 +163,7 @@ CALM = {"idle", "walk", "run", "sit", "land", "ledge", "sleep"}
 
 pets = []
 overlays = []  # трещины от ударов кувалдой
+flings = []    # курсоры, которые сейчас летят от удара
 
 
 def saved_skin():
@@ -202,6 +207,7 @@ class World:
     playing = []  # ключи плееров, которые сейчас играют
 
     areas = []    # рабочие области мониторов без панелей (пусто — берём у Qt)
+    cursor = None  # где курсор по данным платформы (None — спрашиваем у Qt)
 
     @classmethod
     def set_state(cls, data):
@@ -247,6 +253,14 @@ class World:
                 if score > best_score:
                     best, best_score = w, score
         return best
+
+
+def cursor_pos():
+    """Где сейчас курсор. На KDE Wayland Qt (через XWayland) видит его только над X11-окнами,
+    поэтому там позицию присылает KWin-скрипт."""
+    if World.cursor is not None:
+        return QPointF(*World.cursor)
+    return QPointF(QCursor.pos())
 
 
 # ---------------------------------------------------------------- маскот
@@ -350,6 +364,126 @@ class CrackOverlay(QWidget):
         p.end()
 
 
+class CursorFling(QWidget):
+    """Удар кувалдой по курсору: курсор улетает по дуге и отскакивает от краёв экрана.
+
+    На KDE Wayland приложению можно двигать курсор, только пока он над его окном, поэтому
+    невидимое окно-«ловушка» стоит под курсором ещё до удара и летит вместе с ним.
+    На Windows это не нужно, но и не мешает.
+    """
+    SIZE = 360
+    FLIGHT = 0.65
+
+    def __init__(self, start):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool
+                            | Qt.WindowType.WindowDoesNotAcceptFocus
+                            | platform_backend.window_flags())
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.resize(self.SIZE, self.SIZE)
+        self.p = [start.x(), start.y()]
+        self.v = None       # None — ещё не ударили, просто стоим под курсором
+        self.wait = 0.0     # пауза после удара, пока окно не «поймало» курсор
+        self.life = 0.0
+        self.flight = 0.0
+        self.trail = []
+        self.center_on()
+        self.show()
+        self.clock = QElapsedTimer()
+        self.clock.start()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.step)
+        self.timer.start(16)
+        flings.append(self)
+
+    def center_on(self):
+        self.move(int(self.p[0] - self.SIZE / 2), int(self.p[1] - self.SIZE / 2))
+
+    def launch(self, vx, vy, wait=0.0):
+        self.v = [vx, vy]
+        self.wait = wait
+
+    def finish(self):
+        self.timer.stop()
+        if self in flings:
+            flings.remove(self)
+        self.close()
+
+    def step(self):
+        dt = min(self.clock.restart() / 1000.0, 0.05)
+        self.life += dt
+        if self.v is None:  # ждём удара, держимся под курсором
+            c = cursor_pos()
+            self.p = [c.x(), c.y()]
+            self.center_on()
+            if self.life > 1.5:
+                self.finish()
+            return
+        if self.wait > 0:
+            self.wait -= dt
+            return
+        self.flight += dt
+        self.v[1] += 2600 * dt
+        self.p[0] += self.v[0] * dt
+        self.p[1] += self.v[1] * dt
+        area = QRect()
+        for s in QApplication.screens():
+            area = area.united(s.geometry())
+        if not area.left() + 2 <= self.p[0] <= area.right() - 2:
+            self.p[0] = max(area.left() + 2.0, min(area.right() - 2.0, self.p[0]))
+            self.v[0] = -self.v[0] * 0.5
+        if self.p[1] > area.bottom() - 2:
+            self.p[1] = area.bottom() - 2.0
+            self.v[1] = -self.v[1] * 0.35
+            self.v[0] *= 0.7
+        elif self.p[1] < area.top() + 2:
+            self.p[1] = area.top() + 2.0
+            self.v[1] = abs(self.v[1]) * 0.3
+        self.trail.append((self.p[0], self.p[1], self.flight))
+        self.trail = self.trail[-14:]
+        QCursor.setPos(int(self.p[0]), int(self.p[1]))
+        World.cursor = (self.p[0], self.p[1])
+        self.center_on()
+        self.update()
+        if self.flight >= self.FLIGHT:
+            self.finish()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ox, oy = self.x(), self.y()
+        prev = None
+        for x, y, t in self.trail:  # след от улетающего курсора
+            k = max(0.0, 1 - (self.flight - t) / 0.25)
+            if prev and k > 0:
+                p.setPen(QPen(QColor(255, 255, 255, int(170 * k)), 3 * k + 0.5))
+                p.drawLine(QPointF(prev[0] - ox, prev[1] - oy), QPointF(x - ox, y - oy))
+            prev = (x, y)
+        if self.v is not None and self.flight < 0.3:
+            for i in range(4):  # звёздочки от удара
+                a = self.flight * 9 + i * 1.57
+                p.save()
+                p.setOpacity(1 - self.flight / 0.3)
+                self.parent_star(p, self.p[0] - ox + math.cos(a) * 18, self.p[1] - oy + math.sin(a) * 10)
+                p.restore()
+        p.end()
+
+    @staticmethod
+    def parent_star(p, x, y, r=4):
+        path = QPainterPath()
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            rr = r if i % 2 == 0 else r * 0.45
+            pt = QPointF(x + math.cos(a) * rr * 1.6, y + math.sin(a) * rr * 1.6)
+            path.moveTo(pt) if i == 0 else path.lineTo(pt)
+        path.closeSubpath()
+        p.fillPath(path, QColor("#FFD84A"))
+
+
 class Pet(QWidget):
     def __init__(self, x=None, skin=None):
         super().__init__()
@@ -412,6 +546,10 @@ class Pet(QWidget):
         self.hit_result = None  # Тагилла: чем кончился последний удар по маскоту
         self.spin = 0.0        # кувыркается в полёте после удара, град/с
         self.bounces = 0       # сколько раз ещё отскочит от пола
+        self.fling = None      # Тагилла: окно-ловушка под курсором перед ударом по нему
+        self.rage_until = 0.0  # Тагилла: до какого self.t длится приступ буйства
+        self.next_rage = None  # ...и когда начнётся следующий
+        self.rage_forever = False  # буйство без перерыва (галочка в меню)
         self.grab_cd = 0.0    # пауза, прежде чем снова схватить курсор
         self.hold_prev = None  # прошлая позиция курсора, когда висим на нём
         self.cv = (0.0, 0.0)  # сглаженная скорость курсора
@@ -493,7 +631,7 @@ class Pet(QWidget):
                 self.hunt_cd = 3.2  # даёт жертве очухаться и чуть-чуть форы
                 self.say(self.line("gloat"), 1.6)
                 return
-            if self.hunt_cd <= 0 and self.hunt_target():
+            if self.raging() and self.hunt_cd <= 0 and self.hunt_target():
                 self.start_hunt()
                 return
         elif self.hunter_near():
@@ -885,7 +1023,7 @@ class Pet(QWidget):
         self.state_t += dt
         self.peek_cd -= dt
         self.grab_cd -= dt
-        cur = QPointF(QCursor.pos())
+        cur = cursor_pos()
 
         # моргание
         self.next_blink -= dt
@@ -919,9 +1057,10 @@ class Pet(QWidget):
 
         # Тагилла видит другого маскота — охота; тот видит Тагиллу — бежать
         self.hunt_cd -= dt
+        self.update_rage()
         if self.state in CALM or self.state in ("chase", "peek"):
             if self.skin.smashes:
-                if self.hunt_cd <= 0 and self.hunt_target():
+                if self.raging() and self.hunt_cd <= 0 and self.hunt_target():
                     self.start_hunt()
             elif self.hunter_near():
                 self.start_flee()
@@ -1008,7 +1147,8 @@ class Pet(QWidget):
             else:
                 self.tilt += (max(-20, min(20, self.vx * 0.03)) - self.tilt) * min(1, dt * 6)
 
-            if self.chase and self.try_catch_cursor(cur):
+            if self.chase and (self.try_hit_cursor_air(cur) if self.skin.smashes
+                               else self.try_catch_cursor(cur)):
                 pass
             elif st == "jump" and self.skin.smashes and self.prey and self.try_air_bonk():
                 pass
@@ -1157,7 +1297,9 @@ class Pet(QWidget):
                 return
             # курсор прямо над головой — подпрыгиваем, чтобы поймать
             rise = ground - cur.y()
-            if abs(gap) < 50 and 40 < rise < 320:
+            if self.skin.smashes and self.grab_cd > 0:
+                pass  # только что вмазал — сперва позлорадствовать
+            elif abs(gap) < (90 if self.skin.smashes else 50) and (130 if self.skin.smashes else 40) < rise < 320:
                 self.chase_cd = 1.4
                 self.leave_surface(0.2)
                 self.vx, self.vy = gap * 2, -math.sqrt(2 * GRAVITY * (rise - 30))
@@ -1166,6 +1308,8 @@ class Pet(QWidget):
                 return
 
         # бег с разгоном: чем дальше курсор, тем быстрее
+        if self.skin.smashes:  # Тагилле надо встать на длину кувалды, а не под курсор
+            gap = gap - math.copysign(60, gap) if abs(gap) > 60 else 0.0
         want = 0.0 if abs(gap) < 14 else math.copysign(min(abs(gap) * 3.0, 700.0 * self.skin.speed), gap)
         step = 2600 * dt
         self.chase_v += max(-step, min(step, want - self.chase_v))
@@ -1194,7 +1338,43 @@ class Pet(QWidget):
             ground = self.floor_y()
         self.y = ground
 
-        self.try_catch_cursor(cur)
+        if self.skin.smashes:
+            self.try_hit_cursor(cur)
+        else:
+            self.try_catch_cursor(cur)
+
+    def try_hit_cursor(self, cur):
+        """Тагилла в погоне: курсор на расстоянии удара — замах кувалдой."""
+        if self.grab_cd > 0 or self.state != "chase":
+            return False
+        gap = cur.x() - self.x
+        if not (15 < abs(gap) < 120 and -125 < cur.y() - self.y < 10):
+            return False
+        self.facing = 1 if gap > 0 else -1
+        self.start_smash("cursor")
+        self.fling = CursorFling(cur)  # заранее встаём «ловушкой» под курсор
+        return True
+
+    def try_hit_cursor_air(self, cur):
+        """Тагилла подпрыгнул к курсору над головой — бьёт в прыжке."""
+        if self.grab_cd > 0 or math.hypot(cur.x() - self.x, cur.y() - (self.y - 70)) > 75:
+            return False
+        d = 1 if cur.x() >= self.x else -1
+        self.hammer_a = 230
+        CursorFling(cur).launch(d * rnd(1700, 2300), -rnd(900, 1200), wait=0.08)
+        self.cursor_hit_fx(cur)
+        return True
+
+    def cursor_hit_fx(self, cur):
+        self.hit_result = "hit"
+        self.grab_cd = 3.0
+        self.shake_t = 0.3
+        self.squash = 0.25
+        for _ in range(8):
+            self.particles.append(Particle("spark", cur.x() + rnd(-10, 10), cur.y() + rnd(-10, 10),
+                                           rnd(-180, 180), rnd(-240, -60), rnd(0.4, 0.7), rnd(0.8, 1.3)))
+        if random.random() < 0.7:
+            self.say(self.line("smash"), 1.0)
 
     def try_catch_cursor(self, cur):
         if self.grab_cd > 0 or self.state == "hold":
@@ -1299,8 +1479,8 @@ class Pet(QWidget):
         t, sm, f = self.state_t, self.smash, self.facing
         # по живой цели бьёт быстро и с выпадом, иначе она успевает убежать
         end, wind, strike = {"side": (270, 0.45, 0.13), "down": (315, 0.45, 0.13),
-                             "victim": (290, 0.22, 0.08)}[sm["kind"]]
-        if sm["kind"] == "victim" and t < wind + strike:
+                             "victim": (290, 0.22, 0.08), "cursor": (280, 0.22, 0.08)}[sm["kind"]]
+        if sm["kind"] in ("victim", "cursor") and t < wind + strike:
             lo, hi = self.bounds()
             self.x = max(lo, min(hi, self.x + f * 240 * dt))
             self.leg_phase += dt * 20
@@ -1322,6 +1502,23 @@ class Pet(QWidget):
 
     def smash_impact(self):
         sm, f = self.smash, self.facing
+        if sm["kind"] == "cursor":
+            cur = cursor_pos()
+            fling, self.fling = self.fling, None
+            if abs(cur.x() - (self.x + f * 68)) < 95 and abs(cur.y() - (self.y - 40)) < 90:
+                if fling in flings:
+                    fling.launch(f * rnd(1800, 2400), -rnd(700, 1100))
+                else:
+                    CursorFling(cur).launch(f * rnd(1800, 2400), -rnd(700, 1100), wait=0.08)
+                self.cursor_hit_fx(cur)
+                return
+            if fling in flings:
+                fling.finish()
+            self.hit_result = "miss"
+            self.grab_cd = 1.0
+            sm["kind"] = "down"
+            if random.random() < 0.6:
+                self.say(self.line("miss"), 1.2)
         if sm["kind"] == "victim":
             v = sm["victim"]
             hx = self.x + f * 68
@@ -1364,6 +1561,36 @@ class Pet(QWidget):
         prey = [p for p in pets if p is not self and not p.skin.smashes and not p.hidden]
         return min(prey, key=lambda p: abs(p.x - self.x) + abs(p.y - self.y), default=None)
 
+    def raging(self):
+        return self.skin.smashes and (self.rage_forever or self.t < self.rage_until)
+
+    def update_rage(self):
+        """Приступы буйства: случайная пауза RAGE_PAUSE, потом звереет на RAGE_LENGTH."""
+        if not self.skin.smashes or self.rage_forever:
+            return
+        if self.next_rage is None:
+            self.next_rage = self.t + rnd(*RAGE_PAUSE)
+        if self.t >= self.next_rage and not self.raging():
+            if self.hunt_target():
+                self.start_rage()
+            else:
+                self.next_rage = self.t + 5  # бить некого — проверим попозже
+
+    def start_rage(self):
+        self.rage_until = self.t + rnd(*RAGE_LENGTH)
+        self.next_rage = self.rage_until + rnd(*RAGE_PAUSE)
+        self.hunt_cd = 0.0
+        self.shake_t = 0.3
+        self.say(self.line("rage"), 1.4)
+
+    def toggle_rage_forever(self, on):
+        self.rage_forever = on
+        if on:
+            self.start_rage()
+        else:
+            self.rage_until = self.t  # приступ кончается прямо сейчас
+            self.next_rage = self.t + rnd(*RAGE_PAUSE)
+
     def hunter_near(self):
         if self.skin.smashes:
             return None
@@ -1397,9 +1624,11 @@ class Pet(QWidget):
 
     def tick_hunt(self, dt):
         v = self.hunt_target()
-        if v is None:
+        if v is None or not self.raging():
+            if v is not None:
+                self.say(self.line("calm"), 1.8)  # приступ прошёл
             self.prey = None
-            self.set_state("idle", 1)
+            self.set_state("idle", 1.5)
             return
         self.prey = v
         self.chase_cd -= dt
@@ -2033,6 +2262,9 @@ class Pet(QWidget):
         if (e.globalPosition() - self.press_pos).manhattanLength() > 5:
             self.leave_surface()
             self.cling = self.peek = self.leap = None
+            if self.fling in flings:
+                self.fling.finish()
+            self.fling = None
             self.peek_cd = 15
             self.set_state("drag")
             self.mouse_hist = []
@@ -2100,6 +2332,10 @@ class Pet(QWidget):
         m.addSeparator()
         if self.skin.smashes:
             m.addAction("Крушить!").triggered.connect(self.plan_smash)
+            m.addAction("Взбеситься сейчас").triggered.connect(self.start_rage)
+            rage = QAction("Буйство без перерыва", m, checkable=True, checked=self.rage_forever)
+            rage.triggered.connect(self.toggle_rage_forever)
+            m.addAction(rage)
         who = m.addMenu("Персонаж")
         for name, skin in SKINS.items():
             act = QAction(skin.title, who, checkable=True, checked=skin is self.skin)

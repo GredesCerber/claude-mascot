@@ -146,6 +146,20 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 - Фразы: `spotted`, `flee`, `bonked`, `dodge`, `relief` (жертва); `rage`, `gloat`, `miss`,
   `taunt_up` (Тагилла).
 - Двоих удобно заспавнить через ПКМ → «Позвать друга» → нужный персонаж.
+- Охотится Тагилла **только во время приступа буйства** (`raging()`): случайная пауза
+  `RAGE_PAUSE` (10–120 с), потом звереет на `RAGE_LENGTH` (15–40 с) — `update_rage()`.
+  В меню Тагиллы: «Взбеситься сейчас» (`start_rage`) и галочка «Буйство без перерыва»
+  (`rage_forever`).
+
+## Тагилла и курсор
+
+В режиме «Бегать за курсором» Клод хватается за курсор (`hold`), а Тагилла бьёт по нему
+кувалдой (`try_hit_cursor` → `start_smash("cursor")`, в прыжке — `try_hit_cursor_air`), и
+курсор по дуге улетает в сторону — `CursorFling`.
+- На **Windows** курсор двигается напрямую (`QCursor.setPos` → `SetCursorPos`).
+- На **KDE Wayland** приложению можно двигать курсор, только пока он над его собственным
+  окном. Поэтому `CursorFling` — невидимое окно-«ловушка», которое ставится под курсор ещё
+  на замахе и летит вместе с ним. Не убирай его, иначе на Linux курсор перестанет улетать.
 
 ## Как поменять поведение
 
@@ -203,6 +217,10 @@ powershell -ExecutionPolicy Bypass -File install.ps1
   Для отладки запускай через `python.exe` из venv, тогда ошибки будут видны.
 - `.ps1`-файлы должны быть в **UTF-8 с BOM** — Windows PowerShell 5.1 без BOM читает их в
   ANSI и ломает кириллицу. Сохраняй их так же.
+- **Linux, курсор.** Под XWayland `QCursor.pos()` правдив, только пока курсор над X11-окнами
+  (над обычными Wayland-окнами он «залипает» на старом месте). Поэтому позицию курсора шлёт
+  KWin-скрипт (`sendCursor` → слот `cursor` моста → `World.cursor`), а в коде везде
+  `cursor_pos()`, а не `QCursor.pos()`.
 - **Linux, Wayland не даёт окнам двигать себя сами**, поэтому `QT_QPA_PLATFORM=xcb` (через
   XWayland) и флаг `X11BypassWindowManagerHint` — окно поверх всего, даже полноэкранного.
 - Под XWayland Qt **не знает про панель Plasma** (`availableGeometry()` = весь экран),
