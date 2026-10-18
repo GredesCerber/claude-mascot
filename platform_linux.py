@@ -2,8 +2,10 @@
 
 Без KDE список окон просто пустой — маскот гуляет по низу экрана.
 """
+import fcntl
 import json
 import os
+import struct
 
 from PyQt6.QtCore import QObject, QTimer, pyqtClassInfo, pyqtSlot
 from PyQt6.QtDBus import (QDBusConnection, QDBusInterface, QDBusMessage,
@@ -18,6 +20,7 @@ AUDIO_PLAYERS = {"spotify", "elisa", "rhythmbox", "strawberry", "audacious", "am
                  "yandex-music", "quodlibet", "gnome-music"}
 
 _keep = []  # держим ссылки, чтобы сборщик мусора не убил мост и таймер
+_pointer = None  # виртуальный указатель для удара по курсору (None — ещё не создан, False — нельзя)
 
 
 def setup_env():
@@ -58,6 +61,7 @@ def start(app, world):
     bus.registerObject("/", bridge, QDBusConnection.RegisterOption.ExportAllSlots)
     start_kwin_script()
     app.aboutToQuit.connect(stop_kwin_script)
+    app.aboutToQuit.connect(release_cursor)
 
     media = QTimer()
     media.timeout.connect(lambda: poll_media(world))
@@ -65,6 +69,81 @@ def start(app, world):
     poll_media(world)
     _keep.extend([bridge, media])
     return True
+
+
+class VirtualPointer:
+    """Виртуальное «абсолютное» устройство-указатель через /dev/uinput — как планшет в виртуалке.
+
+    Wayland не даёт приложениям двигать курсор, а событиям от устройства ввода KWin подчиняется:
+    координата устройства 0..ширина-1 ложится на всю ширину всех мониторов вместе.
+    Нужен доступ на запись к /dev/uinput (группа input; в Nobara/Fedora со Steam он обычно есть).
+    """
+    UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_ABSBIT = 0x40045564, 0x40045565, 0x40045567
+    UI_DEV_CREATE, UI_DEV_DESTROY = 0x5501, 0x5502
+    EV_SYN, EV_KEY, EV_ABS, BTN_LEFT = 0, 1, 3, 0x110
+
+    def __init__(self):
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtWidgets import QApplication
+        area = QRect()
+        for s in QApplication.screens():
+            area = area.united(s.geometry())
+        self.left, self.top = area.left(), area.top()
+        self.w, self.h = area.width(), area.height()
+        self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            for ev in (self.EV_KEY, self.EV_ABS, self.EV_SYN):
+                fcntl.ioctl(self.fd, self.UI_SET_EVBIT, ev)
+            fcntl.ioctl(self.fd, self.UI_SET_KEYBIT, self.BTN_LEFT)  # иначе это не «мышь»
+            for axis in (0, 1):
+                fcntl.ioctl(self.fd, self.UI_SET_ABSBIT, axis)
+            absmax = [0] * 64
+            absmax[0], absmax[1] = self.w - 1, self.h - 1
+            os.write(self.fd, struct.pack("80sHHHHi", b"claude-mascot pointer", 0x06, 0x1234, 0x5678, 1, 0)
+                     + struct.pack("64i", *absmax) + struct.pack("64i", *[0] * 64) * 3)
+            fcntl.ioctl(self.fd, self.UI_DEV_CREATE)
+        except OSError:
+            os.close(self.fd)
+            raise
+
+    def move(self, x, y):
+        x = max(0, min(self.w - 1, int(x - self.left)))
+        y = max(0, min(self.h - 1, int(y - self.top)))
+        ev = "llHHi"
+        os.write(self.fd, struct.pack(ev, 0, 0, self.EV_ABS, 0, x) + struct.pack(ev, 0, 0, self.EV_ABS, 1, y)
+                 + struct.pack(ev, 0, 0, self.EV_SYN, 0, 0))
+
+    def close(self):
+        try:
+            fcntl.ioctl(self.fd, self.UI_DEV_DESTROY)
+        finally:
+            os.close(self.fd)
+
+
+def prepare_cursor():
+    """Заранее создать виртуальный указатель (системе нужно ~0.1–0.3 с, чтобы его подхватить)."""
+    global _pointer
+    if _pointer is None:
+        try:
+            _pointer = VirtualPointer()
+        except OSError:
+            _pointer = False  # нет доступа к /dev/uinput — курсор двигать не получится
+    return bool(_pointer)
+
+
+def move_cursor(x, y):
+    if prepare_cursor():
+        _pointer.move(x, y)
+    else:
+        from PyQt6.QtGui import QCursor
+        QCursor.setPos(int(x), int(y))  # на Wayland сработает, только если курсор над нашим окном
+
+
+def release_cursor():
+    global _pointer
+    if _pointer:
+        _pointer.close()
+    _pointer = None
 
 
 def kwin_scripting():

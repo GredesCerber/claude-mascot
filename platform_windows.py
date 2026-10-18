@@ -73,6 +73,15 @@ def setup_env():
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 
 
+def prepare_cursor():
+    return True
+
+
+def move_cursor(x, y):
+    from PyQt6.QtGui import QCursor
+    QCursor.setPos(int(x), int(y))  # SetCursorPos
+
+
 def window_flags():
     from PyQt6.QtCore import Qt
     return Qt.WindowType(0)

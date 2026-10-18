@@ -367,9 +367,9 @@ class CrackOverlay(QWidget):
 class CursorFling(QWidget):
     """Удар кувалдой по курсору: курсор улетает по дуге и отскакивает от краёв экрана.
 
-    На KDE Wayland приложению можно двигать курсор, только пока он над его окном, поэтому
-    невидимое окно-«ловушка» стоит под курсором ещё до удара и летит вместе с ним.
-    На Windows это не нужно, но и не мешает.
+    Само окно — только след от курсора, прозрачное для мыши. Двигает курсор платформа:
+    на Windows — SetCursorPos, на Linux — виртуальный указатель через /dev/uinput
+    (Wayland не даёт приложениям двигать курсор иначе).
     """
     SIZE = 360
     FLIGHT = 0.65
@@ -379,15 +379,17 @@ class CursorFling(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool
+                            | Qt.WindowType.WindowTransparentForInput
                             | Qt.WindowType.WindowDoesNotAcceptFocus
                             | platform_backend.window_flags())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(self.SIZE, self.SIZE)
+        platform_backend.prepare_cursor()
         self.p = [start.x(), start.y()]
         self.v = None       # None — ещё не ударили, просто стоим под курсором
-        self.wait = 0.0     # пауза после удара, пока окно не «поймало» курсор
+        self.wait = 0.0     # пауза после удара (чтобы система успела подхватить устройство)
         self.life = 0.0
         self.flight = 0.0
         self.trail = []
@@ -445,7 +447,7 @@ class CursorFling(QWidget):
             self.v[1] = abs(self.v[1]) * 0.3
         self.trail.append((self.p[0], self.p[1], self.flight))
         self.trail = self.trail[-14:]
-        QCursor.setPos(int(self.p[0]), int(self.p[1]))
+        platform_backend.move_cursor(self.p[0], self.p[1])
         World.cursor = (self.p[0], self.p[1])
         self.center_on()
         self.update()
@@ -1299,7 +1301,7 @@ class Pet(QWidget):
             rise = ground - cur.y()
             if self.skin.smashes and self.grab_cd > 0:
                 pass  # только что вмазал — сперва позлорадствовать
-            elif abs(gap) < (90 if self.skin.smashes else 50) and (130 if self.skin.smashes else 40) < rise < 320:
+            elif abs(gap) < (90 if self.skin.smashes else 50) and (130 if self.skin.smashes else 40) < rise < 1600:  # хоть до верха экрана
                 self.chase_cd = 1.4
                 self.leave_surface(0.2)
                 self.vx, self.vy = gap * 2, -math.sqrt(2 * GRAVITY * (rise - 30))
@@ -1352,7 +1354,7 @@ class Pet(QWidget):
             return False
         self.facing = 1 if gap > 0 else -1
         self.start_smash("cursor")
-        self.fling = CursorFling(cur)  # заранее встаём «ловушкой» под курсор
+        self.fling = CursorFling(cur)  # след от курсора; заодно готовим, чем его двигать
         return True
 
     def try_hit_cursor_air(self, cur):
@@ -2365,6 +2367,8 @@ class Pet(QWidget):
 
     def toggle_chase(self, on):
         self.chase = on
+        if on and self.skin.smashes:
+            platform_backend.prepare_cursor()  # Тагилла будет бить по курсору
         if on:
             self.say("сейчас догоню!", 1.5)
             if self.state in GROUNDED:
