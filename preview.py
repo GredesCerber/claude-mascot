@@ -115,7 +115,7 @@ for i, (name, setup) in enumerate(POSES):
     pet.x, pet.y, pet.vx, pet.vy = 150.0, 800.0, 0.0, 0.0
     pet.surface = pet.cling = pet.peek = None
     pet.tilt = pet.squash = pet.squash_v = 0.0
-    pet.hammer_a = -45.0
+    pet.hammer_a = -15.0
     setup()
     for _ in range(TICKS.get(name, 30)):
         pet.tick()

@@ -47,6 +47,7 @@ stop_running() {
 echo "→ Копирую файлы в $DEST"
 mkdir -p "$DEST"
 cp "$SRC/mascot.py" "$SRC/platform_linux.py" "$SRC/kwin_windows.js" "$DEST/"
+mkdir -p "$DEST/assets" && cp "$SRC/assets/tagilla.png" "$DEST/assets/"
 
 if [ ! -x "$DEST/venv/bin/python" ]; then
     echo "→ Создаю виртуальное окружение"
