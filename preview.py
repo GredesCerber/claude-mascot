@@ -56,6 +56,8 @@ def pose_happy():
 
 def pose_drag():
     pet.set_state("drag")
+    pet.drag_off = m.QPointF(0, -55)  # взяли мышкой за середину
+    pet.tilt = 12  # тащат вбок — тело отстаёт
     pet.say("уиии!")
 
 
@@ -117,7 +119,7 @@ for i, (name, setup) in enumerate(POSES):
     pet.tilt = pet.squash = pet.squash_v = 0.0
     pet.hammer_a = -15.0
     setup()
-    for _ in range(TICKS.get(name, 30)):
+    for _ in range(0 if name == "drag" else TICKS.get(name, 30)):
         pet.tick()
     x, y = (i % COLS) * m.W, (i // COLS) * (m.H + 20)
     painter.drawImage(x, y + 20, pet.grab().toImage())

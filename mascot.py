@@ -175,9 +175,10 @@ def tagilla_frames():
         import json
         img = QImage(os.path.join(ASSETS, "tagilla_frames.png")).convertToFormat(QImage.Format.Format_ARGB32)
         with open(os.path.join(ASSETS, "tagilla_frames.json"), encoding="utf-8") as f:
-            frames = json.load(f)["frames"]
+            data = json.load(f)
+        frames = data["frames"]
         walk = sorted((n for n in frames if n.startswith("walk")), key=lambda n: int(n[4:] or 0))
-        _tagilla = {"img": img, "frames": frames, "walk": walk}
+        _tagilla = {"img": img, "frames": frames, "walk": walk, "grab": data.get("grab", {})}
     return _tagilla
 
 
@@ -2039,8 +2040,14 @@ class Pet(QWidget):
             sq += math.sin(self.t * 3) * 0.015
         sy, sx = 1 - sq, 1 + sq * 0.7
 
-        if st in ("drag", "hold"):
-            # держим за макушку / висим на курсоре: вращаем вокруг верха
+        if st == "drag":
+            # держат мышкой — качается вокруг точки, за которую взяли
+            gx, gy = self.drag_off.x(), self.drag_off.y()
+            p.translate(gx, gy)
+            p.rotate(self.tilt)
+            p.translate(-gx, -gy)
+        elif st == "hold":
+            # сам висит на курсоре, держась рукой, — вращаем вокруг руки
             pivot = 4 - self.skin.hold_dy
             p.translate(0, pivot)
             p.rotate(self.tilt)
@@ -2163,6 +2170,8 @@ class Pet(QWidget):
 
     def tagilla_frame(self, st, hanging):
         """Какой кадр Тагиллы показать сейчас."""
+        if st == "drag" and "dangle" in tagilla_frames()["frames"]:
+            return "dangle"  # его взяли — обмяк и болтается
         if hanging or st in ("drag", "hold", "cling"):
             return "hang"
         if st == "smash" and self.smash:
@@ -2184,9 +2193,16 @@ class Pet(QWidget):
     def draw_tagilla(self, p, st, hanging):
         """Тагилла: целиком кадрами из спрайт-листа (нарисован GPT)."""
         fr = tagilla_frames()
-        x, y, w, h, ax = fr["frames"][self.tagilla_frame(st, hanging)]
+        name = self.tagilla_frame(st, hanging)
+        x, y, w, h, ax = fr["frames"][name]
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)  # чёткие пиксели
-        p.drawImage(QPointF(-ax, -h), fr["img"], QRectF(x, y, w, h))
+        if name == "dangle" and name in fr["grab"]:
+            # середина корпуса — ровно там, где его держит курсор (в координатах экрана, с учётом поворота)
+            gx, gy = fr["grab"][name]
+            p.drawImage(QPointF(self.drag_off.x() * self.facing - gx, self.drag_off.y() - gy),
+                        fr["img"], QRectF(x, y, w, h))
+        else:
+            p.drawImage(QPointF(-ax, -h), fr["img"], QRectF(x, y, w, h))
         if st == "dizzy":
             for i in range(3):
                 a = self.t * 4 + i * 2.09
