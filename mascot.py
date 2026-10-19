@@ -131,8 +131,10 @@ TAGILLA_LINES = {
 class Skin:
     """Персонаж: как выглядит, что говорит и чем отличается поведение."""
 
-    def __init__(self, name, title, hold_dy, mask, lines, speed=1.0, smashes=False, bubble_dy=92):
+    def __init__(self, name, title, hold_dy, mask, lines, speed=1.0, smashes=False, bubble_dy=92,
+                 stride=9):
         self.name, self.title = name, title
+        self.stride = stride  # сколько пикселей пути на один кадр шага
         self.bubble_dy = bubble_dy  # низ облачка с текстом над ногами; выше головы и курсора в hold
         self.hold_dy = hold_dy  # курсор держим чуть выше рук — чтобы клики проходили мимо
         self.mask = mask        # где персонаж ловит мышь (в координатах окна маскота)
@@ -144,7 +146,7 @@ class Skin:
 SKINS = {
     "claude": Skin("claude", "Клод", 64, QRect(AX - 60, AY - 95, 120, 118), {}),
     "tagilla": Skin("tagilla", "Тагилла", 128, QRect(AX - 100, AY - 135, 200, 158),
-                    TAGILLA_LINES, speed=1.35, smashes=True, bubble_dy=146),
+                    TAGILLA_LINES, speed=1.35, smashes=True, bubble_dy=146, stride=15),
 }
 
 BROWSERS = ("firefox", "chrom", "brave", "vivaldi", "opera", "edge", "librewolf", "zen",
@@ -174,7 +176,8 @@ def tagilla_frames():
         img = QImage(os.path.join(ASSETS, "tagilla_frames.png")).convertToFormat(QImage.Format.Format_ARGB32)
         with open(os.path.join(ASSETS, "tagilla_frames.json"), encoding="utf-8") as f:
             frames = json.load(f)["frames"]
-        _tagilla = {"img": img, "frames": frames}
+        walk = sorted((n for n in frames if n.startswith("walk")), key=lambda n: int(n[4:] or 0))
+        _tagilla = {"img": img, "frames": frames, "walk": walk}
     return _tagilla
 
 
@@ -1118,7 +1121,7 @@ class Pet(QWidget):
             if self.state == st:
                 self.x += self.facing * speed * self.skin.speed * dt
                 if speed:
-                    self.leg_phase += dt * speed / 9
+                    self.leg_phase += dt * speed / self.skin.stride
                 blocked = False
                 if self.surface is not None:
                     idx, w = self.surface_win()
@@ -1335,7 +1338,7 @@ class Pet(QWidget):
             self.facing = 1 if self.chase_v > 0 else -1
         self.x += self.chase_v * dt
         speed = abs(self.chase_v)
-        self.leg_phase += dt * min(speed / 9, 20)
+        self.leg_phase += dt * min(speed / self.skin.stride, 20)
         if speed > 350 and random.random() < dt * 10:
             self.particles.append(Particle("dust", self.x - self.facing * 20, self.y - 2,
                                            -self.facing * rnd(20, 60), rnd(-25, -5), 0.4, 0.7))
@@ -1722,7 +1725,7 @@ class Pet(QWidget):
             self.facing = 1 if self.chase_v > 0 else -1
         self.x += self.chase_v * dt
         speed = abs(self.chase_v)
-        self.leg_phase += dt * min(speed / 9, 22)
+        self.leg_phase += dt * min(speed / self.skin.stride, 22)
         if speed > 350 and random.random() < dt * 12:
             self.particles.append(Particle("dust", self.x - self.facing * 20, self.y - 2,
                                            -self.facing * rnd(20, 60), rnd(-25, -5), 0.4, 0.8))
@@ -1778,7 +1781,7 @@ class Pet(QWidget):
         speed = 270.0 if dist < 400 else 170.0
         self.facing = away
         self.x = max(lo, min(hi, self.x + away * speed * dt))
-        self.leg_phase += dt * min(speed / 9, 20)
+        self.leg_phase += dt * min(speed / self.skin.stride, 20)
         self.y = ground
         if random.random() < dt * 3:  # пот ручьём
             self.particles.append(Particle("sweat", self.x - away * 8 + rnd(-10, 10), self.y - 55,
@@ -2167,8 +2170,9 @@ class Pet(QWidget):
             return "windup" if self.state_t < wind else "strike"
         if st in AIR:
             return "jump"
-        if st in MOVING:
-            return "walk1" if int(self.leg_phase) % 2 else "walk2"
+        if st in MOVING:  # цикл ходьбы: walk1, walk2, ... сколько кадров есть
+            walk = tagilla_frames()["walk"]
+            return walk[int(self.leg_phase) % len(walk)]
         if st in ("sit", "ledge", "dizzy"):
             return "sit"
         if st == "sleep":
