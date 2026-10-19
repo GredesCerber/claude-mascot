@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 - Тагилла: **не рисуется кодом**, а целиком состоит из кадров `assets/tagilla_frames.png`
   (9 кадров одной полосой, нарисованы GPT) с разметкой `assets/tagilla_frames.json`
   (`имя: [x, y, ширина, высота, x опоры]`; у ходьбы опора — по корпусу, чтобы тело не дёргалось). Какой кадр показать —
-  `tagilla_frame()`: idle, walk1…walk6 (цикл ходьбы, темп — `skin.stride` px на кадр), windup/strike (замах/удар), sit, sleep, hang
+  `tagilla_frame()`: idle, walk1…walk8 (цикл ходьбы, темп — `skin.stride` px на кадр; walk5–8 — это walk1–4 с переставленными местами светлой и тёмной ногой: генераторы картинок упорно рисуют впереди одну и ту же ногу, и выходит «приставной шаг»), windup/strike (замах/удар), sit, sleep, hang
   (висит на руке), jump. Куда в кадре «удар» приходится кувалда — `T_STRIKE`.
 - `self.eye_mode(st)` говорит, какие сейчас глаза: open / closed / happy / surprised / dizzy.
 

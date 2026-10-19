@@ -146,7 +146,7 @@ class Skin:
 SKINS = {
     "claude": Skin("claude", "Клод", 64, QRect(AX - 60, AY - 95, 120, 118), {}),
     "tagilla": Skin("tagilla", "Тагилла", 128, QRect(AX - 100, AY - 135, 200, 158),
-                    TAGILLA_LINES, speed=1.35, smashes=True, bubble_dy=146, stride=15),
+                    TAGILLA_LINES, speed=1.35, smashes=True, bubble_dy=146, stride=13),
 }
 
 BROWSERS = ("firefox", "chrom", "brave", "vivaldi", "opera", "edge", "librewolf", "zen",
