@@ -1,0 +1,41 @@
+name: Rust mascot
+on:
+  push:
+    paths: ['rust/**', 'assets/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', 'assets/**', '.github/workflows/rust.yml']
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-mascot-windows-x64
+          path: |
+            rust/target/release/claude-mascot.exe
+            rust/README.md
+            rust/Install.ps1
+            rust/Uninstall.ps1
+  simulation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --lib --test engine_regression
+      - run: cargo run --locked -- --headless
