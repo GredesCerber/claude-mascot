@@ -1,6 +1,6 @@
 //! CPU renderer. Pixels are premultiplied ARGB u32 (BGRA in little-endian memory).
 //! No native handles or behavior decisions live here.
-use crate::engine::{Pet, Skin, State};
+use crate::engine::{Pet, Skin, State, CURSOR_HOLD_DY};
 use fontdue::{Font, FontSettings};
 use serde::Deserialize;
 use std::{collections::BTreeMap, io::Cursor, path::Path};
@@ -204,6 +204,21 @@ impl Atlas {
         };
         let &[sx, sy, w, h, anchor] = self.frames.get(&name).unwrap_or(&self.frames["idle"]);
         debug_assert!(sy + h <= self.height);
+        let climbing = pet.state == State::Climb && !pet.dragging;
+        // The source atlas has one hang pose. A tiny alternating lower-body
+        // shift and whole-body lift keeps that pose alive without resampling it.
+        let climb_phase = (pet.state_time * 4.0).floor() as i32 & 1;
+        let bob = if climbing {
+            if climb_phase == 0 {
+                -1.0
+            } else {
+                0.0
+            }
+        } else if matches!(pet.state, State::Hold) {
+            (pet.time * 2.5).sin() * 1.25
+        } else {
+            0.0
+        };
         for y in 0..h {
             for x in 0..w {
                 let i = ((sy + y) * self.width + sx + x) * 4;
@@ -217,9 +232,18 @@ impl Atlas {
                 } else {
                     anchor as f64 - x as f64
                 };
+                let lower_shift = if climbing && y > h * 2 / 3 {
+                    if climb_phase == 0 {
+                        -1.0
+                    } else {
+                        1.0
+                    }
+                } else {
+                    0.0
+                };
                 canvas.pixel(
-                    (FEET_X + xx) as i32,
-                    (FEET_Y - h as f64 + y as f64) as i32,
+                    (FEET_X + xx + lower_shift * pet.facing.signum()) as i32,
+                    (FEET_Y - h as f64 + y as f64 + bob) as i32,
                     c,
                 );
             }
@@ -234,6 +258,8 @@ pub struct Renderer {
     glyphs: BTreeMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
     tagilla: Atlas,
     pub custom: Option<Atlas>,
+    /// Controls the small satisfaction meter below speech bubbles.
+    pub show_mood: bool,
 }
 impl Renderer {
     pub fn new() -> Result<Self, String> {
@@ -258,6 +284,7 @@ impl Renderer {
             glyphs: BTreeMap::new(),
             tagilla,
             custom: None,
+            show_mood: true,
         })
     }
     pub fn frame(&mut self, pet: &Pet, show_bubbles: bool) -> &Canvas {
@@ -269,6 +296,29 @@ impl Renderer {
                 .draw(&mut self.canvas, pet);
         } else {
             draw_claude(&mut self.canvas, pet);
+        }
+        if self.show_mood {
+            let width = 42.0;
+            let x = FEET_X - width / 2.0;
+            let y = 139.0;
+            self.canvas.rect(x, y, width, 4.0, 0xCC211B1B);
+            self.canvas
+                .rect(x + 1.0, y + 1.0, width - 2.0, 2.0, 0xFF493B35);
+            let satisfaction = pet.satisfaction.clamp(0.0, 100.0);
+            let color = if satisfaction < 30.0 {
+                0xFFE86B59
+            } else if satisfaction < 70.0 {
+                0xFFE5B85C
+            } else {
+                0xFF77C88A
+            };
+            self.canvas.rect(
+                x + 1.0,
+                y + 1.0,
+                (width - 2.0) * satisfaction / 100.0,
+                2.0,
+                color,
+            );
         }
         if pet.hearts > 0.0 {
             for n in 0..3 {
@@ -306,19 +356,28 @@ impl Renderer {
                     .line(x as i32, y as i32, x2 as i32, y2 as i32, 0xCCFFF2BD);
             }
         }
-        if pet.state == State::Thrown {
-            // Short motion streaks reinforce the existing thrown state.
-            let x = FEET_X - pet.facing * 30.0;
-            let y = FEET_Y - 65.0;
-            let fade = (150.0 * (1.0 - (pet.state_time * 2.0).fract())).clamp(45.0, 150.0) as u32;
+        let speed = pet.vel.x.hypot(pet.vel.y);
+        if !pet.dragging
+            && speed > 110.0
+            && matches!(pet.state, State::Thrown | State::Fall | State::Jump)
+        {
+            // Three short, tapered trails follow velocity, so they read as
+            // motion and disappear when the pet is held or nearly still.
+            let dx = -pet.vel.x / speed;
+            let dy = -pet.vel.y / speed;
+            let alpha = ((speed - 110.0) * 0.45).clamp(38.0, 112.0) as u32;
             for n in 0..3 {
-                let yy = y + n as f64 * 9.0;
+                let back = 24.0 + n as f64 * 9.0;
+                let x = FEET_X + dx * back;
+                let y = FEET_Y - 58.0 + dy * back;
+                let length = 7.0 - n as f64 * 1.4;
+                let color = ((alpha.saturating_sub(n as u32 * 20)) << 24) | 0x00F0C5A6;
                 self.canvas.line(
-                    (x - pet.facing * 20.0) as i32,
-                    yy as i32,
-                    (x + pet.facing * 8.0) as i32,
-                    (yy - 4.0) as i32,
-                    (fade << 24) | 0x00F0C5A6,
+                    x as i32,
+                    y as i32,
+                    (x + dx * length + dy * 1.2) as i32,
+                    (y + dy * length - dx * 1.2) as i32,
+                    color,
                 );
             }
         }
@@ -507,7 +566,30 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     );
     let air = matches!(p.state, State::Fall | State::Jump | State::Thrown);
     let phase = (p.time * 7.0) as usize % 2;
-    let bob = if moving && phase == 1 { -0.5 } else { 0.0 };
+    let climbing = p.state == State::Climb && !p.dragging;
+    let climb_phase = (p.state_time * 5.0).floor() as usize % 4;
+    let dancing = p.state == State::Dance;
+    let waving = p.state == State::Wave;
+    let angry = p.satisfaction < 30.0;
+    let bob = if climbing {
+        if climb_phase < 2 {
+            -0.35
+        } else {
+            0.15
+        }
+    } else if dancing {
+        if ((p.state_time * 5.0).floor() as usize).is_multiple_of(2) {
+            -0.7
+        } else {
+            0.25
+        }
+    } else if p.state == State::Hold || p.dragging {
+        (p.time * 2.7).sin() * 0.25
+    } else if moving && phase == 1 {
+        -0.5
+    } else {
+        0.0
+    };
     let top = if sitting { -8.0 } else { -11.0 } + bob;
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
         let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
@@ -522,7 +604,29 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         );
     };
     for (i, lx) in [-5.0, -3.0, 2.0, 4.0].iter().enumerate() {
-        if p.state == State::Hold || p.dragging {
+        if climbing {
+            let pair_phase = climb_phase % 2;
+            let pair = i / 2;
+            let lifted = pair == pair_phase;
+            let swing = if lifted { 0.45 } else { -0.15 };
+            px(
+                *lx + swing,
+                -3.0 + if lifted { -0.8 } else { 0.0 },
+                1.0,
+                if lifted { 2.4 } else { 3.2 },
+                0xFFB85C3E,
+            );
+        } else if dancing {
+            let pair_phase = (p.state_time * 5.0).floor() as usize % 2;
+            let lifted = i / 2 == pair_phase;
+            px(
+                *lx + if lifted { 0.5 } else { 0.0 },
+                -3.0 + if lifted { -0.8 } else { 0.0 },
+                1.0,
+                if lifted { 2.2 } else { 3.0 },
+                0xFFB85C3E,
+            );
+        } else if p.state == State::Hold || p.dragging {
             px(
                 lx + (p.time * 5.0 + i as f64).sin() * 0.5,
                 -3.0,
@@ -541,17 +645,66 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(*lx, -3.0 + bob, 1.0, h, 0xFFB85C3E);
         }
     }
-    px(-6.0, top, 12.0, 8.0, 0xFFD97757);
+    let torso_shift = if climbing {
+        (climb_phase as f64 - 1.5) * 0.12
+    } else {
+        0.0
+    };
+    px(-6.0 + torso_shift, top, 12.0, 8.0, 0xFFD97757);
     px(-6.0, top + 7.0, 12.0, 1.0, 0xFFB85C3E);
     px(-5.0, top, 3.0, 1.0, 0xFFE8957A);
-    let up = p.dragging
+    let up = climbing
+        || waving
+        || p.dragging
         || matches!(
             p.state,
             State::Happy | State::Jump | State::Thrown | State::Hold | State::Climb | State::Block
         );
     let arm = top + if up { 0.0 } else { 3.0 };
-    px(-8.0, arm, 2.0, 2.0, 0xFFD97757);
-    px(6.0, arm, 2.0, 2.0, 0xFFD97757);
+    if climbing {
+        // Reach alternates sides; mirroring is handled by px(), so the leading
+        // hand stays in front of the direction Claude is climbing.
+        let reach = if climb_phase < 2 { 1.0 } else { -1.0 };
+        let lead_x = if reach > 0.0 { 6.0 } else { -8.0 };
+        let trail_x = if reach > 0.0 { -8.0 } else { 6.0 };
+        let lead_arm_x = if reach > 0.0 { 5.0 } else { -7.0 };
+        let trail_arm_x = if reach > 0.0 { -7.0 } else { 5.0 };
+        px(lead_arm_x, top - 2.6, 2.0, 3.4, 0xFFD97757);
+        px(trail_arm_x, top + 1.0, 2.0, 2.8, 0xFFD97757);
+        px(lead_x, top - 2.0, 2.0, 2.0, 0xFFD97757);
+        px(trail_x, top + 2.0, 2.0, 2.0, 0xFFD97757);
+    } else if dancing {
+        let beat = (p.state_time * 5.0).floor() as usize % 4;
+        let raised = if beat < 2 { -8.0 } else { 6.0 };
+        let lowered = if raised < 0.0 { 6.0 } else { -8.0 };
+        px(raised, top - 2.0, 2.0, 2.0, 0xFFD97757);
+        px(lowered, top + 2.0, 2.0, 2.0, 0xFFD97757);
+    } else if waving {
+        let wave = (p.state_time * 9.0).sin() * 1.2;
+        px(6.0, top - 2.0 + wave, 2.0, 2.0, 0xFFD97757);
+        px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+    } else {
+        let dangling = p.state == State::Hold || p.dragging;
+        let swing = if dangling {
+            (p.time * 4.0).sin() * 0.45
+        } else {
+            0.0
+        };
+        if dangling {
+            let hand_y = -CURSOR_HOLD_DY / 5.0;
+            // Forearms rise from the shoulders and turn inward toward the
+            // grip. Keep the center gap open at the cursor's exact hotspot.
+            px(-7.0 + swing, -13.0, 1.5, 5.0, 0xFFD97757);
+            px(-7.0 + swing, -13.0, 4.0, 1.5, 0xFFD97757);
+            px(-3.5 + swing, hand_y, 1.5, 1.5, 0xFFD97757);
+            px(5.5 - swing, -13.0, 1.5, 5.0, 0xFFD97757);
+            px(1.5 - swing, -13.0, 4.0, 1.5, 0xFFD97757);
+            px(2.0 - swing, hand_y, 1.5, 1.5, 0xFFD97757);
+        } else {
+            px(-8.0, arm, 2.0, 2.0, 0xFFD97757);
+            px(6.0, arm, 2.0, 2.0, 0xFFD97757);
+        }
+    }
     for eye in [-4.0, 3.0] {
         if p.state == State::Sleep || (p.time * 0.2).fract() > 0.98 {
             px(eye - 0.3, top + 3.2, 1.6, 0.6, 0xFF1B1B1B);
@@ -562,6 +715,10 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         } else {
             px(eye, top + 2.0, 1.0, 2.0, 0xFF1B1B1B);
         }
+    }
+    if angry && !matches!(p.state, State::Happy | State::Sleep) {
+        px(-4.5, top + 1.2, 2.0, 0.6, 0xFF6E3029);
+        px(2.5, top + 1.2, 2.0, 0.6, 0xFF6E3029);
     }
     if matches!(
         p.state,
@@ -613,6 +770,134 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(baseline, r.frame(&p, false).pixels);
+    }
+    #[test]
+    fn climbing_frames_alternate_and_stay_inside_mascot_bounds() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Climb;
+        pet.facing = -1.0;
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/climb-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        let mut first = None;
+        for (index, state_time) in [0.05, 0.25, 0.45, 0.65].into_iter().enumerate() {
+            pet.state_time = state_time;
+            let pixels = renderer.frame(&pet, false).pixels.clone();
+            if let Some(previous) = &first {
+                assert_ne!(
+                    &pixels, previous,
+                    "climbing phase {index} should change the pose"
+                );
+            } else {
+                first = Some(pixels.clone());
+            }
+            let occupied = pixels
+                .iter()
+                .enumerate()
+                .filter(|(_, px)| **px >> 24 > 0)
+                .map(|(i, _)| (i % WIDTH, i / WIDTH));
+            let (mut min_x, mut min_y, mut max_x, mut max_y) = (WIDTH, HEIGHT, 0, 0);
+            for (x, y) in occupied {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+            assert!(
+                min_x >= 90 && max_x < 190 && min_y >= 130 && max_y < 220,
+                "climbing frame escaped expected bounds: ({min_x},{min_y})..({max_x},{max_y})"
+            );
+            renderer
+                .canvas
+                .save_png(&preview_dir.join(format!("claude-climb-{}.png", index + 1)))
+                .unwrap();
+        }
+    }
+    #[test]
+    fn dance_wave_and_velocity_streaks_animate_only_in_their_states() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/climb-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        renderer.frame(&pet, false);
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-idle.png"))
+            .unwrap();
+        pet.satisfaction = 18.0;
+        renderer.frame(&pet, false);
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-mood-low.png"))
+            .unwrap();
+        pet.satisfaction = 82.0;
+        renderer.frame(&pet, false);
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-mood-high.png"))
+            .unwrap();
+        pet.satisfaction = 75.0;
+        pet.state = State::Hold;
+        pet.time = 0.4;
+        renderer.frame(&pet, false);
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-hold.png"))
+            .unwrap();
+        pet.state = State::Dance;
+        pet.state_time = 0.1;
+        let dance_a = renderer.frame(&pet, false).pixels.clone();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-dance.png"))
+            .unwrap();
+        pet.state_time = 0.5;
+        let dance_b = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(dance_a, dance_b, "dance beats should change Claude's pose");
+        pet.state = State::Wave;
+        pet.state_time = 0.1;
+        let wave_a = renderer.frame(&pet, false).pixels.clone();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-wave.png"))
+            .unwrap();
+        pet.state_time = 0.3;
+        let wave_b = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(wave_a, wave_b, "the raised hand should wave");
+
+        pet.state = State::Thrown;
+        pet.state_time = 0.4;
+        pet.dragging = false;
+        pet.vel = crate::Vec2::default();
+        let still = renderer.frame(&pet, false).pixels.clone();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-thrown-still.png"))
+            .unwrap();
+        pet.vel = crate::Vec2::new(900.0, -300.0);
+        let moving = renderer.frame(&pet, false).pixels.clone();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-speed-streaks.png"))
+            .unwrap();
+        assert_ne!(
+            still, moving,
+            "fast airborne movement should add velocity-aligned trails"
+        );
+
+        pet.state = State::Hold;
+        pet.dragging = true;
+        let held_fast = renderer.frame(&pet, false).pixels.clone();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("claude-hold-fast.png"))
+            .unwrap();
+        pet.vel = crate::Vec2::default();
+        let held_still = renderer.frame(&pet, false).pixels.clone();
+        assert_eq!(
+            held_fast, held_still,
+            "held mascots must not show speed streaks"
+        );
     }
     #[test]
     fn bubble_is_drawn_at_output_scale_with_coverage() {

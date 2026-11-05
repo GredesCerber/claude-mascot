@@ -18,6 +18,9 @@ const IDLE_SLEEP: f64 = 60.0;
 const SHAKE_WINDOW: f64 = 1.5;
 const SHAKE_HITS: usize = 7;
 const MAX_COORD: f64 = 10_000_000.0;
+const WALL_BOUNCE_MIN_SPEED: f64 = 280.0;
+const WALL_RESTITUTION: f64 = 0.62;
+pub const CURSOR_HOLD_DY: f64 = 70.0;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Skin {
@@ -48,6 +51,8 @@ pub enum State {
     Hunt,
     Flee,
     Block,
+    Dance,
+    Wave,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +65,8 @@ pub enum Command {
     Smash,
     Rage,
     ToggleRage,
+    Dance,
+    Wave,
 }
 
 /// A simulation-only attack impact for the host to render as an effect.
@@ -90,6 +97,8 @@ pub struct Pet {
     release_pending: bool,
     pub chase: bool,
     pub squash: f64,
+    /// A small, transient mood signal for animation and gentle feedback.
+    pub satisfaction: f64,
     /// Target of the current or most recent swing. `attack_serial` identifies impacts.
     pub attack: Option<Attack>,
     pub attack_serial: u64,
@@ -111,6 +120,8 @@ pub struct Pet {
     pub(crate) frame: u64,
     pub(crate) target: Option<u64>,
     pub(crate) cooldown: f64,
+    pub(crate) grab_cooldown: f64,
+    pub(crate) explore_cooldown: f64,
     pub(crate) peek_goal: Option<(usize, Vec2)>,
     pub(crate) peek_route_age: f64,
     pub(crate) smash_goal: Option<(usize, Vec2)>,
@@ -143,6 +154,7 @@ impl Pet {
             release_pending: false,
             chase: false,
             squash: 0.0,
+            satisfaction: 75.0,
             attack: None,
             attack_serial: 0,
             rng: id.wrapping_mul(0x9e3779b97f4a7c15).max(1),
@@ -163,6 +175,8 @@ impl Pet {
             frame: 0,
             target: None,
             cooldown: 0.0,
+            grab_cooldown: 0.0,
+            explore_cooldown: 0.0,
             peek_goal: None,
             peek_route_age: 0.0,
             smash_goal: None,
@@ -182,12 +196,21 @@ impl Pet {
         self.state_time += dt;
         self.frame = self.frame.wrapping_add(1);
         self.cooldown = (self.cooldown - dt).max(0.0);
+        self.grab_cooldown = (self.grab_cooldown - dt).max(0.0);
+        self.explore_cooldown = (self.explore_cooldown - dt).max(0.0);
         self.bubble_time = (self.bubble_time - dt).max(0.0);
         if self.bubble_time == 0.0 {
             self.bubble = None;
         }
         self.hearts = (self.hearts - dt).max(0.0);
         self.squash = (self.squash - dt * 2.0).max(0.0);
+        if !self.satisfaction.is_finite() {
+            self.satisfaction = 75.0;
+        } else if self.satisfaction < 75.0 {
+            self.satisfaction = (self.satisfaction + dt).clamp(0.0, 75.0);
+        } else {
+            self.satisfaction = self.satisfaction.clamp(0.0, 100.0);
+        }
         if !valid_vec(self.pos) || !valid_vec(self.vel) {
             self.recover(world);
             return;
@@ -275,7 +298,17 @@ impl Pet {
         }
 
         if self.state == State::Hold {
-            self.track_hold(world, dt);
+            if self.chase {
+                self.track_hold(world, dt);
+            } else {
+                self.cooldown = self.cooldown.max(1.0);
+                self.hold_offset = Vec2::default();
+                self.surface = None;
+                self.surface_id = None;
+                self.surface_prev = None;
+                self.vel = Vec2::default();
+                self.set_state(State::Fall, 0.0);
+            }
             self.snapshot_windows(world);
             return;
         }
@@ -396,6 +429,8 @@ impl Pet {
                 self.rage = self.rage_forever;
                 self.rage_timer = if self.rage { f64::MAX } else { 30.0 };
             }
+            Command::Dance => self.command_pose(State::Dance, 3.0, world),
+            Command::Wave => self.command_pose(State::Wave, 2.0, world),
         }
     }
 
@@ -460,6 +495,14 @@ impl Pet {
         } else {
             Vec2::default()
         };
+        let speed = self.vel.x.hypot(self.vel.y);
+        if speed > 400.0 {
+            self.satisfaction =
+                (self.satisfaction - (speed / 2500.0 * 18.0).clamp(6.0, 18.0)).max(0.0);
+            if self.satisfaction < 30.0 {
+                self.say("эй, аккуратнее!", 1.8);
+            }
+        }
         self.surface = None;
         self.surface_id = None;
         self.surface_prev = None;
@@ -475,6 +518,7 @@ impl Pet {
 
     pub fn pet(&mut self) {
         self.forced_sleep = false;
+        self.satisfaction = (self.satisfaction + 12.0).min(100.0);
         self.hearts = 1.5;
         self.squash = 0.35;
         self.say("приятно :) ", 1.8);
@@ -487,9 +531,25 @@ impl Pet {
         if self.surface.is_some()
             || matches!(
                 self.state,
-                State::Idle | State::Walk | State::Sit | State::Land | State::Ledge | State::Happy
+                State::Idle
+                    | State::Walk
+                    | State::Run
+                    | State::Sit
+                    | State::Sleep
+                    | State::Land
+                    | State::Ledge
+                    | State::Happy
+                    | State::Dance
+                    | State::Wave
+                    | State::Hold
             )
         {
+            self.forced_sleep = false;
+            self.forced_sleep_armed = false;
+            if self.state == State::Hold {
+                self.grab_cooldown = 1.0;
+            }
+            self.chase = false;
             self.surface = None;
             self.surface_id = None;
             self.surface_prev = None;
@@ -522,6 +582,22 @@ impl Pet {
             }
             return;
         }
+        if matches!(self.state, State::Dance | State::Wave) {
+            if self.state_time >= self.state_duration.max(0.1) {
+                self.set_state(State::Idle, 0.0);
+            } else if let Some(i) = self.current_surface_index(world) {
+                self.follow_surface(i, world);
+            } else {
+                let floor = self.floor_y(world);
+                if self.pos.y < floor - 2.0 {
+                    self.surface = None;
+                    self.set_state(State::Fall, 0.0);
+                } else {
+                    self.pos.y = floor;
+                }
+            }
+            return;
+        }
         if self.state == State::Ledge {
             if self.state_time > self.state_duration.max(0.35) {
                 self.set_state(State::Idle, 0.0);
@@ -534,7 +610,7 @@ impl Pet {
         if self.state == State::Land {
             if self.state_time > self.state_duration.max(0.55) {
                 let next = self.pending_ground.take().unwrap_or(State::Idle);
-                self.set_state(next, 0.0);
+                self.set_state(next, pose_duration(next));
             } else {
                 // Preserve horizontal impact momentum and let ground friction
                 // bring the pet to rest instead of snapping it to a stop.
@@ -548,14 +624,16 @@ impl Pet {
                 if self.vel.x.abs() < 2.0 {
                     self.vel.x = 0.0;
                 }
-                self.clamp_to_area(world);
+                // A horizontal throw may land before it reaches the wall.
+                // Keep the same rebound while its landing momentum slides.
+                self.bounce_from_screen_wall(world);
                 return;
             }
         }
         if self.state == State::Happy {
             if self.state_time > self.state_duration.max(0.55) {
                 let next = self.pending_ground.take().unwrap_or(State::Idle);
-                self.set_state(next, 0.0);
+                self.set_state(next, pose_duration(next));
             } else {
                 self.vel = Vec2::default();
                 return;
@@ -565,15 +643,24 @@ impl Pet {
             if let Some(i) = self.surface {
                 self.follow_surface(i, world);
             }
+            if self.state_duration > 0.0 && self.state_time >= self.state_duration {
+                self.set_state(State::Idle, 0.0);
+            }
             return;
         }
 
-        if self.state == State::Chase || self.chase {
+        if self.state == State::Chase || (self.chase && !self.is_airborne()) {
             self.update_chase(dt, world);
             return;
         }
 
         if self.state == State::Fall || self.state == State::Jump || self.state == State::Thrown {
+            if self.state == State::Jump && self.chase && self.skin == Skin::Claude {
+                self.try_catch_cursor(world);
+                if self.state == State::Hold {
+                    return;
+                }
+            }
             // A drag can release the pet below the desktop, where the normal
             // floor-crossing test cannot catch it (old_y is already past it).
             // Recover to the nearest remaining monitor's floor before applying
@@ -593,7 +680,11 @@ impl Pet {
             self.vel.y = (self.vel.y + GRAVITY * dt).clamp(-1400.0, 2200.0);
             self.pos.x += self.vel.x * dt;
             self.pos.y += self.vel.y * dt;
-            self.clamp_to_area(world);
+            if self.state == State::Thrown {
+                self.bounce_from_screen_wall(world);
+            } else {
+                self.clamp_to_area(world);
+            }
             if self.vel.y >= 0.0 {
                 if let Some((ground_y, surface)) = self.find_landing(old.y, world) {
                     self.pos.y = ground_y;
@@ -661,12 +752,24 @@ impl Pet {
             && self.random_chance(dt * 0.16)
             && !self.try_explore_jump(world)
         {
-            if self.random_chance(0.35) {
-                self.set_state(State::Sit, 0.0);
+            let choice = self.random();
+            if choice < 0.12 && self.satisfaction >= 30.0 {
+                self.set_state(State::Dance, 2.6);
+            } else if choice < 0.22 && self.satisfaction >= 30.0 {
+                self.set_state(State::Wave, 1.8);
+            } else if choice < 0.42 {
+                let sit_duration = 4.0 + self.random() * 5.0;
+                self.set_state(State::Sit, sit_duration);
             } else {
                 self.facing *= -1.0;
+                if choice > 0.86 {
+                    self.vel = Vec2::new(self.facing * 90.0, -620.0);
+                    self.squash = 0.25;
+                    self.set_state(State::Jump, 0.0);
+                    return;
+                }
                 self.set_state(
-                    if self.skin == Skin::Tagilla {
+                    if self.skin == Skin::Tagilla || choice > 0.67 {
                         State::Run
                     } else {
                         State::Walk
@@ -825,13 +928,7 @@ impl Pet {
 
     fn update_chase(&mut self, dt: f64, world: &World) {
         let dx = world.cursor.x - self.pos.x;
-        if dx.abs() < 24.0
-            && (world.cursor.y - self.pos.y).abs() < 70.0
-            && self.skin == Skin::Claude
-        {
-            self.hold_offset = Vec2::new(self.pos.x - world.cursor.x, self.pos.y - world.cursor.y);
-            self.set_state(State::Hold, 0.0);
-            self.say("вишу!", 1.5);
+        if self.skin == Skin::Claude && self.try_catch_cursor(world) {
             return;
         }
         if dx.abs() < 40.0
@@ -844,6 +941,22 @@ impl Pet {
                 },
                 0.7,
             );
+            return;
+        }
+        // Hop toward a cursor that is well above us. The grounded check and
+        // cooldown keep the chase from repeatedly launching in midair.
+        if self.cooldown <= 0.0 && self.has_support(world) && self.pos.y - world.cursor.y > 130.0 {
+            let rise = (self.pos.y - world.cursor.y - CURSOR_HOLD_DY).clamp(100.0, 650.0);
+            self.vel = Vec2::new(
+                (dx * 1.4).clamp(-320.0, 320.0),
+                -(2.0 * GRAVITY * rise).sqrt(),
+            );
+            self.surface = None;
+            self.surface_id = None;
+            self.surface_prev = None;
+            self.cooldown = 1.25;
+            self.squash = 0.25;
+            self.set_state(State::Jump, 0.0);
             return;
         }
         self.facing = if dx < 0.0 { -1.0 } else { 1.0 };
@@ -866,6 +979,7 @@ impl Pet {
         if oscillations >= SHAKE_HITS {
             self.surface = None;
             self.vel = Vec2::new((cursor.x - self.pos.x) * 5.0, -350.0);
+            self.grab_cooldown = 1.0;
             self.set_state(State::Thrown, 0.0);
             self.say("аааа!", 1.5);
         } else if dt > 0.0 {
@@ -964,6 +1078,9 @@ impl Pet {
     /// reachability uses a fixed ballistic arc so it stays deterministic.
     fn try_explore_jump(&mut self, world: &World) -> bool {
         const LAUNCH: f64 = 1_350.0;
+        if self.explore_cooldown > 0.0 || self.state != State::Idle || !self.has_support(world) {
+            return false;
+        }
         let mut best: Option<(f64, f64, f64, usize)> = None;
         for (i, w) in world.windows.iter().enumerate() {
             if !valid_rect(w.rect) || w.rect.w < 80.0 || w.rect.y >= self.pos.y - 60.0 {
@@ -971,6 +1088,15 @@ impl Pet {
             }
             let target_x =
                 (self.pos.x).clamp(w.rect.x + BODY_HALF_WIDTH, w.rect.right() - BODY_HALF_WIDTH);
+            let area = world.area_at(Vec2::new(target_x, w.rect.y));
+            let headroom = if self.skin == Skin::Tagilla {
+                150.0
+            } else {
+                80.0
+            };
+            if !area.contains(Vec2::new(target_x, w.rect.y)) || w.rect.y < area.y + headroom {
+                continue;
+            }
             let dy = w.rect.y - self.pos.y;
             let disc = LAUNCH * LAUNCH + 2.0 * GRAVITY * dy;
             if disc < 0.0 {
@@ -1000,6 +1126,7 @@ impl Pet {
         self.surface_prev = None;
         self.set_state(State::Jump, 0.0);
         self.target = Some(world.windows[index].id as u64);
+        self.explore_cooldown = 8.0 + self.random() * 10.0;
         true
     }
 
@@ -1302,8 +1429,88 @@ impl Pet {
         let a = world.area_at(self.pos);
         if valid_rect(a) {
             let inset = BODY_HALF_WIDTH.min(a.w * 0.5);
-            self.pos.x = self.pos.x.clamp(a.x + inset, a.right() - inset);
+            let (left_connected, right_connected) = horizontal_neighbors(a, self.pos.y, world);
+            let left = if left_connected { a.x } else { a.x + inset };
+            let right = if right_connected {
+                a.right()
+            } else {
+                a.right() - inset
+            };
+            let before = self.pos.x;
+            self.pos.x = self.pos.x.clamp(left, right);
+            if self.pos.x != before && matches!(self.state, State::Walk | State::Run) {
+                self.facing = if before < left { 1.0 } else { -1.0 };
+                self.squash = self.squash.max(0.15);
+            }
         }
+    }
+
+    fn bounce_from_screen_wall(&mut self, world: &World) {
+        let a = world.area_at(self.pos);
+        if !valid_rect(a) {
+            return;
+        }
+        let inset = BODY_HALF_WIDTH.min(a.w * 0.5);
+        let (left_connected, right_connected) = horizontal_neighbors(a, self.pos.y, world);
+        let left = if left_connected { a.x } else { a.x + inset };
+        let right = if right_connected {
+            a.right()
+        } else {
+            a.right() - inset
+        };
+        if self.pos.x < left && self.vel.x < 0.0 {
+            self.pos.x = left;
+            if self.vel.x.abs() > WALL_BOUNCE_MIN_SPEED {
+                self.vel.x = -self.vel.x * WALL_RESTITUTION;
+                self.squash = 0.35;
+            } else {
+                self.vel.x = 0.0;
+            }
+        } else if self.pos.x > right && self.vel.x > 0.0 {
+            self.pos.x = right;
+            if self.vel.x.abs() > WALL_BOUNCE_MIN_SPEED {
+                self.vel.x = -self.vel.x * WALL_RESTITUTION;
+                self.squash = 0.35;
+            } else {
+                self.vel.x = 0.0;
+            }
+        } else {
+            self.pos.x = self.pos.x.clamp(left, right);
+        }
+    }
+
+    fn command_pose(&mut self, state: State, duration: f64, world: &World) {
+        if !self.has_support(world) {
+            self.pending_ground = Some(state);
+            self.chase = false;
+            if matches!(self.state, State::Hold | State::Chase) {
+                self.hold_offset = Vec2::default();
+                self.vel.x = 0.0;
+                self.set_state(State::Fall, 0.0);
+            }
+            return;
+        }
+        self.vel = Vec2::default();
+        self.set_state(state, duration);
+    }
+
+    fn try_catch_cursor(&mut self, world: &World) -> bool {
+        if self.grab_cooldown > 0.0 || self.state == State::Hold || self.skin != Skin::Claude {
+            return false;
+        }
+        let grip = Vec2::new(self.pos.x, self.pos.y - CURSOR_HOLD_DY);
+        if distance(world.cursor, grip) > 40.0 {
+            return false;
+        }
+        self.surface = None;
+        self.surface_id = None;
+        self.surface_prev = None;
+        self.vel = Vec2::default();
+        self.hold_offset = Vec2::new(0.0, CURSOR_HOLD_DY);
+        self.pos = Vec2::new(world.cursor.x, world.cursor.y + CURSOR_HOLD_DY);
+        self.set_state(State::Hold, 0.0);
+        self.say("вишу!", 1.5);
+        true
     }
 }
 
@@ -1378,6 +1585,27 @@ pub fn update_interactions(pets: &mut [Pet], dt: f64, world: &World) {
 
 fn valid_vec(p: Vec2) -> bool {
     p.x.is_finite() && p.y.is_finite() && p.x.abs() < MAX_COORD && p.y.abs() < MAX_COORD
+}
+fn pose_duration(state: State) -> f64 {
+    match state {
+        State::Dance => 3.0,
+        State::Wave => 2.0,
+        _ => 0.0,
+    }
+}
+fn horizontal_neighbors(area: Rect, y: f64, world: &World) -> (bool, bool) {
+    let connected = |other: Rect| valid_rect(other) && y >= other.y && y <= other.bottom();
+    let left = world
+        .work_areas
+        .iter()
+        .copied()
+        .any(|other| connected(other) && (other.right() - area.x).abs() < 1.0);
+    let right = world
+        .work_areas
+        .iter()
+        .copied()
+        .any(|other| connected(other) && (other.x - area.right()).abs() < 1.0);
+    (left, right)
 }
 fn valid_rect(r: Rect) -> bool {
     valid_vec(Vec2::new(r.x, r.y))

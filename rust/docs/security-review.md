@@ -5,7 +5,7 @@ that sample, not the current updater-enabled application. Since 0.2.0, the
 source includes WinHTTP release discovery/download and a child-process update
 helper; downloaded assets require the expected GitHub route and SHA-256, and
 download/restart requires user confirmation. Current local verification is in
-[verification-0.2.2.md](verification-0.2.2.md).
+[verification-0.3.0.md](verification-0.3.0.md).
 
 The original sample was later also quarantined locally and submitted to
 Microsoft. The early clean scans below remain historical observations; they

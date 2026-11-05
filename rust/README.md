@@ -5,6 +5,17 @@ desktop window, with a right-click menu and an optional notification-area icon.
 The existing Python version remains available at the repository root; the Rust
 port does not replace its Linux/KDE support.
 
+Version 0.3 adds screen-edge rebounds, animated climbing, cursor-chasing hops,
+occasional autonomous jumps onto reachable window tops, and short dance/wave
+activities. The behavior reference is the original `mascot.py`, including
+`tick_chase`, `try_catch_cursor`, and its window-jump/climbing behavior.
+
+Each pet has a session-only satisfaction meter. Rough throws make it unhappy;
+gentle repositioning leaves its mood unchanged. Time gradually calms an unhappy
+pet, and petting improves its mood faster. Mood changes Claude's eyebrows and
+the meter's color, without enabling Tagilla's rage mode. Hide the meter under
+`Настройки → Показывать настроение` if preferred.
+
 ## Windows use
 
 A per-user MSI installer is also available. It adds shortcuts and supports
@@ -40,9 +51,12 @@ settings are separate from the Python version.
 ## Controls
 
 Right-click the mascot or its notification-area icon for the native menu.
+Quick actions appear at the top; the remaining commands are grouped under
+`Поведение`, `Персонажи и друзья`, and `Настройки`.
 
 | Menu item | Action |
 | --- | --- |
+| Прыгнуть / Погладить / Потанцевать / Помахать | Immediate interactions and timed poses |
 | Гулять / Сидеть / Спать / Карабкаться | Choose a basic behavior |
 | Гоняться | Toggle cursor chase |
 | Крушить / Ярость | Tagilla behavior commands |
@@ -54,7 +68,8 @@ Right-click the mascot or its notification-area icon for the native menu.
 | Скрыть в полноэкранном режиме | Toggle hiding over fullscreen windows |
 | Запускать вместе с Windows | Toggle the current user's startup entry |
 | Маленький / Обычный / Большой размер | Set 75%, 100%, or 150% display scale |
-| FPS: 30 / 60 / 120 / 144 / 240 | Set the target rendering frame rate (default 60) |
+| Настройки → Частота кадров | Choose 30, 60, 120, 144 or 240 FPS (default 60) |
+| Настройки → Показывать реплики / Показывать настроение | Toggle speech and the satisfaction meter |
 
 For another frame-rate limit, run `claude-mascot.exe --fps 90`. Values from
 30 through 240 are saved in settings. Physics runs independently of rendering;
@@ -63,6 +78,10 @@ actual frame rate depends on the machine and desktop load.
 Left-click and release to pet the character. Drag to reposition it; release
 with a quick movement to throw it. Double-click to jump. These interactions use
 the Windows desktop and do not move, click, or close other application windows.
+Enable `Поведение → Бегать за курсором` for running, hopping and cursor grabs.
+Shake the cursor, turn chase off, or choose Jump to release a hanging pet.
+Explicit Sit and Sleep suppress autonomous window exploration; choose Wander
+to resume it. Automatic window hops skip unreachable, covered or offscreen tops.
 
 ## Settings and custom atlas
 
@@ -158,7 +177,7 @@ window. `--smoke-test` exercises the native Windows host for a bounded duration
 and `--trace` writes summary counters. `--inspect-window` is a Windows-only QA
 option that exposes the native window for inspection. See [docs/architecture.md](docs/architecture.md)
 for module boundaries and known behavior gaps, and
-[docs/verification-0.2.2.md](docs/verification-0.2.2.md) for the current verification
+[docs/verification-0.3.0.md](docs/verification-0.3.0.md) for the current verification
 record.
 
 ## Current limits

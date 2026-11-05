@@ -266,12 +266,17 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
     let states = [
         State::Idle,
         State::Walk,
+        State::Run,
+        State::Chase,
         State::Sit,
         State::Sleep,
         State::Happy,
         State::Jump,
-        State::Climb,
+        State::Thrown,
         State::Hold,
+        State::Dance,
+        State::Wave,
+        State::Climb,
         State::Smash,
     ];
     for skin in [Skin::Claude, Skin::Tagilla] {
@@ -282,11 +287,22 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
             p.state_time = 0.5;
             p.bubble = Some("Привет! Что кодим сегодня?".into());
             p.bubble_time = 3.0;
+            if state == State::Thrown {
+                p.vel = Vec2::new(650.0, -180.0);
+            }
             if state == State::Happy {
                 p.hearts = 1.0;
             }
             r.frame(&p, true)
                 .save_png(&dir.join(format!("{:?}-{:?}.png", skin, state)))?;
+        }
+    }
+    for skin in [Skin::Claude, Skin::Tagilla] {
+        for satisfaction in [10.0, 50.0, 95.0] {
+            let mut p = Pet::new(1, skin, Vec2::default());
+            p.satisfaction = satisfaction;
+            r.frame(&p, false)
+                .save_png(&dir.join(format!("{skin:?}-Mood-{}.png", satisfaction as u8)))?;
         }
     }
     let crack = claude_mascot::effects::CrackEffect::new(
@@ -306,7 +322,11 @@ fn headless(o: &Options) -> Result<(), String> {
     for _ in 0..36000 {
         for p in &mut pets {
             p.update(1.0 / 60.0, &world);
-            if !p.pos.x.is_finite() || !p.pos.y.is_finite() {
+            if !p.pos.x.is_finite()
+                || !p.pos.y.is_finite()
+                || !p.satisfaction.is_finite()
+                || !(0.0..=100.0).contains(&p.satisfaction)
+            {
                 return Err("Nonfinite simulation state".into());
             }
         }
@@ -621,6 +641,22 @@ mod native {
                         settings::set_autostart(!autostart)?;
                         autostart = !autostart;
                     }
+                    43 => {
+                        settings.show_bubbles = !settings.show_bubbles;
+                        save = true;
+                    }
+                    44 => {
+                        settings.show_mood = !settings.show_mood;
+                        save = true;
+                    }
+                    70 => {
+                        e.drag = None;
+                        e.pet.dragging = false;
+                        e.pet.jump();
+                    }
+                    71 => e.pet.pet(),
+                    72 => e.pet.command(Command::Dance, &world),
+                    73 => e.pet.command(Command::Wave, &world),
                     50..=52 => {
                         settings.scale = match c {
                             50 => 0.75,
@@ -769,6 +805,9 @@ mod native {
                         claude_mascot::engine::State::Sit => 2,
                         claude_mascot::engine::State::Sleep => 3,
                         claude_mascot::engine::State::Climb => 4,
+                        claude_mascot::engine::State::Dance => 72,
+                        claude_mascot::engine::State::Wave => 73,
+                        _ if e.pet.chase => 5,
                         _ => 1,
                     },
                     paused: settings.paused,
@@ -779,9 +818,13 @@ mod native {
                     tagilla: e.pet.skin == Skin::Tagilla,
                     scale: settings.scale,
                     target_fps: settings.target_fps,
+                    show_bubbles: settings.show_bubbles,
+                    show_mood: settings.show_mood,
+                    satisfaction: e.pet.satisfaction.clamp(0.0, 100.0).round() as u8,
                 });
                 e.host.set_visible(!hidden);
                 if !hidden && render_due {
+                    renderer.show_mood = settings.show_mood;
                     let frame =
                         renderer.frame_scaled(&e.pet, settings.show_bubbles, settings.scale);
                     let x = (e.pet.pos.x - FEET_X * settings.scale).round() as i32;

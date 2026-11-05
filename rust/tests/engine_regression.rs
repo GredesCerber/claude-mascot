@@ -38,6 +38,250 @@ fn falling_pet_lands_on_desktop_floor() {
 }
 
 #[test]
+fn fast_thrown_pet_bounces_off_outer_wall_and_squashes() {
+    let w = world();
+    let mut p = Pet::new(201, Skin::Claude, Vec2::new(950.0, 300.0));
+    p.release(Vec2::new(1200.0, 0.0));
+    p.update(0.05, &w);
+    assert!(p.pos.x <= 976.0);
+    assert!(
+        p.vel.x < 0.0,
+        "wall impact should reverse horizontal velocity"
+    );
+    assert!(p.squash > 0.0, "wall impact should trigger squash feedback");
+}
+
+#[test]
+fn slow_thrown_pet_keeps_horizontal_momentum_in_open_air() {
+    let w = world();
+    let mut p = Pet::new(211, Skin::Claude, Vec2::new(300.0, 300.0));
+    p.release(Vec2::new(200.0, 0.0));
+    p.update(1.0 / 60.0, &w);
+    assert!(
+        p.pos.x > 300.0,
+        "slow horizontal throw should keep drifting"
+    );
+    assert_eq!(p.vel.x, 200.0, "only wall contact should stop the drift");
+}
+
+#[test]
+fn thrown_pet_crosses_adjacent_monitor_seam_without_bouncing() {
+    let mut w = world();
+    w.work_areas = vec![
+        Rect::new(0.0, 0.0, 500.0, 700.0),
+        Rect::new(500.0, 0.0, 500.0, 700.0),
+    ];
+    let mut p = Pet::new(202, Skin::Claude, Vec2::new(450.0, 300.0));
+    p.release(Vec2::new(900.0, 0.0));
+    for _ in 0..40 {
+        p.update(1.0 / 240.0, &w);
+    }
+    assert!(p.pos.x > 500.0);
+    assert!(p.vel.x > 0.0, "monitor seam should remain traversable");
+}
+
+#[test]
+fn horizontal_floor_throw_rebounds_during_landing_slide() {
+    let w = world();
+    let mut p = Pet::new(221, Skin::Claude, Vec2::new(950.0, 700.0));
+    p.release(Vec2::new(1200.0, 0.0));
+    for _ in 0..12 {
+        p.update(1.0 / 240.0, &w);
+    }
+    assert!(p.vel.x < 0.0, "a grounded throw should rebound too");
+    assert!(p.pos.x <= 976.0);
+}
+
+#[test]
+fn walking_pet_turns_at_outer_wall_instead_of_walking_in_place() {
+    let w = world();
+    let mut p = Pet::new(222, Skin::Claude, Vec2::new(975.0, 700.0));
+    p.state = State::Walk;
+    p.facing = 1.0;
+    p.update(0.05, &w);
+    assert!(p.facing < 0.0);
+    let boundary = p.pos.x;
+    p.update(0.05, &w);
+    assert!(p.pos.x < boundary);
+}
+
+#[test]
+fn cursor_chase_jumps_toward_cursor_above_and_returns_to_chasing_after_landing() {
+    let mut w = world();
+    w.cursor = Vec2::new(700.0, 400.0);
+    let mut p = Pet::new(203, Skin::Claude, Vec2::new(300.0, 700.0));
+    p.chase = true;
+    p.state = State::Idle;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Jump);
+    assert!(p.vel.y < 0.0);
+    let start_y = p.pos.y;
+    p.update(1.0 / 60.0, &w);
+    assert!(
+        p.pos.y < start_y,
+        "launched chase hop should follow normal airborne physics"
+    );
+}
+
+#[test]
+fn cursor_chase_catches_cursor_at_jump_apex_and_hangs_from_hand_anchor() {
+    let mut w = world();
+    w.cursor = Vec2::new(350.0, 400.0);
+    let mut p = Pet::new(206, Skin::Claude, Vec2::new(300.0, 700.0));
+    p.chase = true;
+    p.state = State::Idle;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Jump);
+    for _ in 0..80 {
+        p.update(1.0 / 60.0, &w);
+        if p.state == State::Hold {
+            break;
+        }
+    }
+    assert_eq!(
+        p.state,
+        State::Hold,
+        "the airborne chase should grab the cursor near the apex"
+    );
+    assert!((p.pos.x - w.cursor.x).abs() < 1.0);
+    assert!((p.pos.y - (w.cursor.y + 70.0)).abs() < 1.0);
+}
+
+#[test]
+fn autonomous_pet_eventually_leaps_to_a_visible_reachable_window_top() {
+    let mut w = world();
+    w.windows
+        .push(window(207, Rect::new(100.0, 400.0, 800.0, 180.0)));
+    let mut p = Pet::new(207, Skin::Claude, Vec2::new(500.0, 700.0));
+    p.state = State::Idle;
+    for _ in 0..12_000 {
+        p.update(1.0 / 60.0, &w);
+        if p.surface == Some(0) {
+            break;
+        }
+    }
+    assert_eq!(
+        p.surface,
+        Some(0),
+        "pet should autonomously reach the supported window top"
+    );
+    assert!((p.pos.y - 400.0).abs() < 1.0);
+}
+
+#[test]
+fn autonomous_window_hops_skip_occluded_and_offscreen_tops() {
+    let mut w = world();
+    w.windows
+        .push(window(208, Rect::new(100.0, 400.0, 800.0, 180.0)));
+    // This top is above the work area and covers the lower candidate's landing point.
+    w.windows
+        .push(window(209, Rect::new(100.0, -100.0, 800.0, 600.0)));
+    let mut p = Pet::new(208, Skin::Claude, Vec2::new(500.0, 700.0));
+    p.state = State::Idle;
+    for _ in 0..12_000 {
+        p.update(1.0 / 60.0, &w);
+        if p.target_id() == Some(208) || p.target_id() == Some(209) {
+            break;
+        }
+    }
+    assert_ne!(
+        p.target_id(),
+        Some(208),
+        "occluded window top must not be selected"
+    );
+    assert_ne!(
+        p.target_id(),
+        Some(209),
+        "offscreen window top must not be selected"
+    );
+}
+
+#[test]
+fn explicit_sit_and_sleep_do_not_autonomously_window_hop() {
+    let mut w = world();
+    w.windows
+        .push(window(210, Rect::new(100.0, 400.0, 800.0, 180.0)));
+    let mut p = Pet::new(210, Skin::Claude, Vec2::new(500.0, 700.0));
+    p.command(Command::Sit, &w);
+    step(&mut p, &w, 600);
+    assert_eq!(p.state, State::Sit);
+    assert_eq!(p.target_id(), None);
+    p.command(Command::Sleep, &w);
+    step(&mut p, &w, 600);
+    assert_eq!(p.state, State::Sleep);
+    assert_eq!(p.target_id(), None);
+}
+
+#[test]
+fn dance_and_wave_commands_are_timed_and_mood_changes_are_bounded() {
+    let w = world();
+    let mut p = Pet::new(204, Skin::Claude, Vec2::new(300.0, 700.0));
+    p.command(Command::Dance, &w);
+    assert_eq!(p.state, State::Dance);
+    step(&mut p, &w, 190);
+    assert_eq!(p.state, State::Idle);
+    p.command(Command::Wave, &w);
+    assert_eq!(p.state, State::Wave);
+    step(&mut p, &w, 130);
+    assert_eq!(p.state, State::Idle);
+
+    let before = p.satisfaction;
+    p.release(Vec2::new(50.0, 20.0));
+    assert_eq!(
+        p.satisfaction, before,
+        "slow repositioning should not lower mood"
+    );
+    p.release(Vec2::new(1800.0, 0.0));
+    assert!(p.satisfaction < before);
+    assert!(p.satisfaction >= 0.0 && p.satisfaction <= 100.0);
+    let after_throw = p.satisfaction;
+    p.pet();
+    assert!(p.satisfaction > after_throw);
+    let petted = p.satisfaction;
+    p.update(1.0 / 60.0, &w);
+    assert!(
+        p.satisfaction >= petted,
+        "passive recovery must not erase the petting bonus"
+    );
+    assert!(p.satisfaction <= 100.0);
+}
+
+#[test]
+fn mood_recovers_slowly_after_a_rough_throw() {
+    let w = world();
+    let mut p = Pet::new(205, Skin::Claude, Vec2::new(300.0, 700.0));
+    p.release(Vec2::new(1800.0, 0.0));
+    let thrown = p.satisfaction;
+    step(&mut p, &w, 300);
+    assert!(p.satisfaction > thrown);
+    assert!(p.satisfaction <= 75.0);
+}
+
+#[test]
+fn repeated_rough_throws_make_pet_unhappy_and_petting_calms_it_faster() {
+    let w = world();
+    let mut p = Pet::new(220, Skin::Claude, Vec2::new(300.0, 500.0));
+    for _ in 0..6 {
+        p.drag_to(Vec2::new(300.0, 500.0));
+        p.release(Vec2::new(1800.0, 0.0));
+    }
+    assert!(p.satisfaction < 30.0);
+    let upset = p.satisfaction;
+    step(&mut p, &w, 120);
+    assert!(p.satisfaction > upset && p.satisfaction < 30.0);
+    let after_wait = p.satisfaction;
+    for _ in 0..3 {
+        p.pet();
+    }
+    assert!(p.satisfaction >= 30.0);
+    assert!(p.satisfaction - after_wait > 30.0);
+    assert!(
+        !p.rage,
+        "being unhappy must not turn Claude into Tagilla rage"
+    );
+}
+
+#[test]
 fn grounded_pet_tracks_taskbar_work_area_changes_without_falling() {
     let mut w = world();
     let mut p = Pet::new(101, Skin::Claude, Vec2::new(200.0, 700.0));
@@ -289,6 +533,7 @@ fn fullscreen_is_a_host_visibility_decision_not_an_engine_pause() {
 #[test]
 fn cursor_chase_clings_then_mouse_shake_knocks_pet_off() {
     let mut w = world();
+    w.cursor = Vec2::new(500.0, 230.0);
     let mut p = Pet::new(8, Skin::Claude, Vec2::new(490.0, 300.0));
     p.chase = true;
     p.state = State::Idle;
@@ -296,7 +541,7 @@ fn cursor_chase_clings_then_mouse_shake_knocks_pet_off() {
     assert_eq!(p.state, State::Hold);
     for i in 0..12 {
         w.cursor.x = if i % 2 == 0 { 400.0 } else { 500.0 };
-        w.cursor.y = 300.0;
+        w.cursor.y = 230.0;
         p.update(0.1, &w);
         if p.state != State::Hold {
             break;
@@ -304,6 +549,26 @@ fn cursor_chase_clings_then_mouse_shake_knocks_pet_off() {
     }
     assert_ne!(p.state, State::Hold);
     assert_eq!(p.state, State::Thrown);
+}
+
+#[test]
+fn turning_off_chase_while_holding_drops_without_teleporting_to_floor() {
+    let mut w = world();
+    w.cursor = Vec2::new(500.0, 230.0);
+    let mut p = Pet::new(212, Skin::Claude, Vec2::new(490.0, 300.0));
+    p.chase = true;
+    p.state = State::Idle;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Hold);
+    let held_y = p.pos.y;
+
+    p.chase = false;
+    p.update(1.0 / 240.0, &w);
+    assert_eq!(p.state, State::Fall);
+    assert!(
+        (p.pos.y - held_y).abs() < 1.0,
+        "drop should begin at the held position"
+    );
 }
 
 #[test]
@@ -388,6 +653,28 @@ fn commands_drag_release_pet_and_jump_are_simulation_only() {
     assert!(!p.dragging);
     assert_eq!(p.state, State::Thrown);
     assert_eq!(p.vel.x, 400.0);
+}
+
+#[test]
+fn quick_jump_launches_from_run_dance_wave_sleep_and_hold() {
+    for state in [
+        State::Run,
+        State::Dance,
+        State::Wave,
+        State::Sleep,
+        State::Hold,
+    ] {
+        let mut p = Pet::new(220 + state as u64, Skin::Claude, Vec2::new(300.0, 700.0));
+        p.state = state;
+        p.chase = state == State::Hold;
+        p.jump();
+        assert_eq!(
+            p.state,
+            State::Jump,
+            "quick jump should launch from {state:?}"
+        );
+        assert!(p.vel.y < 0.0);
+    }
 }
 
 #[test]

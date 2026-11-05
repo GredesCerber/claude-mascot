@@ -50,6 +50,9 @@ pub struct MenuState {
     pub tagilla: bool,
     pub scale: f64,
     pub target_fps: u32,
+    pub show_bubbles: bool,
+    pub show_mood: bool,
+    pub satisfaction: u8,
 }
 impl Default for MenuState {
     fn default() -> Self {
@@ -64,6 +67,9 @@ impl Default for MenuState {
             tagilla: false,
             scale: 1.0,
             target_fps: crate::timing::DEFAULT_FPS,
+            show_bubbles: true,
+            show_mood: true,
+            satisfaction: 75,
         }
     }
 }
@@ -586,40 +592,221 @@ unsafe fn tray_icon_from_ico(ico: &[u8]) -> HICON {
     )
 }
 
-const MENU_ITEMS: &[(u16, &str)] = &[
-    (80, "FPS: 30"),
-    (81, "FPS: 60"),
-    (82, "FPS: 120"),
-    (83, "FPS: 144"),
-    (84, "FPS: 240"),
-    (0, ""),
-    (1, "Гулять"),
-    (2, "Сидеть"),
-    (3, "Спать"),
-    (4, "Карабкаться"),
-    (5, "Гоняться"),
-    (6, "Крушить"),
-    (7, "Ярость"),
-    (8, "Переключить ярость"),
-    (0, ""),
-    (10, "Claude"),
-    (11, "Тагилла"),
-    (20, "Позвать Claude"),
-    (21, "Позвать Тагиллу"),
-    (0, ""),
-    (30, "Убрать этого питомца"),
-    (31, "Закрыть всех питомцев"),
-    (0, ""),
-    (40, "Пауза"),
-    (41, "Скрыть в полноэкранном режиме"),
-    (42, "Запускать вместе с Windows"),
-    (60, "Проверить обновления"),
-    (61, "Автопроверка обновлений"),
-    (0, ""),
-    (50, "Маленький размер"),
-    (51, "Обычный размер"),
-    (52, "Большой размер"),
+const FPS_ITEMS: &[(u16, u32, &str)] = &[
+    (80, 30, "30 кадров/с"),
+    (81, 60, "60 кадров/с"),
+    (82, 120, "120 кадров/с"),
+    (83, 144, "144 кадра/с"),
+    (84, 240, "240 кадров/с"),
 ];
+
+/// Owns a menu tree until it is attached to its parent (or explicitly destroyed).
+/// DestroyMenu recursively frees any submenus already attached to the root.
+struct MenuGuard(HMENU);
+impl MenuGuard {
+    unsafe fn popup() -> Option<Self> {
+        let menu = CreatePopupMenu();
+        (!menu.is_null()).then_some(Self(menu))
+    }
+    fn raw(&self) -> HMENU {
+        self.0
+    }
+    fn into_raw(self) -> HMENU {
+        let menu = self.0;
+        std::mem::forget(self);
+        menu
+    }
+}
+impl Drop for MenuGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_null() {
+                DestroyMenu(self.0);
+            }
+        }
+    }
+}
+
+unsafe fn append_item(menu: HMENU, id: u16, label: &str, flags: u32) -> bool {
+    let label = wide(label);
+    AppendMenuW(menu, flags | MF_STRING, id as usize, label.as_ptr()) != 0
+}
+
+unsafe fn append_submenu(parent: HMENU, child: MenuGuard, label: &str) -> bool {
+    let label = wide(label);
+    if AppendMenuW(parent, MF_POPUP, child.raw() as usize, label.as_ptr()) == 0 {
+        return false;
+    }
+    child.into_raw(); // ownership moved to parent
+    true
+}
+
+unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
+    let root = MenuGuard::popup()?;
+    if !append_item(root.raw(), 70, "Прыгнуть", 0)
+        || !append_item(root.raw(), 71, "Погладить", 0)
+        || !append_item(root.raw(), 72, "Потанцевать", 0)
+        || !append_item(root.raw(), 73, "Помахать", 0)
+        || !append_item(
+            root.raw(),
+            0,
+            &format!(
+                "Настроение: {} · {}%",
+                if s.satisfaction >= 70 {
+                    "доволен"
+                } else if s.satisfaction >= 35 {
+                    "спокоен"
+                } else {
+                    "сердится"
+                },
+                s.satisfaction.min(100)
+            ),
+            MF_GRAYED,
+        )
+        || AppendMenuW(root.raw(), MF_SEPARATOR, 0, null()) == 0
+    {
+        return None;
+    }
+
+    let actions = MenuGuard::popup()?;
+    for (id, label) in [
+        (1, "Гулять"),
+        (2, "Сидеть"),
+        (3, "Спать"),
+        (4, "Карабкаться"),
+        (5, "Бегать за курсором"),
+        (6, "Крушить"),
+        (7, "Ярость"),
+        (8, "Постоянная ярость"),
+    ] {
+        let disabled = !s.tagilla && (6..=8).contains(&id);
+        if !append_item(
+            actions.raw(),
+            id,
+            label,
+            if disabled { MF_GRAYED } else { 0 },
+        ) {
+            return None;
+        }
+    }
+    if (1..=4).contains(&s.selected_action) {
+        CheckMenuRadioItem(actions.raw(), 1, 4, s.selected_action as u32, MF_BYCOMMAND);
+    } else {
+        for id in 1..=4 {
+            check_menu(actions.raw(), id, false);
+        }
+    }
+    check_menu(actions.raw(), 5, s.chase);
+    check_menu(actions.raw(), 8, s.rage);
+    if !append_submenu(root.raw(), actions, "Поведение") {
+        return None;
+    }
+
+    let characters = MenuGuard::popup()?;
+    for (id, label, checked) in [(10, "Claude", !s.tagilla), (11, "Тагилла", s.tagilla)] {
+        if !append_item(characters.raw(), id, label, 0) {
+            return None;
+        }
+        check_menu(characters.raw(), id, checked);
+    }
+    if AppendMenuW(characters.raw(), MF_SEPARATOR, 0, null()) == 0
+        || !append_item(characters.raw(), 20, "Позвать Claude", 0)
+        || !append_item(characters.raw(), 21, "Позвать Тагиллу", 0)
+        || AppendMenuW(characters.raw(), MF_SEPARATOR, 0, null()) == 0
+        || !append_item(characters.raw(), 30, "Убрать этого питомца", 0)
+        || !append_submenu(root.raw(), characters, "Персонажи и друзья")
+    {
+        return None;
+    }
+
+    let settings = MenuGuard::popup()?;
+    for (id, label, checked) in [
+        (40, "Пауза", s.paused),
+        (41, "Скрывать в полноэкранном режиме", s.hide_fullscreen),
+        (42, "Запускать вместе с Windows", s.autostart),
+        (43, "Показывать реплики", s.show_bubbles),
+        (44, "Показывать настроение", s.show_mood),
+    ] {
+        if !append_item(settings.raw(), id, label, 0) {
+            return None;
+        }
+        check_menu(settings.raw(), id, checked);
+    }
+    let size = MenuGuard::popup()?;
+    for (id, label, checked) in [
+        (50, "Маленький", s.scale < 0.9),
+        (51, "Обычный", (0.9..=1.25).contains(&s.scale)),
+        (52, "Большой", s.scale > 1.25),
+    ] {
+        if !append_item(size.raw(), id, label, 0) {
+            return None;
+        }
+        check_menu(size.raw(), id, checked);
+    }
+    CheckMenuRadioItem(
+        size.raw(),
+        50,
+        52,
+        if s.scale < 0.9 {
+            50
+        } else if s.scale > 1.25 {
+            52
+        } else {
+            51
+        },
+        MF_BYCOMMAND,
+    );
+    if !append_submenu(settings.raw(), size, "Размер") {
+        return None;
+    }
+
+    let fps = MenuGuard::popup()?;
+    for &(id, value, label) in FPS_ITEMS {
+        if !append_item(fps.raw(), id, label, 0) {
+            return None;
+        }
+        check_menu(fps.raw(), id, s.target_fps == value);
+    }
+    if !FPS_ITEMS.iter().any(|&(_, value, _)| value == s.target_fps)
+        && !append_item(
+            fps.raw(),
+            0,
+            &format!("{} кадров/с (текущий режим)", s.target_fps),
+            MF_GRAYED,
+        )
+    {
+        return None;
+    }
+    if let Some(&(id, _, _)) = FPS_ITEMS
+        .iter()
+        .find(|&&(_, value, _)| value == s.target_fps)
+    {
+        CheckMenuRadioItem(fps.raw(), 80, 84, id as u32, MF_BYCOMMAND);
+    }
+    if !append_submenu(settings.raw(), fps, "Частота кадров")
+        || AppendMenuW(settings.raw(), MF_SEPARATOR, 0, null()) == 0
+        || !append_item(settings.raw(), 60, "Проверить обновления", 0)
+        || !append_item(settings.raw(), 61, "Автопроверка обновлений", 0)
+    {
+        return None;
+    }
+    check_menu(settings.raw(), 61, s.auto_updates);
+    if !append_submenu(root.raw(), settings, "Настройки")
+        || AppendMenuW(root.raw(), MF_SEPARATOR, 0, null()) == 0
+        || !append_item(root.raw(), 31, "Выход", 0)
+    {
+        return None;
+    }
+    Some(root)
+}
+
+unsafe fn check_menu(menu: HMENU, id: u16, checked: bool) {
+    CheckMenuItem(
+        menu,
+        id as u32,
+        MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED },
+    );
+}
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
@@ -752,51 +939,15 @@ unsafe fn add_tray_icon(state: &HostState) {
 
 fn show_menu(hwnd: HWND, state: &HostState) {
     unsafe {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            return;
-        }
-        for &(id, label) in MENU_ITEMS {
-            let appended = if id == 0 {
-                AppendMenuW(menu, MF_SEPARATOR, 0, null())
-            } else {
-                let label = wide(label);
-                AppendMenuW(menu, MF_STRING, id as usize, label.as_ptr())
-            };
-            if appended == 0 {
-                DestroyMenu(menu);
-                return;
-            }
-        }
         let s = *state.menu_state.lock().unwrap_or_else(|e| e.into_inner());
-        let check = |id: u16, selected: bool| {
-            CheckMenuItem(
-                menu,
-                id as u32,
-                MF_BYCOMMAND | if selected { MF_CHECKED } else { MF_UNCHECKED },
-            );
+        let Some(menu) = build_menu_tree(s) else {
+            return;
         };
-        for id in 1..=7 {
-            check(id, s.selected_action == id || (id == 5 && s.chase));
-        }
-        check(8, s.rage);
-        for (id, fps) in [(80, 30), (81, 60), (82, 120), (83, 144), (84, 240)] {
-            check(id, s.target_fps == fps);
-        }
-        check(10, !s.tagilla);
-        check(11, s.tagilla);
-        check(40, s.paused);
-        check(41, s.hide_fullscreen);
-        check(42, s.autostart);
-        check(61, s.auto_updates);
-        check(50, s.scale < 0.9);
-        check(51, (0.9..=1.25).contains(&s.scale));
-        check(52, s.scale > 1.25);
         let mut p = POINT { x: 0, y: 0 };
         GetCursorPos(&mut p);
         SetForegroundWindow(hwnd);
         let chosen = TrackPopupMenu(
-            menu,
+            menu.raw(),
             TPM_RIGHTBUTTON | TPM_RETURNCMD,
             p.x,
             p.y,
@@ -814,7 +965,6 @@ fn show_menu(hwnd: HWND, state: &HostState) {
         // Required for notification-area menus so Explorer dismisses the menu
         // after TrackPopupMenu returns.
         PostMessageW(hwnd, WM_NULL, 0, 0);
-        DestroyMenu(menu);
     }
 }
 
@@ -1039,5 +1189,71 @@ mod tests {
         assert_eq!(wait_millis_ceil(Duration::from_millis(1)), 1);
         assert_eq!(wait_millis_ceil(Duration::from_micros(1_001)), 2);
         assert_eq!(wait_millis_ceil(Duration::MAX), u32::MAX);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn context_menu_builds_compact_hierarchy_and_respects_character_state() {
+        use super::*;
+        unsafe {
+            let menu = build_menu_tree(MenuState {
+                tagilla: false,
+                selected_action: 2,
+                target_fps: 90,
+                ..MenuState::default()
+            })
+            .unwrap();
+            assert_eq!(GetMenuItemCount(menu.raw()), 11);
+            let actions = GetSubMenu(menu.raw(), 6);
+            let characters = GetSubMenu(menu.raw(), 7);
+            let settings = GetSubMenu(menu.raw(), 8);
+            let fps = GetSubMenu(settings, 6);
+            assert!(!actions.is_null() && !characters.is_null() && !settings.is_null());
+            assert!(!fps.is_null());
+            let state = |menu, id| {
+                let state = GetMenuState(menu, id, MF_BYCOMMAND);
+                assert_ne!(state, u32::MAX, "menu command {id} must exist");
+                state
+            };
+            assert_ne!(state(actions, 2) & MF_CHECKED, 0);
+            assert_eq!(state(actions, 1) & MF_CHECKED, 0);
+            assert_ne!(state(actions, 6) & MF_GRAYED, 0);
+            assert_eq!(state(actions, 5) & MF_CHECKED, 0);
+            assert_eq!(GetMenuItemCount(fps), 6); // FPS presets plus current custom rate
+            for id in 80..=84 {
+                assert_eq!(state(fps, id) & MF_CHECKED, 0);
+            }
+        }
+        unsafe {
+            let menu = build_menu_tree(MenuState {
+                tagilla: true,
+                chase: true,
+                target_fps: 120,
+                ..MenuState::default()
+            })
+            .unwrap();
+            let actions = GetSubMenu(menu.raw(), 6);
+            let settings = GetSubMenu(menu.raw(), 8);
+            let fps = GetSubMenu(settings, 6);
+            let state = |menu, id| {
+                let state = GetMenuState(menu, id, MF_BYCOMMAND);
+                assert_ne!(state, u32::MAX, "menu command {id} must exist");
+                state
+            };
+            assert_eq!(state(actions, 6) & MF_GRAYED, 0);
+            assert_ne!(state(actions, 5) & MF_CHECKED, 0);
+            assert_ne!(state(fps, 82) & MF_CHECKED, 0);
+        }
+        unsafe {
+            let menu = build_menu_tree(MenuState {
+                selected_action: 72,
+                ..MenuState::default()
+            })
+            .unwrap();
+            let actions = GetSubMenu(menu.raw(), 6);
+            for id in 1..=4 {
+                assert_eq!(GetMenuState(actions, id, MF_BYCOMMAND) & MF_CHECKED, 0);
+            }
+        }
     }
 }

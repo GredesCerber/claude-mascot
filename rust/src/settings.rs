@@ -13,6 +13,7 @@ pub struct Settings {
     pub target_fps: u32,
     pub hide_fullscreen: bool,
     pub show_bubbles: bool,
+    pub show_mood: bool,
     pub paused: bool,
     pub auto_updates: bool,
     pub update_repo: String,
@@ -28,6 +29,7 @@ impl Default for Settings {
             target_fps: DEFAULT_FPS,
             hide_fullscreen: true,
             show_bubbles: true,
+            show_mood: true,
             paused: false,
             auto_updates: true,
             update_repo: option_env!("MASCOT_UPDATE_REPO")
