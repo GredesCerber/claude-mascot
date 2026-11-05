@@ -8,7 +8,6 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Mutex, OnceLock,
 };
-use windows_sys::core::PCWSTR;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -27,7 +26,7 @@ const CLASS_NAME: &[u16] = &[
     99, 108, 97, 117, 100, 101, 45, 109, 97, 115, 99, 111, 116, 45, 110, 97, 116, 105, 118, 101, 0,
 ];
 const TRAY_MESSAGE: u32 = WM_APP + 23;
-const IDI_APP: PCWSTR = 32512usize as PCWSTR;
+const TRAY_ICON: &[u8] = include_bytes!("../assets/claude-icon.ico");
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
@@ -126,6 +125,7 @@ struct HostState {
     hwnd: HWND,
     tray: bool,
     tray_id: u32,
+    tray_icon: HICON,
 }
 static NEXT_TRAY_ID: AtomicU32 = AtomicU32::new(1);
 static CLASS: OnceLock<Result<(), String>> = OnceLock::new();
@@ -152,6 +152,7 @@ impl NativeHost {
             hwnd: null_mut(),
             tray,
             tray_id: NEXT_TRAY_ID.fetch_add(1, Ordering::Relaxed),
+            tray_icon: null_mut(),
         });
         let hinst = unsafe { GetModuleHandleW(null()) };
         if hinst.is_null() {
@@ -178,7 +179,7 @@ impl NativeHost {
             return Err(last_error("CreateWindowExW"));
         }
         state.hwnd = hwnd;
-        let host = Self {
+        let mut host = Self {
             state,
             dc: null_mut(),
             bitmap: null_mut(),
@@ -390,6 +391,9 @@ impl NativeHost {
             let mut bits: *mut c_void = null_mut();
             let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
             if bitmap.is_null() || bits.is_null() {
+                if !bitmap.is_null() {
+                    DeleteObject(bitmap);
+                }
                 DeleteDC(dc);
                 return Err(last_error("CreateDIBSection"));
             }
@@ -408,20 +412,27 @@ impl NativeHost {
         Ok(())
     }
 
-    fn add_tray(&self) -> Result<(), String> {
+    fn add_tray(&mut self) -> Result<(), String> {
         let mut data: NOTIFYICONDATAW = unsafe { zeroed() };
         data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
         data.hWnd = self.state.hwnd;
         data.uID = self.state.tray_id;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = TRAY_MESSAGE;
-        data.hIcon = unsafe { LoadIconW(null_mut(), IDI_APP) };
+        let icon = unsafe { tray_icon_from_ico(TRAY_ICON) };
+        if icon.is_null() {
+            return Err("embedded tray icon could not be decoded".into());
+        }
+        data.hIcon = icon;
         let tip = wide("Клод — питомец рабочего стола");
         let n = tip.len().min(data.szTip.len());
         data.szTip[..n].copy_from_slice(&tip[..n]);
         if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
+            unsafe { DestroyIcon(icon) };
             Err(last_error("Shell_NotifyIconW(NIM_ADD)"))
         } else {
+            // The host owns this icon until it removes the tray entry.
+            self.state.tray_icon = icon;
             Ok(())
         }
     }
@@ -465,7 +476,7 @@ impl NativeHost {
                 TIMER_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
             );
             if timer.is_null() {
-                Self::wait(duration.as_millis().min(u32::MAX as u128) as u32);
+                Self::wait(wait_millis_ceil(duration));
                 return;
             }
             struct TimerGuard(HANDLE);
@@ -479,7 +490,7 @@ impl NativeHost {
             let _guard = TimerGuard(timer);
             let due = -(ticks.min(i64::MAX as u128) as i64);
             if SetWaitableTimer(timer, &due, 0, None, null(), 0) == 0 {
-                Self::wait(duration.as_millis().min(u32::MAX as u128) as u32);
+                Self::wait(wait_millis_ceil(duration));
                 return;
             }
             MsgWaitForMultipleObjects(1, &timer, 0, INFINITE, QS_ALLINPUT);
@@ -497,6 +508,10 @@ impl Drop for NativeHost {
                 data.uID = self.state.tray_id;
                 Shell_NotifyIconW(NIM_DELETE, &data);
             }
+            if !self.state.tray_icon.is_null() {
+                DestroyIcon(self.state.tray_icon);
+                self.state.tray_icon = null_mut();
+            }
             if !self.dc.is_null() {
                 if !self.old_bitmap.is_null() {
                     SelectObject(self.dc, self.old_bitmap);
@@ -511,6 +526,64 @@ impl Drop for NativeHost {
             }
         }
     }
+}
+
+fn wait_millis_ceil(duration: std::time::Duration) -> u32 {
+    duration
+        .as_millis()
+        .saturating_add(u128::from(
+            !duration.subsec_nanos().is_multiple_of(1_000_000),
+        ))
+        .min(u32::MAX as u128) as u32
+}
+
+#[cfg(windows)]
+unsafe fn tray_icon_from_ico(ico: &[u8]) -> HICON {
+    // ICO directory entries point at RT_ICON-compatible payloads. The checked-in
+    // icon includes PNG-compressed frames, supported by Windows Vista and newer.
+    if ico.len() < 6 || ico[0..4] != [0, 0, 1, 0] {
+        return null_mut();
+    }
+    let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+    let directory_end = match 6usize.checked_add(count.saturating_mul(16)) {
+        Some(end) if end <= ico.len() => end,
+        _ => return null_mut(),
+    };
+    let mut selected: Option<(usize, usize, usize)> = None;
+    for entry in ico[6..directory_end].as_chunks::<16>().0 {
+        let width = if entry[0] == 0 {
+            256
+        } else {
+            entry[0] as usize
+        };
+        let height = if entry[1] == 0 {
+            256
+        } else {
+            entry[1] as usize
+        };
+        let size = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+        let offset = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize;
+        if width >= 32
+            && height >= 32
+            && offset >= directory_end
+            && offset.checked_add(size).is_some_and(|end| end <= ico.len())
+            && selected.is_none_or(|(_, _, best): (usize, usize, usize)| width * height > best)
+        {
+            selected = Some((offset, size, width * height));
+        }
+    }
+    let Some((offset, size, _)) = selected else {
+        return null_mut();
+    };
+    CreateIconFromResourceEx(
+        ico[offset..offset + size].as_ptr(),
+        size as u32,
+        1,
+        0x0003_0000,
+        32,
+        32,
+        LR_DEFAULTCOLOR,
+    )
 }
 
 const MENU_ITEMS: &[(u16, &str)] = &[
@@ -564,6 +637,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     // SAFETY: NativeHost keeps HostState in a Box at a stable address until after
     // DestroyWindow returns in Drop. The callback only mutates its Mutex event queue.
     let state = &*ptr;
+    if msg == taskbar_created_message() {
+        if state.tray && !state.tray_icon.is_null() {
+            add_tray_icon(state);
+        }
+        return 0;
+    }
     match msg {
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
         WM_LBUTTONDOWN => {
@@ -650,6 +729,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+fn taskbar_created_message() -> u32 {
+    static MESSAGE: OnceLock<u32> = OnceLock::new();
+    *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) })
+}
+
+unsafe fn add_tray_icon(state: &HostState) {
+    let mut data: NOTIFYICONDATAW = zeroed();
+    data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+    data.hWnd = state.hwnd;
+    data.uID = state.tray_id;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uCallbackMessage = TRAY_MESSAGE;
+    data.hIcon = state.tray_icon;
+    let tip = wide("Клод — питомец рабочего стола");
+    let n = tip.len().min(data.szTip.len());
+    data.szTip[..n].copy_from_slice(&tip[..n]);
+    Shell_NotifyIconW(NIM_ADD, &data);
 }
 
 fn show_menu(hwnd: HWND, state: &HostState) {
@@ -928,4 +1026,18 @@ fn wide(s: &str) -> Vec<u16> {
 }
 fn last_error(api: &str) -> String {
     format!("{api} failed ({})", unsafe { GetLastError() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_millis_ceil;
+    use std::time::Duration;
+
+    #[test]
+    fn wait_fallback_rounds_positive_submillisecond_remainders_up() {
+        assert_eq!(wait_millis_ceil(Duration::from_nanos(1)), 1);
+        assert_eq!(wait_millis_ceil(Duration::from_millis(1)), 1);
+        assert_eq!(wait_millis_ceil(Duration::from_micros(1_001)), 2);
+        assert_eq!(wait_millis_ceil(Duration::MAX), u32::MAX);
+    }
 }

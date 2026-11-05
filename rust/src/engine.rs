@@ -258,6 +258,18 @@ impl Pet {
             self.set_state(State::Idle, 0.0);
         }
         if self.state == State::Sleep {
+            // Sleeping pets still stand on the desktop floor. The early
+            // return below skips update_motion, so keep floor support in sync
+            // when the taskbar or monitor work area changes.
+            if let Some(i) = self.current_surface_index(world) {
+                self.follow_surface(i, world);
+            } else {
+                self.surface = None;
+                self.surface_id = None;
+                self.surface_prev = None;
+                self.pos.y = self.floor_y(world);
+                self.clamp_to_area(world);
+            }
             self.snapshot_windows(world);
             return;
         }

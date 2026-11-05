@@ -132,4 +132,30 @@ mod tests {
             Vec2::new(1000.0, 0.0)
         );
     }
+
+    #[test]
+    fn stationary_release_does_not_reuse_old_throw_velocity() {
+        let t = Instant::now();
+        let mut drag = DragVelocity::default();
+        drag.begin(t, Vec2::default());
+        assert!(
+            drag.push(t + Duration::from_millis(50), Vec2::new(60.0, 0.0))
+                .x
+                > 0.0
+        );
+        assert_eq!(
+            drag.push(t + Duration::from_millis(250), Vec2::new(60.0, 0.0)),
+            Vec2::default()
+        );
+    }
+
+    #[test]
+    fn release_position_contributes_to_throw_velocity() {
+        let t = Instant::now();
+        let mut drag = DragVelocity::default();
+        drag.begin(t, Vec2::default());
+        drag.push(t + Duration::from_millis(50), Vec2::new(10.0, 0.0));
+        let release = drag.push(t + Duration::from_millis(100), Vec2::new(80.0, -40.0));
+        assert_eq!(release, Vec2::new(800.0, -400.0));
+    }
 }

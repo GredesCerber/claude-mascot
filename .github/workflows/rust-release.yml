@@ -50,6 +50,7 @@ jobs:
       - name: Build per-user MSI
         shell: pwsh
         run: |
+          ./rust/tools/Set-ExecutableIcon.ps1 -InputExe 'rust/target/x86_64-pc-windows-msvc/release/claude-mascot.exe' -IconPath 'rust/assets/claude-icon.ico'
           dotnet tool install --global wix --version 6.0.2
           if ($LASTEXITCODE) { throw 'WiX installation failed' }
           ./rust/Build-Msi.ps1 -ExecutablePath "$env:GITHUB_WORKSPACE/rust/target/x86_64-pc-windows-msvc/release/claude-mascot.exe" -OutputDirectory "$env:RUNNER_TEMP/mascot-release"
@@ -69,9 +70,7 @@ jobs:
           Copy-Item 'rust/Uninstall.ps1' $portable
           $docs = Join-Path $portable 'docs'
           New-Item -ItemType Directory -Path $docs -Force | Out-Null
-          Copy-Item 'rust/docs/architecture.md' $docs
-          Copy-Item 'rust/docs/updates.md' $docs
-          Copy-Item 'rust/docs/msi.md' $docs
+          Get-ChildItem 'rust/docs' -File | Copy-Item -Destination $docs
           $zip = Join-Path $dist 'claude-mascot-windows-x64.zip'
           Compress-Archive -Path (Join-Path $portable '*') -DestinationPath $zip
           $lines = @(

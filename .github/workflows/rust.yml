@@ -21,6 +21,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - name: Embed executable icon
+        run: ./tools/Set-ExecutableIcon.ps1 -InputExe target/release/claude-mascot.exe -IconPath assets/claude-icon.ico
       - uses: actions/upload-artifact@v4
         with:
           name: claude-mascot-windows-x64

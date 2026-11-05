@@ -59,6 +59,24 @@ fn grounded_pet_tracks_taskbar_work_area_changes_without_falling() {
 }
 
 #[test]
+fn sleeping_pet_tracks_taskbar_work_area_changes() {
+    let mut w = world();
+    let mut p = Pet::new(106, Skin::Claude, Vec2::new(200.0, 700.0));
+    p.command(Command::Sleep, &w);
+    p.update(1.0 / 60.0, &w);
+
+    w.work_areas[0].h = 660.0;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Sleep);
+    assert!((p.pos.y - 660.0).abs() < 0.1);
+
+    w.work_areas[0].h = 700.0;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Sleep);
+    assert!((p.pos.y - 700.0).abs() < 0.1);
+}
+
+#[test]
 fn landing_keeps_horizontal_inertia_and_ground_friction_slows_it() {
     let w = world();
     let mut p = Pet::new(102, Skin::Claude, Vec2::new(200.0, 700.0));

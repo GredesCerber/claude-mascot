@@ -65,10 +65,7 @@ pub(crate) fn download_and_stage(
     validate_download_metadata(repo, release)?;
     let (status, bytes) = get(
         "github.com",
-        &format!(
-            "/repos/{repo}/releases/download/{}/{}",
-            release.tag, WINDOWS_ASSET
-        ),
+        &download_path(repo, &release.tag),
         "application/octet-stream",
         MAX_EXECUTABLE_SIZE,
     )?;
@@ -96,6 +93,10 @@ pub(crate) fn download_and_stage(
         sha256: digest,
         version: release.version.clone(),
     })
+}
+
+fn download_path(repo: &str, tag: &str) -> String {
+    format!("/{repo}/releases/download/{tag}/{WINDOWS_ASSET}")
 }
 
 fn validate_download_metadata(repo: &str, release: &ReleaseInfo) -> Result<(), String> {
@@ -332,4 +333,17 @@ fn wide(value: &str) -> Vec<u16> {
 
 fn last_error(api: &str) -> String {
     format!("{api} failed ({})", unsafe { GetLastError() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::download_path;
+
+    #[test]
+    fn asset_path_matches_github_browser_download_route() {
+        assert_eq!(
+            download_path("kerimovernes/claude-mascot", "rust-v0.2.2"),
+            "/kerimovernes/claude-mascot/releases/download/rust-v0.2.2/claude-mascot-windows-x64.exe"
+        );
+    }
 }

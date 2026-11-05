@@ -4,7 +4,8 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS, GR_USEROBJECTS,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    GetWindowLongPtrW, RegisterWindowMessageW, SendMessageW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    WS_EX_TRANSPARENT,
 };
 
 #[test]
@@ -15,6 +16,18 @@ fn native_surfaces_release_gdi_and_user_handles() {
         let mut h = NativeHost::new("Mascot native test", 16, 16, false).unwrap();
         h.present(&vec![0xFFAA4422; 256], 0, 0).unwrap();
     }
+    // Creating the tray host verifies the embedded ICO can become a native
+    // HICON and is registered; replay Explorer's restart notification as well.
+    {
+        let h = NativeHost::new("Mascot tray lifecycle test", 16, 16, true).unwrap();
+        let taskbar_created = "TaskbarCreated"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let message = unsafe { RegisterWindowMessageW(taskbar_created.as_ptr()) };
+        assert_ne!(message, 0);
+        assert_eq!(unsafe { SendMessageW(h.hwnd(), message, 0, 0) }, 0);
+    }
     let counts = || unsafe {
         (
             GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS),
@@ -22,8 +35,17 @@ fn native_surfaces_release_gdi_and_user_handles() {
         )
     };
     let before = counts();
+    let taskbar_created = "TaskbarCreated"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let taskbar_message = unsafe { RegisterWindowMessageW(taskbar_created.as_ptr()) };
     for i in 0..50 {
-        let mut h = NativeHost::new("Mascot native test", 16, 16, false).unwrap();
+        let tray = i % 10 == 0;
+        let mut h = NativeHost::new("Mascot native test", 16, 16, tray).unwrap();
+        if tray {
+            assert_eq!(unsafe { SendMessageW(h.hwnd(), taskbar_message, 0, 0) }, 0);
+        }
         assert!(h.present(&[], 0, 0).is_err());
         h.present(&vec![0x80804020; 256], 0, 0).unwrap();
         if i % 2 == 0 {

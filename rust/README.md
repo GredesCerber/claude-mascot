@@ -31,9 +31,11 @@ powershell -ExecutionPolicy Bypass -File .\Install.ps1 -Autostart
 ```
 
 Autostart is off by default. It can also be toggled from the mascot or tray
-icon's right-click menu. `Uninstall.ps1` removes the Rust executable, shortcuts,
-and autostart entry. Settings are kept unless `-RemoveSettings` is supplied.
-The Rust installation and settings are separate from the Python version.
+icon's right-click menu. `Uninstall.ps1` removes the Rust executable, its
+shortcuts, and its own autostart entry. Settings are kept unless
+`-RemoveSettings` is supplied, which removes only `settings.json` and
+`last-error.log`. Other user files are preserved. The Rust installation and
+settings are separate from the Python version.
 
 ## Controls
 
@@ -156,7 +158,7 @@ window. `--smoke-test` exercises the native Windows host for a bounded duration
 and `--trace` writes summary counters. `--inspect-window` is a Windows-only QA
 option that exposes the native window for inspection. See [docs/architecture.md](docs/architecture.md)
 for module boundaries and known behavior gaps, and
-[docs/verification.md](docs/verification.md) for the current verification
+[docs/verification-0.2.2.md](docs/verification-0.2.2.md) for the current verification
 record.
 
 ## Current limits

@@ -192,6 +192,97 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn clear_own_autostart() -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+
+    const MAX_AUTOSTART_BYTES: usize = 32 * 1024;
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+    const ERROR_MORE_DATA: u32 = 234;
+
+    let sub = wide(std::ffi::OsStr::new(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+    ));
+    let name = wide(std::ffi::OsStr::new("ClaudeMascotRust"));
+    let mut key = std::ptr::null_mut();
+    // SAFETY: opens only the current user's Run key. The handle is closed below.
+    let code = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            sub.as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    if code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND {
+        return Ok(());
+    }
+    if code != 0 {
+        return Err(format!("Cannot open startup settings ({code})"));
+    }
+
+    let result = (|| {
+        let mut value_type = 0u32;
+        let mut size = MAX_AUTOSTART_BYTES as u32;
+        let mut buffer = vec![0u16; MAX_AUTOSTART_BYTES / 2];
+        // SAFETY: buffer is writable and size is its byte capacity; key/name remain valid.
+        let code = unsafe {
+            RegGetValueW(
+                key,
+                std::ptr::null(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ,
+                &mut value_type,
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if code == ERROR_FILE_NOT_FOUND || code == ERROR_MORE_DATA {
+            return Ok(());
+        }
+        if code != 0 {
+            return Err(format!("Cannot read startup settings ({code})"));
+        }
+        if value_type != REG_SZ
+            || size == 0
+            || size as usize > MAX_AUTOSTART_BYTES
+            || !size.is_multiple_of(2)
+        {
+            return Ok(());
+        }
+        let units = size as usize / 2;
+        if buffer[units - 1] != 0 {
+            return Ok(());
+        }
+        let Ok(value) = String::from_utf16(&buffer[..units - 1]) else {
+            return Ok(());
+        };
+        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        if !matches_own_autostart_value(&value, &executable) {
+            return Ok(());
+        }
+
+        // SAFETY: removes only this named value after verifying its exact command path.
+        let code = unsafe { RegDeleteValueW(key, name.as_ptr()) };
+        if code == 0 || code == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(format!("Cannot remove startup settings ({code})"))
+        }
+    })();
+    // SAFETY: key was opened successfully and is owned by this function.
+    unsafe { RegCloseKey(key) };
+    result
+}
+
+#[cfg(any(windows, test))]
+fn matches_own_autostart_value(value: &str, executable: &Path) -> bool {
+    let expected = format!("\"{}\"", executable.display());
+    value.to_lowercase() == expected.to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +294,31 @@ mod tests {
         assert!(s.hide_fullscreen);
         assert!(!s.paused);
     }
+    #[test]
+    fn autostart_match_requires_exact_quoted_executable_path() {
+        let executable = Path::new(r"C:\Program Files\Claude Mascot\claude-mascot.exe");
+        assert!(matches_own_autostart_value(
+            r#""C:\Program Files\Claude Mascot\claude-mascot.exe""#,
+            executable
+        ));
+        assert!(matches_own_autostart_value(
+            r#""c:\program files\claude mascot\CLAUDE-MASCOT.EXE""#,
+            executable
+        ));
+        assert!(!matches_own_autostart_value(
+            r#"C:\Program Files\Claude Mascot\claude-mascot.exe"#,
+            executable
+        ));
+        assert!(!matches_own_autostart_value(
+            r#""C:\Other\claude-mascot.exe""#,
+            executable
+        ));
+        assert!(!matches_own_autostart_value(
+            r#""C:\Program Files\Claude Mascot\claude-mascot.exe" --autostart"#,
+            executable
+        ));
+    }
+
     #[test]
     fn round_trip_and_replace() {
         let p =

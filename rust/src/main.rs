@@ -155,6 +155,25 @@ fn main() {
 }
 fn run() -> Result<(), String> {
     #[cfg(windows)]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "--uninstall-autostart")
+    {
+        if std::env::args_os().count() != 2 {
+            return Err("--uninstall-autostart accepts no additional arguments".into());
+        }
+        // Windows Installer calls this before removing our EXE. Do not start
+        // the desktop host, acquire the singleton, or perform update checks.
+        return match claude_mascot::settings::clear_own_autostart() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // An uninstall helper must never block MSI on an error dialog.
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        };
+    }
+    #[cfg(windows)]
     let msi_mode = running_from_msi();
     #[cfg(windows)]
     {
@@ -336,8 +355,6 @@ mod native {
     struct Drag {
         offset: Vec2,
         start: Vec2,
-        last_at: Instant,
-        velocity: Vec2,
         samples: claude_mascot::timing::DragVelocity,
         moved: bool,
     }
@@ -419,6 +436,8 @@ mod native {
         let mut autostart = settings::autostart_enabled();
         let mut accumulator = 0.0;
         let mut frames = 0u64;
+        let mut presented_frames = 0u64;
+        let mut physics_steps = 0u64;
         let mut snapshots = 0u64;
         let mut running = true;
         while running && NativeHost::pump() {
@@ -523,8 +542,6 @@ mod native {
                             e.drag = Some(Drag {
                                 offset: Vec2::new(e.pet.pos.x - p.x, e.pet.pos.y - p.y),
                                 start: p,
-                                last_at: now,
-                                velocity: Vec2::default(),
                                 samples: {
                                     let mut samples =
                                         claude_mascot::timing::DragVelocity::default();
@@ -537,26 +554,19 @@ mod native {
                         InputEvent::PointerMove(p) => {
                             if let Some(d) = &mut e.drag {
                                 d.moved |= (p.x - d.start.x).hypot(p.y - d.start.y) > 4.0;
-                                let sampled = d.samples.push(now, p);
-                                if sampled != Vec2::default() {
-                                    d.velocity = sampled;
-                                }
-                                d.last_at = now;
+                                d.samples.push(now, p);
                                 if d.moved {
                                     e.pet.drag_to(Vec2::new(p.x + d.offset.x, p.y + d.offset.y));
                                 }
                             }
                         }
-                        InputEvent::PointerUp(_) => {
-                            if let Some(d) = e.drag.take() {
+                        InputEvent::PointerUp(p) => {
+                            if let Some(mut d) = e.drag.take() {
                                 if d.moved {
-                                    let v = if now.duration_since(d.last_at)
-                                        < Duration::from_millis(120)
-                                    {
-                                        d.velocity
-                                    } else {
-                                        Vec2::default()
-                                    };
+                                    // Include the release position and any pause before release.
+                                    // Reusing the last nonzero move would fling a stationary pet.
+                                    let v = d.samples.push(now, p);
+                                    e.pet.drag_to(Vec2::new(p.x + d.offset.x, p.y + d.offset.y));
                                     e.pet.release(v);
                                 } else {
                                     e.pet.pet();
@@ -630,15 +640,6 @@ mod native {
                         };
                         pacer.set_fps(now, settings.target_fps);
                         save = true;
-                    }
-                    85 => {
-                        // Custom retains the current persisted integer. A --fps value
-                        // supplies an explicit one-shot custom selection as well.
-                        if let Some(fps) = o.fps {
-                            settings.target_fps = fps;
-                            pacer.set_fps(now, fps);
-                            save = true;
-                        }
                     }
                     60 => {
                         if msi_mode {
@@ -718,6 +719,7 @@ mod native {
                 accumulator = 0.0;
             } else {
                 while accumulator >= 1.0 / claude_mascot::timing::SIMULATION_HZ as f64 {
+                    physics_steps += 1;
                     for e in &mut entries {
                         e.pet
                             .update(1.0 / claude_mascot::timing::SIMULATION_HZ as f64, &world);
@@ -762,7 +764,7 @@ mod native {
                     }
                 }
                 e.host.set_menu_state(MenuState {
-                    auto_updates: settings.auto_updates,
+                    auto_updates: settings.auto_updates && !msi_mode,
                     selected_action: match e.pet.state {
                         claude_mascot::engine::State::Sit => 2,
                         claude_mascot::engine::State::Sleep => 3,
@@ -785,6 +787,7 @@ mod native {
                     let x = (e.pet.pos.x - FEET_X * settings.scale).round() as i32;
                     let y = (e.pet.pos.y - FEET_Y * settings.scale).round() as i32;
                     e.host.present(&frame.pixels, x, y)?;
+                    presented_frames += 1;
                 }
             }
             if !hidden && !settings.paused {
@@ -812,7 +815,17 @@ mod native {
             }
         }
         if let Some(path) = o.trace {
-            let result = serde_json::json!({"native_frames":frames,"world_snapshots":snapshots,"elapsed_seconds":start.elapsed().as_secs_f64(),"pets":entries.len(),"exit":"clean"});
+            let result = serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "native_frames": frames,
+                "presented_frames": presented_frames,
+                "physics_steps": physics_steps,
+                "target_fps": settings.target_fps,
+                "world_snapshots": snapshots,
+                "elapsed_seconds": start.elapsed().as_secs_f64(),
+                "pets": entries.len(),
+                "exit": "clean"
+            });
             std::fs::write(path, serde_json::to_vec_pretty(&result).unwrap())
                 .map_err(|e| e.to_string())?;
         }

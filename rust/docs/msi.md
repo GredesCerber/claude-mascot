@@ -2,11 +2,17 @@
 
 The MSI is a per-user Windows Installer package. It installs into
 `%LOCALAPPDATA%\claude-mascot-rust`, creates Start Menu and Desktop shortcuts,
-and registers normally in Apps & Features / Programs and Features. It does not
-request administrator access or enable sign-in autostart. The settings file
+and registers normally in Apps & Features / Programs and Features. Its Start Menu
+folder includes an uninstall shortcut. The package does not request administrator
+access or enable sign-in autostart. The settings file
 may share the install directory, but it is not an MSI component and is
 preserved during upgrade and uninstall. Windows Installer removes the install
 directory only if it is empty.
+
+Uninstall performs a best-effort cleanup of the application's named
+`ClaudeMascotRust` startup entry when its command points to this installed EXE.
+An entry pointing to a different copy is preserved. Major upgrades skip this
+cleanup so an existing sign-in preference survives the upgrade.
 
 The MSI is an independent community build, identified as `GredesCerber` in
 Windows' installer listing. The repository's upstream source attribution is
@@ -52,3 +58,18 @@ wix msi validate .\dist\claude-mascot-0.2.1-x64.msi
 Review the decompiled source for the per-user scope, fixed UpgradeCode,
 executable and ownership marker, Start Menu/Desktop shortcuts, and absence of
 an autostart entry before distributing a package.
+
+The portable `Install.ps1` and `Uninstall.ps1` use the same default directory
+for compatibility with existing portable installs. Both scripts check the
+MSI marker and stop before changing an MSI-owned installation. Manage an MSI
+install through Windows Settings or Apps & Features.
+
+The portable `Install.ps1` copies its uninstaller into the install directory and
+adds a Start Menu uninstall shortcut. Portable uninstall removes only its
+executable, its installed uninstaller, and shortcuts that point to those files.
+It removes the autostart entry only when it points to this install. Settings and
+other files are preserved by default. `Uninstall.ps1 -RemoveSettings` also
+removes `settings.json` and `last-error.log`; any other files in the directory
+are preserved. Both portable scripts check the MSI marker and stop before
+changing an MSI-owned installation. Manage an MSI install through Windows
+Settings or Apps & Features.

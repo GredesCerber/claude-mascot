@@ -152,6 +152,7 @@ fn apply_inner(plan_path: &Path) -> Result<(), String> {
         return Err("Update version metadata is invalid".into());
     }
     let target = absolute_existing_file(&plan.target)?;
+    refuse_msi_target(&target)?;
     let staged =
         fs::canonicalize(&plan.staged).map_err(|e| format!("Cannot resolve staged update: {e}"))?;
     validate_layout(&helper, &plan_path, &stage_dir, &staged, &target)?;
@@ -329,6 +330,18 @@ fn ensure_disjoint(stage_dir: &Path, staged: &Path, target: &Path) -> Result<(),
         return Err("Update target must be separate from the staging files".into());
     }
     Ok(())
+}
+
+fn refuse_msi_target(target: &Path) -> Result<(), String> {
+    let marker = target
+        .parent()
+        .ok_or("Executable target has no parent directory")?
+        .join("install-mode-msi.marker");
+    if marker.is_file() {
+        Err("Update target is owned by Windows Installer".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_layout(
@@ -608,6 +621,18 @@ mod tests {
             &target
         )
         .is_err());
+    }
+
+    #[test]
+    fn apply_refuses_msi_owned_target() {
+        let f = Fixture::new();
+        let target = f.file("app.exe", b"installer-owned executable");
+        assert!(refuse_msi_target(&target).is_ok());
+        f.file("install-mode-msi.marker", b"Managed by Windows Installer.");
+        assert!(refuse_msi_target(&target)
+            .unwrap_err()
+            .contains("owned by Windows Installer"));
+        assert_eq!(fs::read(target).unwrap(), b"installer-owned executable");
     }
 
     #[test]

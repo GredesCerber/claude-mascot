@@ -1,5 +1,17 @@
 # Security and build review
 
+**Historical scope: original 0.1.0 executable.** The findings below describe
+that sample, not the current updater-enabled application. Since 0.2.0, the
+source includes WinHTTP release discovery/download and a child-process update
+helper; downloaded assets require the expected GitHub route and SHA-256, and
+download/restart requires user confirmation. Current local verification is in
+[verification-0.2.2.md](verification-0.2.2.md).
+
+The original sample was later also quarantined locally and submitted to
+Microsoft. The early clean scans below remain historical observations; they
+are not a final verdict. The Microsoft review's final result was not rechecked
+in the 0.2.2 verification pass.
+
 Review scope: Rust dependency graph, application source, Windows packaging and
 install scripts, and the delivered executable identified in the supplied
 release metadata. This is a code and artifact identity review, not an antivirus

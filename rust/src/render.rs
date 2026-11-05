@@ -347,6 +347,9 @@ impl Renderer {
         } else {
             1.0
         };
+        if scale == 1.0 {
+            return self.frame(pet, show_bubbles);
+        }
         self.frame(pet, false);
         self.scaled_canvas = self.canvas.scaled(scale);
         if show_bubbles && pet.bubble_time > 0.0 {
@@ -620,6 +623,8 @@ mod tests {
         let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
         pet.bubble = Some("приятно :)".into());
         pet.bubble_time = 2.0;
+        let regular = renderer.frame(&pet, true).pixels.clone();
+        assert_eq!(regular, renderer.frame_scaled(&pet, true, 1.0).pixels);
         let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/text-preview");
         std::fs::create_dir_all(&preview_dir).unwrap();
 

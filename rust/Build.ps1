@@ -14,9 +14,13 @@ if ($LASTEXITCODE) { throw 'Tests failed' }
 if ($LASTEXITCODE) { throw 'Clippy failed' }
 & $cargoPath build --locked --release
 if ($LASTEXITCODE) { throw 'Build failed' }
+& (Join-Path $PSScriptRoot 'tools\Set-ExecutableIcon.ps1') -InputExe (Join-Path $PSScriptRoot 'target\release\claude-mascot.exe') -IconPath (Join-Path $PSScriptRoot 'assets\claude-icon.ico')
 if ($Package) {
     $packageDir = Join-Path $PSScriptRoot 'dist'
     New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
     Copy-Item -LiteralPath 'target\release\claude-mascot.exe','README.md','Install.ps1','Uninstall.ps1' -Destination $packageDir -Force
-    Compress-Archive -LiteralPath (Join-Path $packageDir 'claude-mascot.exe'),(Join-Path $packageDir 'README.md'),(Join-Path $packageDir 'Install.ps1'),(Join-Path $packageDir 'Uninstall.ps1') -DestinationPath 'claude-mascot-windows-x64.zip' -Force
+    $docsDir = Join-Path $packageDir 'docs'
+    New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'docs') -File | Copy-Item -Destination $docsDir -Force
+    Compress-Archive -LiteralPath (Join-Path $packageDir 'claude-mascot.exe'),(Join-Path $packageDir 'README.md'),(Join-Path $packageDir 'Install.ps1'),(Join-Path $packageDir 'Uninstall.ps1'),$docsDir -DestinationPath 'claude-mascot-windows-x64.zip' -Force
 }
