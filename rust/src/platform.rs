@@ -42,6 +42,7 @@ pub struct MenuState {
     pub paused: bool,
     pub hide_fullscreen: bool,
     pub autostart: bool,
+    pub auto_updates: bool,
     pub chase: bool,
     pub rage: bool,
     pub tagilla: bool,
@@ -54,6 +55,7 @@ impl Default for MenuState {
             paused: false,
             hide_fullscreen: false,
             autostart: false,
+            auto_updates: true,
             chase: false,
             rage: false,
             tagilla: false,
@@ -489,6 +491,8 @@ const MENU_ITEMS: &[(u16, &str)] = &[
     (40, "Пауза"),
     (41, "Скрыть в полноэкранном режиме"),
     (42, "Запускать вместе с Windows"),
+    (60, "Проверить обновления"),
+    (61, "Автопроверка обновлений"),
     (0, ""),
     (50, "Маленький размер"),
     (51, "Обычный размер"),
@@ -634,6 +638,7 @@ fn show_menu(hwnd: HWND, state: &HostState) {
         check(40, s.paused);
         check(41, s.hide_fullscreen);
         check(42, s.autostart);
+        check(61, s.auto_updates);
         check(50, s.scale < 0.9);
         check(51, (0.9..=1.25).contains(&s.scale));
         check(52, s.scale > 1.25);

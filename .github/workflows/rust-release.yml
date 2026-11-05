@@ -1,0 +1,107 @@
+name: Rust Windows release
+
+on:
+  push:
+    tags:
+      - "rust-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      MASCOT_UPDATE_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Require a version-matched release tag
+        shell: pwsh
+        working-directory: rust
+        run: |
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq 'claude-mascot' } | Select-Object -First 1
+          if ($null -eq $package) { throw 'claude-mascot package is missing from Cargo metadata' }
+          $expected = "refs/tags/rust-v$($package.version)"
+          if ($env:GITHUB_REF -ne $expected) {
+            throw "Ref '$env:GITHUB_REF' is not the version tag '$expected'."
+          }
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: rust
+      - name: Test
+        run: cargo test --locked
+        working-directory: rust
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: rust
+      - name: Build Windows x64 executable
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+        working-directory: rust
+      - name: Package executable and SHA-256 manifest
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP 'mascot-release'
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          $builtExe = 'rust/target/x86_64-pc-windows-msvc/release/claude-mascot.exe'
+          $exe = Join-Path $dist 'claude-mascot-windows-x64.exe'
+          Copy-Item $builtExe $exe
+          $portable = Join-Path $dist 'portable'
+          New-Item -ItemType Directory -Path $portable -Force | Out-Null
+          Copy-Item $builtExe (Join-Path $portable 'claude-mascot.exe')
+          Copy-Item 'rust/README.md' (Join-Path $portable 'README.md')
+          Copy-Item 'rust/Install.ps1' $portable
+          Copy-Item 'rust/Uninstall.ps1' $portable
+          $docs = Join-Path $portable 'docs'
+          New-Item -ItemType Directory -Path $docs -Force | Out-Null
+          Copy-Item 'rust/docs/architecture.md' $docs
+          Copy-Item 'rust/docs/updates.md' $docs
+          $zip = Join-Path $dist 'claude-mascot-windows-x64.zip'
+          Compress-Archive -Path (Join-Path $portable '*') -DestinationPath $zip
+          $lines = @(
+            "$( (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant() )  $(Split-Path -Leaf $exe)",
+            "$( (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant() )  $(Split-Path -Leaf $zip)"
+          )
+          Set-Content -Path (Join-Path $dist 'SHA256SUMS') -Value $lines -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-windows-x64-release
+          path: ${{ runner.temp }}/mascot-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-windows-x64-release
+          path: release-assets
+      - name: Revalidate tag and publish release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GITHUB_REF -notmatch '^refs/tags/rust-v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Ref '$env:GITHUB_REF' is not a semantic rust-v tag."
+          }
+          gh release create $env:GITHUB_REF_NAME `
+            release-assets/claude-mascot-windows-x64.exe `
+            release-assets/claude-mascot-windows-x64.zip `
+            release-assets/SHA256SUMS `
+            --verify-tag `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "Claude Mascot $($env:GITHUB_REF_NAME)" `
+            --notes "Windows x64 release. SHA-256 digests for the executable and ZIP are in SHA256SUMS."

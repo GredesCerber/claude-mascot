@@ -12,6 +12,8 @@ pub struct Settings {
     pub hide_fullscreen: bool,
     pub show_bubbles: bool,
     pub paused: bool,
+    pub auto_updates: bool,
+    pub update_repo: String,
     /// Optional directory with tagilla_frames.png + tagilla_frames.json. Data only.
     pub custom_atlas: Option<PathBuf>,
 }
@@ -24,17 +26,29 @@ impl Default for Settings {
             hide_fullscreen: true,
             show_bubbles: true,
             paused: false,
+            auto_updates: true,
+            update_repo: option_env!("MASCOT_UPDATE_REPO")
+                .unwrap_or("kerimovernes/claude-mascot")
+                .into(),
             custom_atlas: None,
         }
     }
 }
 impl Settings {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let s = match std::fs::read_to_string(path) {
-            Ok(s) => s,
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(format!("Cannot read settings: {e}")),
         };
+        use std::io::Read;
+        let mut s = String::new();
+        file.take(65537)
+            .read_to_string(&mut s)
+            .map_err(|e| format!("Cannot read settings: {e}"))?;
+        if s.len() > 65536 {
+            return Err("Settings file exceeds 64 KiB".into());
+        }
         let value: Self = serde_json::from_str(&s)
             .map_err(|e| format!("Invalid settings in {}: {e}", path.display()))?;
         if value.version != 1 {

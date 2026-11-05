@@ -8,6 +8,8 @@ use claude_mascot::{
 use std::path::PathBuf;
 
 struct Options {
+    check_updates: bool,
+    skip_update_check: bool,
     inspect: bool,
     preview: Option<PathBuf>,
     headless: bool,
@@ -18,6 +20,8 @@ struct Options {
 }
 fn options() -> Result<Options, String> {
     let mut o = Options {
+        check_updates: false,
+        skip_update_check: false,
         inspect: false,
         preview: None,
         headless: false,
@@ -37,6 +41,8 @@ fn options() -> Result<Options, String> {
                 o.preview = Some(args.next().ok_or("--preview needs a directory")?.into())
             }
             "--headless" => o.headless = true,
+            "--check-updates" => o.check_updates = true,
+            "--skip-update-check" => o.skip_update_check = true,
             "--inspect-window" => o.inspect = true,
             "--smoke-test" => {
                 let n: f64 = args
@@ -93,12 +99,26 @@ fn main() {
     }
 }
 fn run() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        if args.first().is_some_and(|a| a == "--apply-update") {
+            if args.len() != 2 {
+                return Err("--apply-update requires one plan file".into());
+            }
+            return claude_mascot::update_apply::apply(std::path::Path::new(&args[1]));
+        }
+    }
     let o = options()?;
     if let Some(dir) = &o.preview {
         return preview(dir);
     }
     if o.headless {
         return headless(&o);
+    }
+    #[cfg(windows)]
+    if o.check_updates {
+        return check_updates(&o);
     }
     #[cfg(windows)]
     {
@@ -108,6 +128,33 @@ fn run() -> Result<(), String> {
     {
         Err("The native desktop host currently supports Windows. Use --headless or --preview on other platforms.".into())
     }
+}
+#[cfg(windows)]
+fn check_updates(o: &Options) -> Result<(), String> {
+    use claude_mascot::update::{UpdateEvent, UpdateService};
+    let s = Settings::load(&o.config)?;
+    let service = UpdateService::new(s.update_repo, false);
+    service.request_check();
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(45) {
+        for event in service.poll() {
+            match event {
+                UpdateEvent::Checked { release, .. } => {
+                    let result = serde_json::json!({"current":env!("CARGO_PKG_VERSION"),"available":release.map(|r|r.version)});
+                    println!("{result}");
+                    if let Some(p) = &o.trace {
+                        std::fs::write(p, serde_json::to_vec_pretty(&result).unwrap())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    return Ok(());
+                }
+                UpdateEvent::Error { message, .. } => return Err(message),
+                _ => {}
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    Err("Update check timed out".into())
 }
 fn preview(dir: &std::path::Path) -> Result<(), String> {
     use claude_mascot::engine::State;
@@ -174,12 +221,34 @@ fn headless(o: &Options) -> Result<(), String> {
 #[cfg(windows)]
 mod native {
     use super::*;
+    use claude_mascot::update::{UpdateEvent, UpdateService};
     use claude_mascot::{
         engine::{update_interactions, Command},
         platform::{self, InputEvent, InstanceGuard, MenuState, NativeHost},
         settings,
     };
     use std::time::{Duration, Instant};
+    fn update_dialog(text: &str, question: bool) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let text = text.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let title = "Claude Mascot — обновления"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // SAFETY: both nul-terminated buffers live for this synchronous call.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                if question {
+                    MB_YESNO | MB_ICONQUESTION
+                } else {
+                    MB_OK | MB_ICONINFORMATION
+                },
+            ) == IDYES
+        }
+    }
     struct Drag {
         offset: Vec2,
         start: Vec2,
@@ -229,6 +298,12 @@ mod native {
         let mut world = platform::snapshot();
         let area = world.area_at(world.cursor);
         let media = claude_mascot::media::MediaMonitor::new();
+        let updates = UpdateService::new(
+            settings.update_repo.clone(),
+            settings.auto_updates && !o.skip_update_check && o.seconds.is_none(),
+        );
+        let mut update_in_progress = false;
+        let mut declined_update: Option<String> = None;
         let mut entries = vec![spawn(
             Pet::new(
                 1,
@@ -274,6 +349,65 @@ mod native {
                 media.apply(&mut world);
                 world_at = now;
                 snapshots += 1;
+            }
+            for event in updates.poll() {
+                match event {
+                    UpdateEvent::Checked {
+                        release: Some(release),
+                        manual,
+                    } => {
+                        if !update_in_progress
+                            && (manual || declined_update.as_deref() != Some(&release.version))
+                        {
+                            if update_dialog(&format!("Доступна версия {}. Сейчас установлена {}.\n\nСкачать и перезапустить приложение? Настройки сохранятся.",release.version,env!("CARGO_PKG_VERSION")),true){update_in_progress=true;updates.request_download(release);}else{declined_update=Some(release.version);}
+                        }
+                    }
+                    UpdateEvent::Checked {
+                        release: None,
+                        manual: true,
+                    } => {
+                        update_dialog(
+                            "Более новой версии с готовым Windows EXE не найдено.",
+                            false,
+                        );
+                    }
+                    UpdateEvent::Downloaded(staged) => {
+                        if update_in_progress {
+                            settings.save(&o.config)?;
+                            let config =
+                                std::fs::canonicalize(&o.config).map_err(|e| e.to_string())?;
+                            let args = vec![
+                                "--skip-update-check".into(),
+                                "--config".into(),
+                                config.to_string_lossy().into_owned(),
+                            ];
+                            match claude_mascot::update_apply::schedule(
+                                &staged,
+                                &std::env::current_exe().map_err(|e| e.to_string())?,
+                                &args,
+                            ) {
+                                Ok(()) => return Ok(()),
+                                Err(e) => {
+                                    update_in_progress = false;
+                                    update_dialog(
+                                        &format!("Не удалось запустить обновление: {e}"),
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    UpdateEvent::Error { message, manual } => {
+                        update_in_progress = false;
+                        if manual {
+                            update_dialog(
+                                &format!("Не удалось обновить приложение:\n{message}"),
+                                false,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
             let mut commands = Vec::new();
             for (i, e) in entries.iter_mut().enumerate() {
@@ -385,6 +519,16 @@ mod native {
                         rebuild = true;
                         save = true;
                     }
+                    60 => {
+                        if !update_in_progress {
+                            updates.request_check();
+                        }
+                    }
+                    61 => {
+                        settings.auto_updates = !settings.auto_updates;
+                        updates.set_enabled(settings.auto_updates && o.seconds.is_none());
+                        save = true;
+                    }
                     _ => {}
                 }
             }
@@ -485,6 +629,7 @@ mod native {
                     }
                 }
                 e.host.set_menu_state(MenuState {
+                    auto_updates: settings.auto_updates,
                     selected_action: match e.pet.state {
                         claude_mascot::engine::State::Sit => 2,
                         claude_mascot::engine::State::Sleep => 3,

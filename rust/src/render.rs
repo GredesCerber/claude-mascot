@@ -168,10 +168,17 @@ impl Atlas {
         if std::fs::metadata(png).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
             return Err("Atlas PNG exceeds 32 MiB".into());
         }
-        Self::decode(
-            &std::fs::read(png).map_err(|e| e.to_string())?,
-            &std::fs::read_to_string(json).map_err(|e| e.to_string())?,
-        )
+        use std::io::Read;
+        let mut metadata = String::new();
+        std::fs::File::open(json)
+            .map_err(|e| e.to_string())?
+            .take(1024 * 1024 + 1)
+            .read_to_string(&mut metadata)
+            .map_err(|e| e.to_string())?;
+        if metadata.len() > 1024 * 1024 {
+            return Err("Atlas JSON exceeds 1 MiB".into());
+        }
+        Self::decode(&std::fs::read(png).map_err(|e| e.to_string())?, &metadata)
     }
     fn draw(&self, canvas: &mut Canvas, pet: &Pet) {
         let name = if pet.dragging {

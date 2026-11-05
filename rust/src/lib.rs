@@ -6,6 +6,10 @@ pub mod media;
 pub mod platform;
 pub mod render;
 pub mod settings;
+#[cfg(windows)]
+pub mod update;
+#[cfg(windows)]
+pub mod update_apply;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
