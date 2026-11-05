@@ -87,6 +87,7 @@ pub struct Pet {
     pub rage: bool,
     pub rage_forever: bool,
     pub dragging: bool,
+    release_pending: bool,
     pub chase: bool,
     pub squash: f64,
     /// Target of the current or most recent swing. `attack_serial` identifies impacts.
@@ -139,6 +140,7 @@ impl Pet {
             rage: false,
             rage_forever: false,
             dragging: false,
+            release_pending: false,
             chase: false,
             squash: 0.0,
             attack: None,
@@ -214,6 +216,31 @@ impl Pet {
             self.last_cursor = world.cursor;
             self.snapshot_windows(world);
             return;
+        }
+        if self.release_pending {
+            self.release_pending = false;
+            let area = world.area_at(self.pos);
+            if valid_rect(area) {
+                let inset = BODY_HALF_WIDTH.min(area.w * 0.5);
+                self.pos.x = self.pos.x.clamp(area.x + inset, area.right() - inset);
+                if self.pos.y > area.bottom() {
+                    self.pos.y = area.bottom();
+                    self.vel.y = 0.0;
+                    self.vel.x *= 0.7;
+                    self.surface = None;
+                    self.surface_id = None;
+                    self.surface_prev = None;
+                    self.set_state(State::Land, 0.55);
+                } else if self.pos.y < area.y {
+                    // Start a dragged pet at the top edge, then let gravity
+                    // handle it as an ordinary fall after release.
+                    self.pos.y = area.y;
+                } else {
+                    // A point in a monitor gap is moved to the nearest usable
+                    // vertical span rather than left unsupported indefinitely.
+                    self.pos.y = self.pos.y.clamp(area.y, area.bottom());
+                }
+            }
         }
         if self.state == State::Sleep && self.forced_sleep {
             if world.idle_seconds > self.forced_sleep_max + 1.0 {
@@ -400,6 +427,7 @@ impl Pet {
             return;
         }
         self.dragging = true;
+        self.release_pending = false;
         self.forced_sleep = false;
         self.surface = None;
         self.surface_id = None;
@@ -411,6 +439,7 @@ impl Pet {
 
     pub fn release(&mut self, velocity: Vec2) {
         self.dragging = false;
+        self.release_pending = true;
         self.vel = if valid_vec(velocity) {
             Vec2::new(
                 velocity.x.clamp(-1800.0, 1800.0),
@@ -490,7 +519,28 @@ impl Pet {
             }
             return;
         }
-        if self.state == State::Happy || self.state == State::Land {
+        if self.state == State::Land {
+            if self.state_time > self.state_duration.max(0.55) {
+                let next = self.pending_ground.take().unwrap_or(State::Idle);
+                self.set_state(next, 0.0);
+            } else {
+                // Preserve horizontal impact momentum and let ground friction
+                // bring the pet to rest instead of snapping it to a stop.
+                if let Some(i) = self.current_surface_index(world) {
+                    self.follow_surface(i, world);
+                } else {
+                    self.pos.y = self.floor_y(world);
+                }
+                self.pos.x += self.vel.x * dt;
+                self.vel.x *= (-5.0 * dt).exp();
+                if self.vel.x.abs() < 2.0 {
+                    self.vel.x = 0.0;
+                }
+                self.clamp_to_area(world);
+                return;
+            }
+        }
+        if self.state == State::Happy {
             if self.state_time > self.state_duration.max(0.55) {
                 let next = self.pending_ground.take().unwrap_or(State::Idle);
                 self.set_state(next, 0.0);
@@ -512,6 +562,21 @@ impl Pet {
         }
 
         if self.state == State::Fall || self.state == State::Jump || self.state == State::Thrown {
+            // A drag can release the pet below the desktop, where the normal
+            // floor-crossing test cannot catch it (old_y is already past it).
+            // Recover to the nearest remaining monitor's floor before applying
+            // gravity so it cannot fall forever after a monitor change either.
+            let floor = self.floor_y(world);
+            if self.pos.y > floor {
+                self.pos.y = floor;
+                self.vel.y = 0.0;
+                self.surface = None;
+                self.surface_id = None;
+                self.surface_prev = None;
+                self.clamp_to_area(world);
+                self.set_state(State::Land, 0.55);
+                return;
+            }
             let old = self.pos;
             self.vel.y = (self.vel.y + GRAVITY * dt).clamp(-1400.0, 2200.0);
             self.pos.x += self.vel.x * dt;
@@ -520,13 +585,24 @@ impl Pet {
             if self.vel.y >= 0.0 {
                 if let Some((ground_y, surface)) = self.find_landing(old.y, world) {
                     self.pos.y = ground_y;
-                    self.vel.y = 0.0;
-                    self.vel.x *= 0.35;
                     self.surface = surface;
                     self.surface_id = surface.and_then(|i| world.windows.get(i).map(|w| w.id));
                     self.surface_prev = surface.and_then(|i| world.windows.get(i).map(|w| w.rect));
-                    self.squash = 0.8;
-                    self.set_state(State::Land, 0.55);
+                    let impact = self.vel.y;
+                    if impact > 1_300.0 && self.state != State::Jump {
+                        self.vel.y = -impact * 0.35;
+                        self.vel.x *= 0.6;
+                        self.squash = 0.45;
+                        self.surface = None;
+                        self.surface_id = None;
+                        self.surface_prev = None;
+                        self.set_state(State::Thrown, 0.0);
+                    } else {
+                        self.vel.y = 0.0;
+                        self.vel.x *= 0.7;
+                        self.squash = 0.8;
+                        self.set_state(State::Land, 0.55);
+                    }
                 }
             }
             self.facing = if self.vel.x < -1.0 {
@@ -552,13 +628,8 @@ impl Pet {
                 self.vel.y = self.vel.y.max(0.0);
                 return;
             }
-            if self.pos.y < floor - 2.0
-                && matches!(self.state, State::Idle | State::Sit | State::Sleep)
-            {
-                self.set_state(State::Fall, 0.0);
-                self.vel = Vec2::default();
-                return;
-            }
+            // Idle floor support is positional, not a one-time crossing test:
+            // the taskbar can resize the work area while the pet is standing.
             self.pos.y = floor;
         }
         if self.state == State::Walk || self.state == State::Run {
@@ -622,6 +693,8 @@ impl Pet {
     }
 
     fn floor_y(&self, world: &World) -> f64 {
+        // area_at also chooses the nearest valid monitor when a work-area
+        // resize temporarily puts the pet just outside its previous bounds.
         let a = world.area_at(self.pos);
         if valid_rect(a) {
             a.bottom()
@@ -1216,7 +1289,8 @@ impl Pet {
     fn clamp_to_area(&mut self, world: &World) {
         let a = world.area_at(self.pos);
         if valid_rect(a) {
-            self.pos.x = self.pos.x.clamp(a.x, a.right());
+            let inset = BODY_HALF_WIDTH.min(a.w * 0.5);
+            self.pos.x = self.pos.x.clamp(a.x + inset, a.right() - inset);
         }
     }
 }

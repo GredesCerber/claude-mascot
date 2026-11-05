@@ -38,6 +38,89 @@ fn falling_pet_lands_on_desktop_floor() {
 }
 
 #[test]
+fn grounded_pet_tracks_taskbar_work_area_changes_without_falling() {
+    let mut w = world();
+    let mut p = Pet::new(101, Skin::Claude, Vec2::new(200.0, 700.0));
+    p.state = State::Idle;
+    p.update(1.0 / 60.0, &w);
+
+    // Taskbar shown: the usable desktop becomes shorter.
+    w.work_areas[0].h = 660.0;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Idle);
+    assert!((p.pos.y - 660.0).abs() < 0.1);
+
+    // Taskbar hidden: usable desktop expands. The floor follows the pet in
+    // the same update, rather than leaving it airborne until a later crossing.
+    w.work_areas[0].h = 700.0;
+    p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Idle);
+    assert!((p.pos.y - 700.0).abs() < 0.1);
+}
+
+#[test]
+fn landing_keeps_horizontal_inertia_and_ground_friction_slows_it() {
+    let w = world();
+    let mut p = Pet::new(102, Skin::Claude, Vec2::new(200.0, 700.0));
+    p.state = State::Land;
+    p.vel.x = 300.0;
+    let start_x = p.pos.x;
+    p.update(0.05, &w);
+    assert!(
+        p.pos.x > start_x + 10.0,
+        "landing should carry horizontal momentum"
+    );
+    let speed_after_first_step = p.vel.x.abs();
+    for _ in 0..8 {
+        p.update(0.05, &w);
+    }
+    assert!(p.vel.x.abs() < speed_after_first_step);
+    assert!(
+        p.vel.x.abs() > 0.0,
+        "friction should slow the slide progressively"
+    );
+}
+
+#[test]
+fn releasing_dragged_pet_below_screen_recovers_to_desktop_floor() {
+    let w = world();
+    let mut p = Pet::new(103, Skin::Claude, Vec2::new(300.0, 300.0));
+    p.drag_to(Vec2::new(300.0, 1000.0));
+    p.release(Vec2::default());
+
+    step(&mut p, &w, 120);
+    assert!((p.pos.y - 700.0).abs() < 0.1);
+    assert_ne!(p.state, State::Fall);
+    assert!(p.pos.x >= 24.0 && p.pos.x <= 976.0);
+}
+
+#[test]
+fn offscreen_release_uses_remaining_negative_origin_monitor() {
+    let mut w = world();
+    let mut p = Pet::new(104, Skin::Claude, Vec2::new(300.0, 300.0));
+    p.drag_to(Vec2::new(5000.0, 9000.0));
+    // The monitor under the drag position is removed before release/update.
+    w.work_areas = vec![Rect::new(-1920.0, -100.0, 1920.0, 1080.0)];
+    p.release(Vec2::default());
+
+    step(&mut p, &w, 120);
+    assert!((p.pos.y - 980.0).abs() < 0.1);
+    assert!(p.pos.x >= -1896.0 && p.pos.x <= -24.0);
+    assert_ne!(p.state, State::Fall);
+}
+
+#[test]
+fn dragged_release_above_monitor_starts_a_normal_visible_fall() {
+    let w = world();
+    let mut p = Pet::new(105, Skin::Claude, Vec2::new(300.0, 300.0));
+    p.drag_to(Vec2::new(300.0, -1000.0));
+    p.release(Vec2::default());
+    p.update(1.0 / 60.0, &w);
+    assert!(p.pos.y >= 0.0 && p.pos.y < 10.0);
+    assert_eq!(p.state, State::Fall);
+}
+
+#[test]
 fn falling_pet_lands_on_topmost_unoccluded_window() {
     let mut w = world();
     w.windows

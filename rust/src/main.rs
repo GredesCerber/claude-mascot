@@ -7,6 +7,48 @@ use claude_mascot::{
 };
 use std::path::PathBuf;
 
+#[cfg(any(windows, test))]
+const MSI_INSTALL_MARKER: &str = "install-mode-msi.marker";
+#[cfg(windows)]
+const MSI_UPDATE_MESSAGE: &str =
+    "Эта версия установлена через MSI. Обновите установочным пакетом из Releases.";
+
+#[cfg(any(windows, test))]
+fn has_msi_marker(executable: &std::path::Path) -> bool {
+    executable
+        .parent()
+        .is_some_and(|directory| directory.join(MSI_INSTALL_MARKER).is_file())
+}
+
+#[cfg(windows)]
+fn running_from_msi() -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|executable| has_msi_marker(&executable))
+}
+
+#[cfg(windows)]
+fn show_msi_update_message() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let message = MSI_UPDATE_MESSAGE
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let title = "Claude Mascot Rust"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both nul-terminated buffers live for this synchronous call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 struct Options {
     check_updates: bool,
     skip_update_check: bool,
@@ -17,6 +59,7 @@ struct Options {
     config: PathBuf,
     trace: Option<PathBuf>,
     skin: Option<Skin>,
+    fps: Option<u32>,
 }
 fn options() -> Result<Options, String> {
     let mut o = Options {
@@ -29,12 +72,13 @@ fn options() -> Result<Options, String> {
         config: config_path(),
         trace: None,
         skin: None,
+        fps: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--help" | "-h" => {
-                println!("Claude Mascot Rust\n  --skin claude|tagilla\n  --config FILE\n  --preview DIRECTORY   Export both characters' states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
+                println!("Claude Mascot Rust\n  --skin claude|tagilla\n  --fps 30..240         Set and persist target frame rate\n  --config FILE\n  --preview DIRECTORY   Export both characters' states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
                 std::process::exit(0)
             }
             "--preview" => {
@@ -63,6 +107,17 @@ fn options() -> Result<Options, String> {
                     Some("tagilla") => Skin::Tagilla,
                     _ => return Err("Skin must be claude or tagilla".into()),
                 })
+            }
+            "--fps" => {
+                let fps: u32 = args
+                    .next()
+                    .ok_or("--fps needs an integer")?
+                    .parse()
+                    .map_err(|_| "FPS must be an integer from 30 to 240")?;
+                if !claude_mascot::timing::valid_fps(fps) {
+                    return Err("FPS must be an integer from 30 to 240".into());
+                }
+                o.fps = Some(fps);
             }
             _ => return Err(format!("Unknown option {a}")),
         }
@@ -100,9 +155,14 @@ fn main() {
 }
 fn run() -> Result<(), String> {
     #[cfg(windows)]
+    let msi_mode = running_from_msi();
+    #[cfg(windows)]
     {
         let args = std::env::args_os().skip(1).collect::<Vec<_>>();
         if args.first().is_some_and(|a| a == "--apply-update") {
+            if msi_mode {
+                return Err(MSI_UPDATE_MESSAGE.into());
+            }
             if args.len() != 2 {
                 return Err("--apply-update requires one plan file".into());
             }
@@ -118,20 +178,44 @@ fn run() -> Result<(), String> {
     }
     #[cfg(windows)]
     if o.check_updates {
-        return check_updates(&o);
+        return check_updates(&o, msi_mode);
     }
     #[cfg(windows)]
     {
-        native::run(o)
+        native::run(o, msi_mode)
     }
     #[cfg(not(windows))]
     {
         Err("The native desktop host currently supports Windows. Use --headless or --preview on other platforms.".into())
     }
 }
+
+#[cfg(test)]
+mod msi_marker_tests {
+    use super::*;
+
+    #[test]
+    fn detects_marker_adjacent_to_executable_only() {
+        let directory = std::env::temp_dir().join(format!(
+            "claude-mascot-msi-marker-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("claude-mascot.exe");
+        assert!(!has_msi_marker(&executable));
+        std::fs::write(directory.join(MSI_INSTALL_MARKER), "msi").unwrap();
+        assert!(has_msi_marker(&executable));
+        std::fs::remove_file(directory.join(MSI_INSTALL_MARKER)).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+}
 #[cfg(windows)]
-fn check_updates(o: &Options) -> Result<(), String> {
+fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
     use claude_mascot::update::{UpdateEvent, UpdateService};
+    if msi_mode {
+        show_msi_update_message();
+        return Ok(());
+    }
     let s = Settings::load(&o.config)?;
     let service = UpdateService::new(s.update_repo, false);
     service.request_check();
@@ -252,9 +336,9 @@ mod native {
     struct Drag {
         offset: Vec2,
         start: Vec2,
-        last: Vec2,
         last_at: Instant,
         velocity: Vec2,
+        samples: claude_mascot::timing::DragVelocity,
         moved: bool,
     }
     struct Entry {
@@ -279,12 +363,21 @@ mod native {
             last_attack: 0,
         })
     }
-    pub fn run(o: Options) -> Result<(), String> {
+    pub fn run(o: Options, msi_mode: bool) -> Result<(), String> {
         platform::initialize()?;
-        let Some(_instance) = InstanceGuard::acquire("Local\\ClaudeMascotRust-v1")? else {
+        let instance_name = if o.seconds.is_some() {
+            format!("Local\\ClaudeMascotRust-Smoke-{}", std::process::id())
+        } else {
+            "Local\\ClaudeMascotRust-v1".to_owned()
+        };
+        let Some(_instance) = InstanceGuard::acquire(&instance_name)? else {
             return Ok(());
         };
         let mut settings = Settings::load(&o.config)?;
+        if let Some(fps) = o.fps {
+            settings.target_fps = fps;
+            settings.save(&o.config)?;
+        }
         if let Some(s) = o.skin {
             settings.skin = s;
         }
@@ -300,7 +393,7 @@ mod native {
         let media = claude_mascot::media::MediaMonitor::new();
         let updates = UpdateService::new(
             settings.update_repo.clone(),
-            settings.auto_updates && !o.skip_update_check && o.seconds.is_none(),
+            settings.auto_updates && !msi_mode && !o.skip_update_check && o.seconds.is_none(),
         );
         let mut update_in_progress = false;
         let mut declined_update: Option<String> = None;
@@ -322,7 +415,7 @@ mod native {
         let start = Instant::now();
         let mut previous = start;
         let mut world_at = start - Duration::from_secs(1);
-        let mut render_at = start - Duration::from_secs(1);
+        let mut pacer = claude_mascot::timing::FramePacer::new(start, settings.target_fps);
         let mut autostart = settings::autostart_enabled();
         let mut accumulator = 0.0;
         let mut frames = 0u64;
@@ -337,7 +430,8 @@ mod native {
             }
             let elapsed = now.duration_since(previous).as_secs_f64().min(0.1);
             previous = now;
-            accumulator = (accumulator + elapsed).min(0.1);
+            accumulator =
+                (accumulator + elapsed).min(claude_mascot::timing::MAX_CATCH_UP.as_secs_f64());
             let hidden = settings.hide_fullscreen && world.fullscreen_active();
             let interval = if hidden || settings.paused {
                 Duration::from_millis(250)
@@ -372,6 +466,11 @@ mod native {
                         );
                     }
                     UpdateEvent::Downloaded(staged) => {
+                        if msi_mode {
+                            update_in_progress = false;
+                            update_dialog(MSI_UPDATE_MESSAGE, false);
+                            continue;
+                        }
                         if update_in_progress {
                             settings.save(&o.config)?;
                             let config =
@@ -424,22 +523,24 @@ mod native {
                             e.drag = Some(Drag {
                                 offset: Vec2::new(e.pet.pos.x - p.x, e.pet.pos.y - p.y),
                                 start: p,
-                                last: p,
                                 last_at: now,
                                 velocity: Vec2::default(),
+                                samples: {
+                                    let mut samples =
+                                        claude_mascot::timing::DragVelocity::default();
+                                    samples.begin(now, p);
+                                    samples
+                                },
                                 moved: false,
                             })
                         }
                         InputEvent::PointerMove(p) => {
                             if let Some(d) = &mut e.drag {
                                 d.moved |= (p.x - d.start.x).hypot(p.y - d.start.y) > 4.0;
-                                let dt =
-                                    now.duration_since(d.last_at).as_secs_f64().max(1.0 / 240.0);
-                                d.velocity = Vec2::new(
-                                    ((p.x - d.last.x) / dt).clamp(-1800.0, 1800.0),
-                                    ((p.y - d.last.y) / dt).clamp(-1800.0, 1800.0),
-                                );
-                                d.last = p;
+                                let sampled = d.samples.push(now, p);
+                                if sampled != Vec2::default() {
+                                    d.velocity = sampled;
+                                }
                                 d.last_at = now;
                                 if d.moved {
                                     e.pet.drag_to(Vec2::new(p.x + d.offset.x, p.y + d.offset.y));
@@ -519,14 +620,41 @@ mod native {
                         rebuild = true;
                         save = true;
                     }
+                    80..=84 => {
+                        settings.target_fps = match c {
+                            80 => 30,
+                            81 => 60,
+                            82 => 120,
+                            83 => 144,
+                            _ => 240,
+                        };
+                        pacer.set_fps(now, settings.target_fps);
+                        save = true;
+                    }
+                    85 => {
+                        // Custom retains the current persisted integer. A --fps value
+                        // supplies an explicit one-shot custom selection as well.
+                        if let Some(fps) = o.fps {
+                            settings.target_fps = fps;
+                            pacer.set_fps(now, fps);
+                            save = true;
+                        }
+                    }
                     60 => {
-                        if !update_in_progress {
+                        if msi_mode {
+                            update_dialog(MSI_UPDATE_MESSAGE, false);
+                        } else if !update_in_progress {
                             updates.request_check();
                         }
                     }
                     61 => {
+                        if msi_mode {
+                            update_dialog(MSI_UPDATE_MESSAGE, false);
+                            continue;
+                        }
                         settings.auto_updates = !settings.auto_updates;
-                        updates.set_enabled(settings.auto_updates && o.seconds.is_none());
+                        updates
+                            .set_enabled(settings.auto_updates && !msi_mode && o.seconds.is_none());
                         save = true;
                     }
                     _ => {}
@@ -589,19 +717,24 @@ mod native {
             if settings.paused || hidden {
                 accumulator = 0.0;
             } else {
-                while accumulator >= 1.0 / 60.0 {
+                while accumulator >= 1.0 / claude_mascot::timing::SIMULATION_HZ as f64 {
                     for e in &mut entries {
-                        e.pet.update(1.0 / 60.0, &world);
+                        e.pet
+                            .update(1.0 / claude_mascot::timing::SIMULATION_HZ as f64, &world);
                     }
                     let mut pets = entries.iter().map(|e| e.pet.clone()).collect::<Vec<_>>();
-                    update_interactions(&mut pets, 1.0 / 60.0, &world);
+                    update_interactions(
+                        &mut pets,
+                        1.0 / claude_mascot::timing::SIMULATION_HZ as f64,
+                        &world,
+                    );
                     for (e, p) in entries.iter_mut().zip(pets) {
                         e.pet = p;
                     }
-                    accumulator -= 1.0 / 60.0;
+                    accumulator -= 1.0 / claude_mascot::timing::SIMULATION_HZ as f64;
                 }
             }
-            let render_due = now.duration_since(render_at) >= Duration::from_millis(16);
+            let render_due = pacer.due(now);
             for e in &mut entries {
                 if e.pet.attack_serial != e.last_attack {
                     e.last_attack = e.pet.attack_serial;
@@ -643,18 +776,15 @@ mod native {
                     rage: e.pet.rage_forever,
                     tagilla: e.pet.skin == Skin::Tagilla,
                     scale: settings.scale,
+                    target_fps: settings.target_fps,
                 });
                 e.host.set_visible(!hidden);
                 if !hidden && render_due {
-                    let frame = renderer.frame(&e.pet, settings.show_bubbles);
+                    let frame =
+                        renderer.frame_scaled(&e.pet, settings.show_bubbles, settings.scale);
                     let x = (e.pet.pos.x - FEET_X * settings.scale).round() as i32;
                     let y = (e.pet.pos.y - FEET_Y * settings.scale).round() as i32;
-                    if settings.scale == 1.0 {
-                        e.host.present(&frame.pixels, x, y)?;
-                    } else {
-                        let scaled = frame.scaled(settings.scale);
-                        e.host.present(&scaled.pixels, x, y)?;
-                    }
+                    e.host.present(&frame.pixels, x, y)?;
                 }
             }
             if !hidden && !settings.paused {
@@ -673,9 +803,13 @@ mod native {
             }
             if render_due {
                 frames += 1;
-                render_at = now;
+                pacer.advance(now);
             }
-            NativeHost::wait(if hidden || settings.paused { 100 } else { 16 });
+            if hidden || settings.paused {
+                NativeHost::wait(100);
+            } else {
+                NativeHost::wait_precise(pacer.time_until_due(Instant::now()));
+            }
         }
         if let Some(path) = o.trace {
             let result = serde_json::json!({"native_frames":frames,"world_snapshots":snapshots,"elapsed_seconds":start.elapsed().as_secs_f64(),"pets":entries.len(),"exit":"clean"});

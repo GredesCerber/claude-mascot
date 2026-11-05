@@ -7,6 +7,11 @@ port does not replace its Linux/KDE support.
 
 ## Windows use
 
+A per-user MSI installer is also available. It adds shortcuts and supports
+Windows Installer upgrades and removal. See [MSI packaging](docs/msi.md).
+MSI installations receive updates through a newer MSI, while portable installs
+can use the built-in updater.
+
 The portable x64 release is a zip containing `claude-mascot.exe`, this README,
 and the install/uninstall scripts. Extract it, then run the executable directly
 or use `Install.ps1` to copy it to `%LOCALAPPDATA%\claude-mascot-rust` and add
@@ -47,6 +52,11 @@ Right-click the mascot or its notification-area icon for the native menu.
 | Скрыть в полноэкранном режиме | Toggle hiding over fullscreen windows |
 | Запускать вместе с Windows | Toggle the current user's startup entry |
 | Маленький / Обычный / Большой размер | Set 75%, 100%, or 150% display scale |
+| FPS: 30 / 60 / 120 / 144 / 240 | Set the target rendering frame rate (default 60) |
+
+For another frame-rate limit, run `claude-mascot.exe --fps 90`. Values from
+30 through 240 are saved in settings. Physics runs independently of rendering;
+actual frame rate depends on the machine and desktop load.
 
 Left-click and release to pet the character. Drag to reposition it; release
 with a quick movement to throw it. Double-click to jump. These interactions use

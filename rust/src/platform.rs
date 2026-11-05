@@ -14,7 +14,10 @@ use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
-use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, CreateWaitableTimerExW, GetCurrentProcessId, SetWaitableTimer, INFINITE,
+    SYNCHRONIZATION_SYNCHRONIZE, TIMER_MODIFY_STATE,
+};
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::*;
@@ -47,6 +50,7 @@ pub struct MenuState {
     pub rage: bool,
     pub tagilla: bool,
     pub scale: f64,
+    pub target_fps: u32,
 }
 impl Default for MenuState {
     fn default() -> Self {
@@ -60,6 +64,7 @@ impl Default for MenuState {
             rage: false,
             tagilla: false,
             scale: 1.0,
+            target_fps: crate::timing::DEFAULT_FPS,
         }
     }
 }
@@ -442,6 +447,44 @@ impl NativeHost {
             MsgWaitForMultipleObjects(0, null(), 0, milliseconds, QS_ALLINPUT);
         }
     }
+
+    /// Wait for a frame deadline while still waking for native input. Uses a
+    /// per-call high-resolution waitable timer when Windows supports it.
+    pub fn wait_precise(duration: std::time::Duration) {
+        let ticks = duration.as_nanos().saturating_add(99) / 100;
+        if ticks == 0 {
+            return;
+        }
+        unsafe {
+            // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION is available on newer
+            // Windows builds; older builds reject the flag and use the legacy wait.
+            let timer = CreateWaitableTimerExW(
+                null(),
+                null(),
+                0x2,
+                TIMER_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
+            );
+            if timer.is_null() {
+                Self::wait(duration.as_millis().min(u32::MAX as u128) as u32);
+                return;
+            }
+            struct TimerGuard(HANDLE);
+            impl Drop for TimerGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        CloseHandle(self.0);
+                    }
+                }
+            }
+            let _guard = TimerGuard(timer);
+            let due = -(ticks.min(i64::MAX as u128) as i64);
+            if SetWaitableTimer(timer, &due, 0, None, null(), 0) == 0 {
+                Self::wait(duration.as_millis().min(u32::MAX as u128) as u32);
+                return;
+            }
+            MsgWaitForMultipleObjects(1, &timer, 0, INFINITE, QS_ALLINPUT);
+        }
+    }
 }
 
 impl Drop for NativeHost {
@@ -471,6 +514,12 @@ impl Drop for NativeHost {
 }
 
 const MENU_ITEMS: &[(u16, &str)] = &[
+    (80, "FPS: 30"),
+    (81, "FPS: 60"),
+    (82, "FPS: 120"),
+    (83, "FPS: 144"),
+    (84, "FPS: 240"),
+    (0, ""),
     (1, "Гулять"),
     (2, "Сидеть"),
     (3, "Спать"),
@@ -633,6 +682,9 @@ fn show_menu(hwnd: HWND, state: &HostState) {
             check(id, s.selected_action == id || (id == 5 && s.chase));
         }
         check(8, s.rage);
+        for (id, fps) in [(80, 30), (81, 60), (82, 120), (83, 144), (84, 240)] {
+            check(id, s.target_fps == fps);
+        }
         check(10, !s.tagilla);
         check(11, s.tagilla);
         check(40, s.paused);
@@ -796,7 +848,7 @@ unsafe extern "system" fn enum_window(hwnd: HWND, data: LPARAM) -> BOOL {
     );
     let active = GetForegroundWindow() == hwnd;
     let mut fullscreen = false;
-    if active {
+    if active && unsafe { IsZoomed(hwnd) } == 0 {
         let mut mons = Vec::<Monitor>::new();
         EnumDisplayMonitors(
             null_mut(),
@@ -804,12 +856,18 @@ unsafe extern "system" fn enum_window(hwnd: HWND, data: LPARAM) -> BOOL {
             Some(enum_monitor),
             (&mut mons as *mut Vec<Monitor>) as LPARAM,
         );
-        fullscreen = mons.iter().any(|m| {
-            (rect.left - m.full.left).abs() <= 2
-                && (rect.top - m.full.top).abs() <= 2
-                && (rect.right - m.full.right).abs() <= 2
-                && (rect.bottom - m.full.bottom).abs() <= 2
-        });
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        // A maximized window may cover the monitor when taskbar auto-hide is
+        // enabled. Treat only borderless popup windows as fullscreen candidates.
+        let borderless =
+            style & (WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) == 0;
+        fullscreen = borderless
+            && mons.iter().any(|m| {
+                (rect.left - m.full.left).abs() <= 2
+                    && (rect.top - m.full.top).abs() <= 2
+                    && (rect.right - m.full.right).abs() <= 2
+                    && (rect.bottom - m.full.bottom).abs() <= 2
+            });
     }
     vec.push(WindowInfo {
         id: hwnd as usize,

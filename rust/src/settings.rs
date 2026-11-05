@@ -1,5 +1,6 @@
 //! User preferences only. Loading never executes skin files or starts external programs.
 use crate::engine::Skin;
+use crate::timing::{valid_fps, DEFAULT_FPS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,7 @@ pub struct Settings {
     pub version: u32,
     pub skin: Skin,
     pub scale: f64,
+    pub target_fps: u32,
     pub hide_fullscreen: bool,
     pub show_bubbles: bool,
     pub paused: bool,
@@ -23,6 +25,7 @@ impl Default for Settings {
             version: 1,
             skin: Skin::Claude,
             scale: 1.0,
+            target_fps: DEFAULT_FPS,
             hide_fullscreen: true,
             show_bubbles: true,
             paused: false,
@@ -56,6 +59,9 @@ impl Settings {
         }
         if ![0.75, 1.0, 1.5].contains(&value.scale) {
             return Err("Scale must be 0.75, 1.0 or 1.5".into());
+        }
+        if !valid_fps(value.target_fps) {
+            return Err("FPS must be an integer from 30 to 240".into());
         }
         Ok(value)
     }
@@ -193,6 +199,7 @@ mod tests {
     fn backwards_compatible_defaults() {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.scale, 1.0);
+        assert_eq!(s.target_fps, DEFAULT_FPS);
         assert!(s.hide_fullscreen);
         assert!(!s.paused);
     }
@@ -204,8 +211,10 @@ mod tests {
         s.save(&p).unwrap();
         s.skin = Skin::Tagilla;
         s.scale = 1.5;
+        s.target_fps = 144;
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap().skin, Skin::Tagilla);
+        assert_eq!(Settings::load(&p).unwrap().target_fps, 144);
         std::fs::remove_file(p).unwrap();
     }
 }

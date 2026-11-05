@@ -39,6 +39,8 @@ fn native_surfaces_release_gdi_and_user_handles() {
         );
     }
     assert!(NativeHost::pump());
+    // Exercise the per-call waitable timer through its RAII close path.
+    NativeHost::wait_precise(std::time::Duration::from_millis(1));
     let after = counts();
     assert!(
         after.0 <= before.0 + 2,

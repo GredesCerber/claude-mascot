@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Claude Mascot Rust"
+    Manufacturer="GredesCerber"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{E6C58A32-82A8-4D49-9B7C-55F97B948E1A}"
+    Scope="perUser"
+    InstallerVersion="500">
+
+    <Icon Id="ClaudeMascotIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="ClaudeMascotIcon.ico" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Claude Mascot Rust is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="Claude Mascot Rust" Level="1">
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="claude-mascot-rust">
+        <Component Id="ApplicationExecutable" Guid="{560B8B87-630E-426B-85D2-5A4F7E2C2D6C}">
+          <File Id="MascotExe" Source="$(var.ExecutablePath)" Name="claude-mascot.exe" />
+          <RegistryValue Root="HKCU" Key="Software\ClaudeMascotRust\Installer" Name="ExecutableComponent" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+        <Component Id="MsiOwnershipMarker" Guid="{DFDFB8B2-752E-42EA-9728-03DDB5AB4A9E}">
+          <File Id="MsiOwnershipMarkerFile" Source="$(var.MarkerPath)" Name="install-mode-msi.marker" />
+          <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\ClaudeMascotRust\Installer" Name="MsiOwnershipMarker" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="ApplicationFiles">
+      <ComponentRef Id="ApplicationExecutable" />
+      <ComponentRef Id="MsiOwnershipMarker" />
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Claude Mascot Rust">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut Id="StartMenuShortcutLink" Name="Claude Mascot Rust" Target="[INSTALLFOLDER]claude-mascot.exe" WorkingDirectory="INSTALLFOLDER" Icon="ClaudeMascotIcon.ico" />
+          <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\ClaudeMascotRust\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut Id="DesktopShortcutLink" Name="Claude Mascot Rust" Target="[INSTALLFOLDER]claude-mascot.exe" WorkingDirectory="INSTALLFOLDER" Icon="ClaudeMascotIcon.ico" />
+        <RegistryValue Root="HKCU" Key="Software\ClaudeMascotRust\Installer" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>

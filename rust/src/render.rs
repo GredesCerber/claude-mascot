@@ -229,6 +229,7 @@ impl Atlas {
 
 pub struct Renderer {
     pub canvas: Canvas,
+    scaled_canvas: Canvas,
     font: Option<Font>,
     glyphs: BTreeMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
     tagilla: Atlas,
@@ -252,6 +253,7 @@ impl Renderer {
         });
         Ok(Self {
             canvas: Canvas::new(WIDTH, HEIGHT),
+            scaled_canvas: Canvas::new(WIDTH, HEIGHT),
             font,
             glyphs: BTreeMap::new(),
             tagilla,
@@ -304,6 +306,30 @@ impl Renderer {
                     .line(x as i32, y as i32, x2 as i32, y2 as i32, 0xCCFFF2BD);
             }
         }
+        if pet.state == State::Thrown {
+            // Short motion streaks reinforce the existing thrown state.
+            let x = FEET_X - pet.facing * 30.0;
+            let y = FEET_Y - 65.0;
+            let fade = (150.0 * (1.0 - (pet.state_time * 2.0).fract())).clamp(45.0, 150.0) as u32;
+            for n in 0..3 {
+                let yy = y + n as f64 * 9.0;
+                self.canvas.line(
+                    (x - pet.facing * 20.0) as i32,
+                    yy as i32,
+                    (x + pet.facing * 8.0) as i32,
+                    (yy - 4.0) as i32,
+                    (fade << 24) | 0x00F0C5A6,
+                );
+            }
+        }
+        if pet.state == State::Dizzy {
+            for n in 0..3 {
+                let a = pet.time * 4.0 + n as f64 * std::f64::consts::TAU / 3.0;
+                let x = FEET_X + a.cos() * 25.0;
+                let y = FEET_Y - 132.0 + a.sin() * 8.0;
+                self.text("*", x, y, 12.0, 0xFFFFD76A);
+            }
+        }
         if show_bubbles {
             if let Some(text) = &pet.bubble {
                 if pet.bubble_time > 0.0 {
@@ -313,62 +339,151 @@ impl Renderer {
         }
         &self.canvas
     }
-    fn text_width(&self, text: &str, size: f32) -> f64 {
-        self.font
-            .as_ref()
-            .map(|f| {
-                text.chars()
-                    .map(|c| f.metrics(c, size).advance_width as f64)
-                    .sum()
-            })
-            .unwrap_or(0.0)
-    }
-    fn text(&mut self, text: &str, mut x: f64, y: f64, size: f32, color: u32) {
-        let Some(font) = &self.font else {
-            return;
+    /// Render the pixel-art scene at its logical size, then draw speech at the
+    /// final output resolution so small fonts are never reduced by nearest-neighbor scaling.
+    pub fn frame_scaled(&mut self, pet: &Pet, show_bubbles: bool, scale: f64) -> &Canvas {
+        let scale = if scale.is_finite() {
+            scale.clamp(0.5, 2.0)
+        } else {
+            1.0
         };
-        for ch in text.chars() {
-            let (m, b) = self
-                .glyphs
-                .entry((ch, (size * 10.0).round() as u16))
-                .or_insert_with(|| font.rasterize(ch, size));
-            for yy in 0..m.height {
-                for xx in 0..m.width {
-                    let a = b[yy * m.width + xx] as u32 * (color >> 24) / 255;
-                    self.canvas.pixel(
-                        x as i32 + m.xmin + xx as i32,
-                        y as i32 - m.ymin - m.height as i32 + yy as i32,
-                        (a << 24) | (color & 0xFFFFFF),
-                    );
-                }
+        self.frame(pet, false);
+        self.scaled_canvas = self.canvas.scaled(scale);
+        if show_bubbles && pet.bubble_time > 0.0 {
+            if let Some(text) = &pet.bubble {
+                let tall = pet.skin == Skin::Tagilla;
+                draw_bubble(
+                    &mut self.scaled_canvas,
+                    self.font.as_ref(),
+                    &mut self.glyphs,
+                    text,
+                    tall,
+                    scale,
+                );
             }
-            x += m.advance_width as f64;
         }
+        &self.scaled_canvas
+    }
+    fn text(&mut self, text: &str, x: f64, y: f64, size: f32, color: u32) {
+        draw_text(
+            &mut self.canvas,
+            self.font.as_ref(),
+            &mut self.glyphs,
+            text,
+            (x, y),
+            size,
+            color,
+        );
     }
     fn bubble(&mut self, text: &str, tall: bool) {
-        if self.font.is_none() {
-            return;
+        draw_bubble(
+            &mut self.canvas,
+            self.font.as_ref(),
+            &mut self.glyphs,
+            text,
+            tall,
+            1.0,
+        );
+    }
+}
+
+fn font_text_width(font: Option<&Font>, text: &str, size: f32) -> f64 {
+    font.map(|font| {
+        text.chars()
+            .map(|ch| font.metrics(ch, size).advance_width as f64)
+            .sum()
+    })
+    .unwrap_or(0.0)
+}
+
+fn draw_text(
+    canvas: &mut Canvas,
+    font: Option<&Font>,
+    glyphs: &mut BTreeMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
+    text: &str,
+    origin: (f64, f64),
+    size: f32,
+    color: u32,
+) {
+    let Some(font) = font else {
+        return;
+    };
+    let (mut x, y) = origin;
+    for ch in text.chars() {
+        let (metrics, coverage) = glyphs
+            .entry((ch, (size * 10.0).round() as u16))
+            .or_insert_with(|| font.rasterize(ch, size));
+        for yy in 0..metrics.height {
+            for xx in 0..metrics.width {
+                // fontdue supplies grayscale coverage. Keep every coverage
+                // value and let Canvas::pixel premultiply and composite it.
+                let alpha = coverage[yy * metrics.width + xx] as u32 * (color >> 24) / 255;
+                canvas.pixel(
+                    x.round() as i32 + metrics.xmin + xx as i32,
+                    y.round() as i32 - metrics.ymin - metrics.height as i32 + yy as i32,
+                    (alpha << 24) | (color & 0x00FF_FFFF),
+                );
+            }
         }
-        // Cap speech to the fixed canvas rather than drawing over unrelated windows.
-        let mut text = text.chars().take(40).collect::<String>();
-        while self.text_width(&text, 13.0) > 248.0 {
-            text.pop();
-        }
-        let w = self.text_width(&text, 13.0) + 20.0;
-        let x = (WIDTH as f64 - w) / 2.0;
-        let y = if tall { 28.0 } else { 95.0 };
-        self.canvas.rect(x, y, w, 27.0, 0xF52D2929);
-        self.canvas.rect(x + 1.0, y + 1.0, w - 2.0, 1.0, 0xFF776A62);
-        self.text(&text, x + 10.0, y + 18.0, 13.0, 0xFFF7EDE2);
-        for n in 0..5 {
-            self.canvas.rect(
-                FEET_X - 5.0 + n as f64,
-                y + 27.0 + n as f64,
-                10.0 - 2.0 * n as f64,
-                1.0,
-                0xF52D2929,
-            );
-        }
+        x += metrics.advance_width as f64;
+    }
+}
+
+fn draw_bubble(
+    canvas: &mut Canvas,
+    font: Option<&Font>,
+    glyphs: &mut BTreeMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
+    text: &str,
+    tall: bool,
+    scale: f64,
+) {
+    if font.is_none() {
+        return;
+    }
+    let scale = scale.clamp(0.5, 2.0);
+    // At small UI scales preserve a readable minimum physical font size.
+    let font_size = (16.0 * scale as f32).clamp(13.0, 40.0);
+    let margin_x = (12.0 * scale).max(6.0);
+    let max_text_width = (canvas.width as f64 - margin_x * 2.0).max(0.0);
+    let mut text = text.chars().take(40).collect::<String>();
+    while font_text_width(font, &text, font_size) > max_text_width && !text.is_empty() {
+        text.pop();
+    }
+    let w = (font_text_width(font, &text, font_size) + margin_x * 2.0).min(canvas.width as f64);
+    let x = (canvas.width as f64 - w) / 2.0;
+    let y = if tall { 28.0 } else { 95.0 } * scale;
+    let height = font_size as f64 + 18.0 * scale;
+    let baseline = y + font_size as f64 * 1.38;
+
+    // Opaque dark fill and a warm, bright edge keep the antialiased glyphs
+    // readable against both the pet and desktop regardless of what is behind it.
+    canvas.rect(x, y, w, height, 0xFF241B1B);
+    canvas.rect(
+        x + 1.0 * scale,
+        y + 1.0 * scale,
+        (w - 2.0 * scale).max(0.0),
+        1.0 * scale,
+        0xFFE8957A,
+    );
+    draw_text(
+        canvas,
+        font,
+        glyphs,
+        &text,
+        (x + margin_x, baseline),
+        font_size,
+        0xFFFFF8F2,
+    );
+    let tail_step = scale.max(1.0);
+    for n in 0..5 {
+        let inset = n as f64 * tail_step;
+        canvas.rect(
+            canvas.width as f64 / 2.0 - 5.0 * scale + inset,
+            y + height + n as f64 * tail_step,
+            (10.0 * scale - 2.0 * inset).max(tail_step),
+            tail_step,
+            0xFF241B1B,
+        );
     }
 }
 fn heart(c: &mut Canvas, x: f64, y: f64, color: u32) {
@@ -392,8 +507,16 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let bob = if moving && phase == 1 { -0.5 } else { 0.0 };
     let top = if sitting { -8.0 } else { -11.0 } + bob;
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
+        let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
+        let sy = 1.0 - p.squash.clamp(0.0, 1.0) * 0.32;
         let xx = if p.facing >= 0.0 { x } else { -x - w };
-        c.rect(FEET_X + xx * 5.0, FEET_Y + y * 5.0, w * 5.0, h * 5.0, col);
+        c.rect(
+            FEET_X + xx * 5.0 * sx,
+            FEET_Y + y * 5.0 * sy,
+            w * 5.0 * sx,
+            h * 5.0 * sy,
+            col,
+        );
     };
     for (i, lx) in [-5.0, -3.0, 2.0, 4.0].iter().enumerate() {
         if p.state == State::Hold || p.dragging {
@@ -487,5 +610,47 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(baseline, r.frame(&p, false).pixels);
+    }
+    #[test]
+    fn bubble_is_drawn_at_output_scale_with_coverage() {
+        let mut renderer = Renderer::new().unwrap();
+        if renderer.font.is_none() {
+            return;
+        }
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.bubble = Some("приятно :)".into());
+        pet.bubble_time = 2.0;
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/text-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+
+        for (scale, suffix) in [(0.5, "0_5x"), (1.0, "1x"), (1.5, "1_5x"), (2.0, "2x")] {
+            let frame = renderer.frame_scaled(&pet, true, scale);
+            assert_eq!(frame.width, (WIDTH as f64 * scale).round() as usize);
+            assert_eq!(frame.height, (HEIGHT as f64 * scale).round() as usize);
+            let bubble_top = (95.0 * scale).round() as usize;
+            let bubble_bottom = (bubble_top + (54.0 * scale).round() as usize).min(frame.height);
+            let near_white = frame
+                .pixels
+                .iter()
+                .enumerate()
+                .filter(|(index, pixel)| {
+                    let y = index / frame.width;
+                    let red = (**pixel >> 16) & 255;
+                    let green = (**pixel >> 8) & 255;
+                    let blue = **pixel & 255;
+                    (bubble_top..bubble_bottom).contains(&y)
+                        && red > 210
+                        && green > 200
+                        && blue > 180
+                })
+                .count();
+            assert!(
+                near_white > 30,
+                "bubble text should remain readable at {scale}x"
+            );
+            frame
+                .save_png(&preview_dir.join(format!("pleasant-{suffix}.png")))
+                .unwrap();
+        }
     }
 }

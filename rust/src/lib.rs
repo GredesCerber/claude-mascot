@@ -6,6 +6,7 @@ pub mod media;
 pub mod platform;
 pub mod render;
 pub mod settings;
+pub mod timing;
 #[cfg(windows)]
 pub mod update;
 #[cfg(windows)]
