@@ -457,6 +457,10 @@ mod native {
         let mut accumulator = 0.0;
         let mut frames = 0u64;
         let mut presented_frames = 0u64;
+        let mut drag_presented_frames = 0u64;
+        let mut dragging_seconds = 0.0;
+        let mut last_drag_frame = None::<Instant>;
+        let mut max_drag_frame_interval = 0.0f64;
         let mut physics_steps = 0u64;
         let mut snapshots = 0u64;
         let mut running = true;
@@ -772,7 +776,18 @@ mod native {
                     accumulator -= 1.0 / claude_mascot::timing::SIMULATION_HZ as f64;
                 }
             }
-            let render_due = pacer.due(now);
+            // Input dispatch can consume time, especially with a high-rate mouse.
+            // Test the deadline after handling input rather than using a stale time.
+            let render_at = Instant::now();
+            let render_due = pacer.due(render_at);
+            let dragging = entries
+                .iter()
+                .any(|e| e.drag.as_ref().is_some_and(|d| d.moved));
+            if dragging {
+                dragging_seconds += elapsed;
+            } else {
+                last_drag_frame = None;
+            }
             for e in &mut entries {
                 if e.pet.attack_serial != e.last_attack {
                     e.last_attack = e.pet.attack_serial;
@@ -831,6 +846,15 @@ mod native {
                     let y = (e.pet.pos.y - FEET_Y * settings.scale).round() as i32;
                     e.host.present(&frame.pixels, x, y)?;
                     presented_frames += 1;
+                    if e.drag.as_ref().is_some_and(|d| d.moved) {
+                        drag_presented_frames += 1;
+                        let presented_at = Instant::now();
+                        if let Some(previous) = last_drag_frame {
+                            max_drag_frame_interval = max_drag_frame_interval
+                                .max(presented_at.duration_since(previous).as_secs_f64());
+                        }
+                        last_drag_frame = Some(presented_at);
+                    }
                 }
             }
             if !hidden && !settings.paused {
@@ -849,7 +873,7 @@ mod native {
             }
             if render_due {
                 frames += 1;
-                pacer.advance(now);
+                pacer.advance(render_at);
             }
             if hidden || settings.paused {
                 NativeHost::wait(100);
@@ -862,6 +886,9 @@ mod native {
                 "version": env!("CARGO_PKG_VERSION"),
                 "native_frames": frames,
                 "presented_frames": presented_frames,
+                "drag_presented_frames": drag_presented_frames,
+                "dragging_seconds": dragging_seconds,
+                "max_drag_frame_interval_ms": max_drag_frame_interval * 1000.0,
                 "physics_steps": physics_steps,
                 "target_fps": settings.target_fps,
                 "world_snapshots": snapshots,

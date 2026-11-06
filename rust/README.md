@@ -1,5 +1,9 @@
 # Claude Mascot Rust
 
+The implementation and verification roadmap is in
+[docs/planning/PLAN-RU.md](docs/planning/PLAN-RU.md). Proposed animations and
+phrases are marked as proposals; they are not runtime features of 0.3.1.
+
 Windows-first native Rust port of Claude Mascot. It runs as a small layered
 desktop window, with a right-click menu and an optional notification-area icon.
 The existing Python version remains available at the repository root; the Rust
@@ -177,7 +181,7 @@ window. `--smoke-test` exercises the native Windows host for a bounded duration
 and `--trace` writes summary counters. `--inspect-window` is a Windows-only QA
 option that exposes the native window for inspection. See [docs/architecture.md](docs/architecture.md)
 for module boundaries and known behavior gaps, and
-[docs/verification-0.3.0.md](docs/verification-0.3.0.md) for the current verification
+[docs/verification-0.3.1.md](docs/verification-0.3.1.md) for the current verification
 record.
 
 ## Current limits

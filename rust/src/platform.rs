@@ -27,6 +27,9 @@ const CLASS_NAME: &[u16] = &[
 ];
 const TRAY_MESSAGE: u32 = WM_APP + 23;
 const TRAY_ICON: &[u8] = include_bytes!("../assets/claude-icon.ico");
+// Always return to the frame loop even if mouse input keeps arriving faster
+// than it can be dispatched. The next iteration resumes draining the queue.
+const MAX_MESSAGES_PER_PUMP: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
@@ -128,6 +131,7 @@ struct HostState {
     events: Mutex<Vec<InputEvent>>,
     menu_state: Mutex<MenuState>,
     dragging: AtomicBool,
+    visible: AtomicBool,
     hwnd: HWND,
     tray: bool,
     tray_id: u32,
@@ -155,6 +159,7 @@ impl NativeHost {
             events: Mutex::new(Vec::new()),
             menu_state: Mutex::new(MenuState::default()),
             dragging: AtomicBool::new(false),
+            visible: AtomicBool::new(false),
             hwnd: null_mut(),
             tray,
             tray_id: NEXT_TRAY_ID.fetch_add(1, Ordering::Relaxed),
@@ -272,6 +277,9 @@ impl NativeHost {
             .collect()
     }
     pub fn set_visible(&self, visible: bool) {
+        if !change_visibility(&self.state.visible, visible) {
+            return;
+        }
         unsafe {
             ShowWindow(
                 self.state.hwnd,
@@ -447,7 +455,10 @@ impl NativeHost {
         unsafe {
             let mut msg: MSG = zeroed();
             let mut running = true;
-            while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
+            for _ in 0..MAX_MESSAGES_PER_PUMP {
+                if PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) == 0 {
+                    break;
+                }
                 if msg.message == WM_QUIT {
                     running = false;
                     break;
@@ -501,6 +512,18 @@ impl NativeHost {
             }
             MsgWaitForMultipleObjects(1, &timer, 0, INFINITE, QS_ALLINPUT);
         }
+    }
+}
+
+fn change_visibility(current: &AtomicBool, visible: bool) -> bool {
+    current.swap(visible, Ordering::Relaxed) != visible
+}
+
+fn enqueue_pointer_move(events: &mut Vec<InputEvent>, point: Vec2) {
+    if let Some(InputEvent::PointerMove(last)) = events.last_mut() {
+        *last = point;
+    } else {
+        events.push(InputEvent::PointerMove(point));
     }
 }
 
@@ -843,11 +866,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_MOUSEMOVE if GetCapture() == hwnd => {
-            state
-                .events
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(InputEvent::PointerMove(cursor_point()));
+            enqueue_pointer_move(
+                &mut state.events.lock().unwrap_or_else(|e| e.into_inner()),
+                cursor_point(),
+            );
             0
         }
         WM_LBUTTONUP => {
@@ -1180,8 +1202,84 @@ fn last_error(api: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::wait_millis_ceil;
+    use super::{change_visibility, enqueue_pointer_move, wait_millis_ceil, InputEvent};
+    use crate::Vec2;
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    #[test]
+    fn captured_pointer_move_flood_is_coalesced_without_crossing_event_barriers() {
+        let mut events = vec![InputEvent::PointerDown(Vec2::new(1.0, 2.0))];
+        for n in 0..100_000 {
+            enqueue_pointer_move(&mut events, Vec2::new(n as f64, 2.0));
+        }
+        assert_eq!(events.len(), 2, "a move flood should occupy one queue slot");
+        assert_eq!(
+            events[1],
+            InputEvent::PointerMove(Vec2::new(99_999.0, 2.0)),
+            "the latest cursor point must be retained"
+        );
+
+        events.push(InputEvent::PointerUp(Vec2::new(100_000.0, 2.0)));
+        enqueue_pointer_move(&mut events, Vec2::new(100_001.0, 2.0));
+        assert_eq!(events.len(), 4, "up events must remain ordering barriers");
+        assert_eq!(events[2], InputEvent::PointerUp(Vec2::new(100_000.0, 2.0)));
+        assert_eq!(
+            events[3],
+            InputEvent::PointerMove(Vec2::new(100_001.0, 2.0))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pump_returns_after_budget_with_thread_queue_messages_remaining() {
+        use super::*;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (thread_id_tx, thread_id_rx) = mpsc::channel();
+        let (run_tx, run_rx) = mpsc::channel();
+        let worker = thread::spawn(move || unsafe {
+            let mut message: MSG = zeroed();
+            // Force creation of this test thread's private message queue before
+            // the parent thread posts any messages to it.
+            PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
+            thread_id_tx
+                .send(windows_sys::Win32::System::Threading::GetCurrentThreadId())
+                .unwrap();
+            run_rx.recv().unwrap();
+
+            let running = NativeHost::pump();
+            let has_remaining = PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE) != 0;
+            while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {}
+            (running, has_remaining)
+        });
+
+        let thread_id = thread_id_rx.recv().unwrap();
+        for _ in 0..512 {
+            assert_ne!(
+                unsafe { PostThreadMessageW(thread_id, WM_NULL, 0, 0) },
+                0,
+                "posting a message to the test thread should succeed"
+            );
+        }
+        run_tx.send(()).unwrap();
+        let (running, has_remaining) = worker.join().unwrap();
+        assert!(running);
+        assert!(
+            has_remaining,
+            "one pump call must leave queued messages for the next frame"
+        );
+    }
+
+    #[test]
+    fn visibility_calls_are_needed_only_when_state_changes() {
+        let visible = AtomicBool::new(false);
+        assert!(!change_visibility(&visible, false));
+        assert!(change_visibility(&visible, true));
+        assert!(!change_visibility(&visible, true));
+        assert!(change_visibility(&visible, false));
+    }
 
     #[test]
     fn wait_fallback_rounds_positive_submillisecond_remainders_up() {
