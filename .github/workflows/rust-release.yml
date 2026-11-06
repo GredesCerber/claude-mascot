@@ -70,7 +70,7 @@ jobs:
           Copy-Item 'rust/Uninstall.ps1' $portable
           $docs = Join-Path $portable 'docs'
           New-Item -ItemType Directory -Path $docs -Force | Out-Null
-          Get-ChildItem 'rust/docs' -File | Copy-Item -Destination $docs
+          Get-ChildItem 'rust/docs' | Copy-Item -Destination $docs -Recurse
           $zip = Join-Path $dist 'claude-mascot-windows-x64.zip'
           Compress-Archive -Path (Join-Path $portable '*') -DestinationPath $zip
           $lines = @(

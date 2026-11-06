@@ -21,6 +21,6 @@ if ($Package) {
     Copy-Item -LiteralPath 'target\release\claude-mascot.exe','README.md','Install.ps1','Uninstall.ps1' -Destination $packageDir -Force
     $docsDir = Join-Path $packageDir 'docs'
     New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'docs') -File | Copy-Item -Destination $docsDir -Force
+    Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'docs') | Copy-Item -Destination $docsDir -Recurse -Force
     Compress-Archive -LiteralPath (Join-Path $packageDir 'claude-mascot.exe'),(Join-Path $packageDir 'README.md'),(Join-Path $packageDir 'Install.ps1'),(Join-Path $packageDir 'Uninstall.ps1'),$docsDir -DestinationPath 'claude-mascot-windows-x64.zip' -Force
 }
