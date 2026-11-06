@@ -1,9 +1,8 @@
 //! CPU renderer. Pixels are premultiplied ARGB u32 (BGRA in little-endian memory).
 //! No native handles or behavior decisions live here.
-use crate::engine::{Pet, Skin, State, CURSOR_HOLD_DY};
+use crate::engine::{Pet, State, CURSOR_HOLD_DY};
 use fontdue::{Font, FontSettings};
-use serde::Deserialize;
-use std::{collections::BTreeMap, io::Cursor, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 pub const WIDTH: usize = 280;
 pub const HEIGHT: usize = 240;
@@ -107,166 +106,16 @@ impl Canvas {
     }
 }
 
-#[derive(Deserialize)]
-struct AtlasMeta {
-    frames: BTreeMap<String, [usize; 5]>,
-}
-pub struct Atlas {
-    pixels: Vec<u8>,
-    width: usize,
-    height: usize,
-    frames: BTreeMap<String, [usize; 5]>,
-}
-impl Atlas {
-    fn decode(png_bytes: &[u8], json: &str) -> Result<Self, String> {
-        let meta: AtlasMeta =
-            serde_json::from_str(json).map_err(|e| format!("Invalid atlas metadata: {e}"))?;
-        let mut dec = png::Decoder::new(Cursor::new(png_bytes));
-        dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-        let mut reader = dec.read_info().map_err(|e| e.to_string())?;
-        // Skin packs are local data, but bound allocations before decoding.
-        if reader.info().width > 4096 || reader.info().height > 4096 {
-            return Err("Atlas exceeds 4096x4096".into());
-        }
-        let mut buf = vec![0; reader.output_buffer_size()];
-        let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
-        let width = info.width as usize;
-        let height = info.height as usize;
-        let channels = info.color_type.samples();
-        let mut pixels = Vec::with_capacity(width * height * 4);
-        for p in buf[..info.buffer_size()].chunks_exact(channels) {
-            let rgba = match info.color_type {
-                png::ColorType::Rgba => [p[0], p[1], p[2], p[3]],
-                png::ColorType::Rgb => [p[0], p[1], p[2], 255],
-                png::ColorType::Grayscale => [p[0], p[0], p[0], 255],
-                png::ColorType::GrayscaleAlpha => [p[0], p[0], p[0], p[1]],
-                _ => return Err("Unsupported atlas PNG".into()),
-            };
-            pixels.extend_from_slice(&rgba);
-        }
-        for &[x, y, w, h, anchor] in meta.frames.values() {
-            if w == 0
-                || h == 0
-                || x.checked_add(w).is_none_or(|v| v > width)
-                || y.checked_add(h).is_none_or(|v| v > height)
-                || anchor > w
-            {
-                return Err("Atlas frame outside image".into());
-            }
-        }
-        if !meta.frames.contains_key("idle") {
-            return Err("Atlas must contain an idle frame".into());
-        }
-        Ok(Self {
-            pixels,
-            width,
-            height,
-            frames: meta.frames,
-        })
-    }
-    pub fn from_files(png: &Path, json: &Path) -> Result<Self, String> {
-        if std::fs::metadata(png).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
-            return Err("Atlas PNG exceeds 32 MiB".into());
-        }
-        use std::io::Read;
-        let mut metadata = String::new();
-        std::fs::File::open(json)
-            .map_err(|e| e.to_string())?
-            .take(1024 * 1024 + 1)
-            .read_to_string(&mut metadata)
-            .map_err(|e| e.to_string())?;
-        if metadata.len() > 1024 * 1024 {
-            return Err("Atlas JSON exceeds 1 MiB".into());
-        }
-        Self::decode(&std::fs::read(png).map_err(|e| e.to_string())?, &metadata)
-    }
-    fn draw(&self, canvas: &mut Canvas, pet: &Pet) {
-        let name = if pet.dragging {
-            "dangle".into()
-        } else {
-            match pet.state {
-                State::Walk | State::Run | State::Chase | State::Hunt | State::Flee => {
-                    format!("walk{}", (pet.time * 9.0) as usize % 8 + 1)
-                }
-                State::Sleep => "sleep".into(),
-                State::Sit | State::Ledge | State::Dizzy => "sit".into(),
-                State::Hold | State::Climb => "hang".into(),
-                State::Fall | State::Jump | State::Thrown => "jump".into(),
-                State::Smash => if pet.state_time < 0.35 {
-                    "windup"
-                } else {
-                    "strike"
-                }
-                .into(),
-                State::Happy | State::Block => "windup".into(),
-                _ => "idle".into(),
-            }
-        };
-        let &[sx, sy, w, h, anchor] = self.frames.get(&name).unwrap_or(&self.frames["idle"]);
-        debug_assert!(sy + h <= self.height);
-        let climbing = pet.state == State::Climb && !pet.dragging;
-        // The source atlas has one hang pose. A tiny alternating lower-body
-        // shift and whole-body lift keeps that pose alive without resampling it.
-        let climb_phase = (pet.state_time * 4.0).floor() as i32 & 1;
-        let bob = if climbing {
-            if climb_phase == 0 {
-                -1.0
-            } else {
-                0.0
-            }
-        } else if matches!(pet.state, State::Hold) {
-            (pet.time * 2.5).sin() * 1.25
-        } else {
-            0.0
-        };
-        for y in 0..h {
-            for x in 0..w {
-                let i = ((sy + y) * self.width + sx + x) * 4;
-                let p = &self.pixels[i..i + 4];
-                let c = ((p[3] as u32) << 24)
-                    | ((p[0] as u32) << 16)
-                    | ((p[1] as u32) << 8)
-                    | p[2] as u32;
-                let xx = if pet.facing >= 0.0 {
-                    x as f64 - anchor as f64
-                } else {
-                    anchor as f64 - x as f64
-                };
-                let lower_shift = if climbing && y > h * 2 / 3 {
-                    if climb_phase == 0 {
-                        -1.0
-                    } else {
-                        1.0
-                    }
-                } else {
-                    0.0
-                };
-                canvas.pixel(
-                    (FEET_X + xx + lower_shift * pet.facing.signum()) as i32,
-                    (FEET_Y - h as f64 + y as f64 + bob) as i32,
-                    c,
-                );
-            }
-        }
-    }
-}
-
 pub struct Renderer {
     pub canvas: Canvas,
     scaled_canvas: Canvas,
     font: Option<Font>,
     glyphs: BTreeMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
-    tagilla: Atlas,
-    pub custom: Option<Atlas>,
     /// Controls the small satisfaction meter below speech bubbles.
     pub show_mood: bool,
 }
 impl Renderer {
     pub fn new() -> Result<Self, String> {
-        let tagilla = Atlas::decode(
-            include_bytes!("../../assets/tagilla_frames.png"),
-            include_str!("../../assets/tagilla_frames.json"),
-        )?;
         let font = [
             "C:/Windows/Fonts/segoeui.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -282,21 +131,12 @@ impl Renderer {
             scaled_canvas: Canvas::new(WIDTH, HEIGHT),
             font,
             glyphs: BTreeMap::new(),
-            tagilla,
-            custom: None,
             show_mood: true,
         })
     }
     pub fn frame(&mut self, pet: &Pet, show_bubbles: bool) -> &Canvas {
         self.canvas.clear();
-        if pet.skin == Skin::Tagilla {
-            self.custom
-                .as_ref()
-                .unwrap_or(&self.tagilla)
-                .draw(&mut self.canvas, pet);
-        } else {
-            draw_claude(&mut self.canvas, pet);
-        }
+        draw_claude(&mut self.canvas, pet);
         if self.show_mood {
             let width = 42.0;
             let x = FEET_X - width / 2.0;
@@ -333,9 +173,6 @@ impl Renderer {
                 );
             }
         }
-        if pet.rage && pet.skin == Skin::Tagilla {
-            self.text("!", FEET_X - 3.0, FEET_Y - 144.0, 18.0, 0xFFFF493D);
-        }
         if pet.state == State::Sleep {
             self.text(
                 "z z Z",
@@ -344,17 +181,6 @@ impl Renderer {
                 15.0,
                 0xFFDDD7CA,
             );
-        }
-        if pet.state == State::Smash && pet.state_time > 0.35 {
-            let x = FEET_X + pet.facing * 54.0;
-            let y = FEET_Y - 30.0;
-            for n in 0..7 {
-                let a = n as f64 * 0.9;
-                let x2 = x + a.cos() * 24.0;
-                let y2 = y + a.sin() * 24.0;
-                self.canvas
-                    .line(x as i32, y as i32, x2 as i32, y2 as i32, 0xCCFFF2BD);
-            }
         }
         let speed = pet.vel.x.hypot(pet.vel.y);
         if !pet.dragging
@@ -381,18 +207,10 @@ impl Renderer {
                 );
             }
         }
-        if pet.state == State::Dizzy {
-            for n in 0..3 {
-                let a = pet.time * 4.0 + n as f64 * std::f64::consts::TAU / 3.0;
-                let x = FEET_X + a.cos() * 25.0;
-                let y = FEET_Y - 132.0 + a.sin() * 8.0;
-                self.text("*", x, y, 12.0, 0xFFFFD76A);
-            }
-        }
         if show_bubbles {
             if let Some(text) = &pet.bubble {
                 if pet.bubble_time > 0.0 {
-                    self.bubble(text, pet.skin == Skin::Tagilla);
+                    self.bubble(text, false);
                 }
             }
         }
@@ -413,7 +231,7 @@ impl Renderer {
         self.scaled_canvas = self.canvas.scaled(scale);
         if show_bubbles && pet.bubble_time > 0.0 {
             if let Some(text) = &pet.bubble {
-                let tall = pet.skin == Skin::Tagilla;
+                let tall = false;
                 draw_bubble(
                     &mut self.scaled_canvas,
                     self.font.as_ref(),
@@ -556,20 +374,18 @@ fn heart(c: &mut Canvas, x: f64, y: f64, color: u32) {
     c.rect(x + 4.0, y + 10.0, 4.0, 3.0, color);
 }
 fn draw_claude(c: &mut Canvas, p: &Pet) {
-    let sitting = matches!(
-        p.state,
-        State::Sit | State::Sleep | State::Dizzy | State::Ledge
-    );
-    let moving = matches!(
-        p.state,
-        State::Walk | State::Run | State::Chase | State::Hunt | State::Flee
-    );
+    let sitting = matches!(p.state, State::Sit | State::Sleep | State::Ledge);
+    let moving = matches!(p.state, State::Walk | State::Run | State::Chase);
     let air = matches!(p.state, State::Fall | State::Jump | State::Thrown);
     let phase = (p.time * 7.0) as usize % 2;
     let climbing = p.state == State::Climb && !p.dragging;
     let climb_phase = (p.state_time * 5.0).floor() as usize % 4;
     let dancing = p.state == State::Dance;
     let waving = p.state == State::Wave;
+    let typing = p.state == State::Laptop && !p.dragging;
+    let stretching = p.state == State::Stretch && !p.dragging;
+    let looking = p.state == State::LookAround && !p.dragging;
+    let laptop_phase = p.state_time.clamp(0.0, 10.0);
     let angry = p.satisfaction < 30.0;
     let bob = if climbing {
         if climb_phase < 2 {
@@ -590,7 +406,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         0.0
     };
-    let top = if sitting { -8.0 } else { -11.0 } + bob;
+    let top = if sitting || typing { -8.0 } else { -11.0 } + bob;
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
         let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
         let sy = 1.0 - p.squash.clamp(0.0, 1.0) * 0.32;
@@ -614,6 +430,16 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
                 -3.0 + if lifted { -0.8 } else { 0.0 },
                 1.0,
                 if lifted { 2.4 } else { 3.2 },
+                0xFFB85C3E,
+            );
+        } else if typing {
+            px(*lx, -3.0, 1.0, 3.0, 0xFFB85C3E);
+        } else if stretching {
+            px(
+                *lx + if i % 2 == 0 { -0.5 } else { 0.5 },
+                -3.0,
+                1.0,
+                3.0,
                 0xFFB85C3E,
             );
         } else if dancing {
@@ -653,12 +479,29 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     px(-6.0 + torso_shift, top, 12.0, 8.0, 0xFFD97757);
     px(-6.0, top + 7.0, 12.0, 1.0, 0xFFB85C3E);
     px(-5.0, top, 3.0, 1.0, 0xFFE8957A);
+    drop(px);
+    if typing {
+        draw_laptop(c, laptop_phase);
+    }
+    let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
+        let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
+        let sy = 1.0 - p.squash.clamp(0.0, 1.0) * 0.32;
+        let xx = if p.facing >= 0.0 { x } else { -x - w };
+        c.rect(
+            FEET_X + xx * 5.0 * sx,
+            FEET_Y + y * 5.0 * sy,
+            w * 5.0 * sx,
+            h * 5.0 * sy,
+            col,
+        );
+    };
     let up = climbing
         || waving
+        || stretching
         || p.dragging
         || matches!(
             p.state,
-            State::Happy | State::Jump | State::Thrown | State::Hold | State::Climb | State::Block
+            State::Happy | State::Jump | State::Thrown | State::Hold | State::Climb
         );
     let arm = top + if up { 0.0 } else { 3.0 };
     if climbing {
@@ -673,6 +516,33 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(trail_arm_x, top + 1.0, 2.0, 2.8, 0xFFD97757);
         px(lead_x, top - 2.0, 2.0, 2.0, 0xFFD97757);
         px(trail_x, top + 2.0, 2.0, 2.0, 0xFFD97757);
+    } else if typing {
+        // Arms angle inward from Claude's shoulders to the laptop keyboard.
+        let tapping = ((laptop_phase * 5.0).floor() as usize).is_multiple_of(2);
+        px(-7.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(-5.0, top + 4.0, 2.0, 2.0, 0xFFD97757);
+        px(3.0, top + 4.0, 2.0, 2.0, 0xFFD97757);
+        px(
+            -3.0,
+            top + 5.0 + if tapping { -0.3 } else { 0.3 },
+            2.0,
+            2.0,
+            0xFFD97757,
+        );
+        px(
+            1.0,
+            top + 5.0 + if tapping { 0.3 } else { -0.3 },
+            2.0,
+            2.0,
+            0xFFD97757,
+        );
+    } else if stretching {
+        let reach = (p.state_time * 2.5).sin() * 0.5;
+        px(-9.0, top - 2.0 + reach, 3.0, 2.0, 0xFFD97757);
+        px(-11.0, top - 4.0 + reach, 2.0, 2.0, 0xFFD97757);
+        px(6.0, top - 2.0 - reach, 3.0, 2.0, 0xFFD97757);
+        px(9.0, top - 4.0 - reach, 2.0, 2.0, 0xFFD97757);
     } else if dancing {
         let beat = (p.state_time * 5.0).floor() as usize % 4;
         let raised = if beat < 2 { -8.0 } else { 6.0 };
@@ -705,6 +575,15 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(6.0, arm, 2.0, 2.0, 0xFFD97757);
         }
     }
+    let glance = if looking {
+        if ((p.state_time * 2.0).floor() as usize).is_multiple_of(2) {
+            0.8
+        } else {
+            -0.6
+        }
+    } else {
+        0.0
+    };
     for eye in [-4.0, 3.0] {
         if p.state == State::Sleep || (p.time * 0.2).fract() > 0.98 {
             px(eye - 0.3, top + 3.2, 1.6, 0.6, 0xFF1B1B1B);
@@ -713,7 +592,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(eye + 0.3, top + 2.2, 0.6, 0.6, 0xFF1B1B1B);
             px(eye + 0.9, top + 2.8, 0.6, 0.6, 0xFF1B1B1B);
         } else {
-            px(eye, top + 2.0, 1.0, 2.0, 0xFF1B1B1B);
+            px(eye + glance, top + 2.0, 1.0, 2.0, 0xFF1B1B1B);
         }
     }
     if angry && !matches!(p.state, State::Happy | State::Sleep) {
@@ -729,9 +608,64 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     }
 }
 
+/// Draw a compact laptop in front of Claude's lower torso. The lid's open
+/// amount maps to the bounded ten second laptop state: open, type, then close.
+fn draw_laptop(c: &mut Canvas, phase: f64) {
+    let open = if phase < 1.0 {
+        phase
+    } else if phase < 9.0 {
+        1.0
+    } else {
+        10.0 - phase
+    }
+    .clamp(0.0, 1.0);
+    let center = FEET_X;
+    let base_y = FEET_Y - 11.0;
+    let screen_h = 2.0 + open * 14.0;
+    let screen_top = base_y - screen_h;
+
+    // Hinge and screen frame, with a bright editor surface and animated code.
+    c.rect(center - 19.0, base_y - 1.0, 38.0, 2.0, 0xFF5D514E);
+    c.rect(center - 17.0, screen_top, 34.0, screen_h, 0xFF332D31);
+    c.rect(
+        center - 15.0,
+        screen_top + 1.0,
+        30.0,
+        (screen_h - 2.0).max(0.0),
+        0xFF9DC6C1,
+    );
+    if (1.0..9.0).contains(&phase) {
+        let blink = ((phase * 2.0).floor() as usize).is_multiple_of(2);
+        for row in 0..3 {
+            let variation = ((phase * 3.0 + row as f64).floor() as i32).rem_euclid(4);
+            let line_w = 8.0 + variation as f64 * 3.0;
+            let line_color = if row == 1 { 0xFF516E76 } else { 0xFF466B5C };
+            c.rect(
+                center - 12.0,
+                screen_top + 3.0 + row as f64 * 3.0,
+                line_w,
+                1.0,
+                line_color,
+            );
+        }
+        if blink {
+            c.rect(center + 9.0, screen_top + 9.0, 1.0, 2.0, 0xFFF4F0D2);
+        }
+    }
+
+    // Wide keyboard deck rests over the belly. Keys and trackpad distinguish
+    // the base from the screen, and give the animated hands a clear target.
+    c.rect(center - 22.0, base_y, 44.0, 3.0, 0xFFD1C5B4);
+    c.rect(center - 21.0, base_y, 42.0, 1.0, 0xFFF1E8D9);
+    c.rect(center - 17.0, base_y + 1.0, 22.0, 1.0, 0xFF706763);
+    c.rect(center + 7.0, base_y + 1.0, 7.0, 1.0, 0xFF706763);
+    c.rect(center - 3.0, base_y + 1.0, 8.0, 1.0, 0xFFAA9E90);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Skin;
     #[test]
     fn alpha_is_premultiplied() {
         let mut c = Canvas::new(2, 2);
@@ -742,34 +676,62 @@ mod tests {
         assert!(c.pixels[0] & 255 <= c.pixels[0] >> 24);
     }
     #[test]
-    fn atlas_embedded_valid() {
-        let mut r = Renderer::new().unwrap();
-        let p = Pet::new(1, Skin::Tagilla, crate::Vec2::default());
-        r.frame(&p, false);
-        assert!(r.canvas.pixels.iter().any(|p| *p >> 24 > 0));
-        assert_eq!(r.canvas.pixels[0], 0);
-    }
-    #[test]
-    fn invalid_atlas_metadata_is_rejected() {
-        assert!(Atlas::decode(
-            include_bytes!("../../assets/tagilla_frames.png"),
-            r#"{"frames":{"idle":[999999,0,10,10,0]}}"#
-        )
-        .is_err());
-    }
-    #[test]
-    fn custom_tagilla_does_not_replace_claude() {
-        let mut r = Renderer::new().unwrap();
-        let p = Pet::new(1, Skin::Claude, crate::Vec2::default());
-        let baseline = r.frame(&p, false).pixels.clone();
-        r.custom = Some(
-            Atlas::decode(
-                include_bytes!("../../assets/tagilla_frames.png"),
-                include_str!("../../assets/tagilla_frames.json"),
-            )
-            .unwrap(),
+    fn laptop_open_type_close_has_three_distinct_phases() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Laptop;
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/claude-only-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        let frames = [0.0, 0.5, 1.5, 3.0, 9.5];
+        let mut snapshots = Vec::new();
+        for time in frames {
+            pet.state_time = time;
+            snapshots.push(renderer.frame(&pet, false).pixels.clone());
+            renderer
+                .canvas
+                .save_png(&preview_dir.join(format!("laptop-{time:.1}.png")))
+                .unwrap();
+        }
+        assert_ne!(snapshots[0], snapshots[1], "lid should visibly open");
+        assert_ne!(
+            snapshots[1], snapshots[2],
+            "screen should change into typing"
         );
-        assert_eq!(baseline, r.frame(&p, false).pixels);
+        assert_ne!(snapshots[2], snapshots[3], "typing should animate");
+        assert_ne!(snapshots[3], snapshots[4], "lid should visibly close");
+        let closed_laptop = snapshots[0]
+            .iter()
+            .filter(|pixel| **pixel == 0xFF332D31)
+            .count();
+        let open_laptop = snapshots[2]
+            .iter()
+            .filter(|pixel| **pixel == 0xFF332D31)
+            .count();
+        assert!(
+            open_laptop > closed_laptop,
+            "open screen should have more visible area"
+        );
+    }
+    #[test]
+    fn stretch_and_look_around_have_distinct_poses() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Stretch;
+        pet.state_time = 0.2;
+        let stretch = renderer.frame(&pet, false).pixels.clone();
+        pet.state = State::LookAround;
+        pet.state_time = 0.2;
+        let look_a = renderer.frame(&pet, false).pixels.clone();
+        pet.state_time = 0.8;
+        let look_b = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(
+            stretch, look_a,
+            "stretch should use a relaxed extended pose"
+        );
+        assert_ne!(
+            look_a, look_b,
+            "look-around should shift the eyes over time"
+        );
     }
     #[test]
     fn climbing_frames_alternate_and_stay_inside_mascot_bounds() {
@@ -777,7 +739,7 @@ mod tests {
         let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
         pet.state = State::Climb;
         pet.facing = -1.0;
-        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/climb-preview");
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/claude-only-preview");
         std::fs::create_dir_all(&preview_dir).unwrap();
         let mut first = None;
         for (index, state_time) in [0.05, 0.25, 0.45, 0.65].into_iter().enumerate() {
@@ -817,7 +779,7 @@ mod tests {
     fn dance_wave_and_velocity_streaks_animate_only_in_their_states() {
         let mut renderer = Renderer::new().unwrap();
         let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
-        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/climb-preview");
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/claude-only-preview");
         std::fs::create_dir_all(&preview_dir).unwrap();
         renderer.frame(&pet, false);
         renderer

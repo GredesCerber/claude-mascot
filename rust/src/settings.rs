@@ -17,8 +17,6 @@ pub struct Settings {
     pub paused: bool,
     pub auto_updates: bool,
     pub update_repo: String,
-    /// Optional directory with tagilla_frames.png + tagilla_frames.json. Data only.
-    pub custom_atlas: Option<PathBuf>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -35,7 +33,6 @@ impl Default for Settings {
             update_repo: option_env!("MASCOT_UPDATE_REPO")
                 .unwrap_or("kerimovernes/claude-mascot")
                 .into(),
-            custom_atlas: None,
         }
     }
 }
@@ -327,12 +324,33 @@ mod tests {
             std::env::temp_dir().join(format!("mascot-settings-test-{}.json", std::process::id()));
         let mut s = Settings::default();
         s.save(&p).unwrap();
-        s.skin = Skin::Tagilla;
+        s.skin = Skin::Claude;
         s.scale = 1.5;
         s.target_fps = 144;
         s.save(&p).unwrap();
-        assert_eq!(Settings::load(&p).unwrap().skin, Skin::Tagilla);
+        assert_eq!(Settings::load(&p).unwrap().skin, Skin::Claude);
         assert_eq!(Settings::load(&p).unwrap().target_fps, 144);
         std::fs::remove_file(p).unwrap();
+    }
+
+    #[test]
+    fn legacy_other_character_and_atlas_migrate_to_claude() {
+        let path = std::env::temp_dir().join(format!(
+            "mascot-legacy-settings-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"skin":"Tagilla","custom_atlas":"C:/missing/atlas","target_fps":120}"#,
+        )
+        .unwrap();
+        let migrated = Settings::load(&path).unwrap();
+        assert_eq!(migrated.skin, Skin::Claude);
+        assert_eq!(migrated.target_fps, 120);
+        migrated.save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("Tagilla"));
+        assert!(!saved.contains("custom_atlas"));
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -1,7 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use claude_mascot::{
     engine::{Pet, Skin},
-    render::{Atlas, Renderer, FEET_X, FEET_Y, HEIGHT, WIDTH},
+    render::{Renderer, FEET_X, FEET_Y, HEIGHT, WIDTH},
     settings::{config_path, Settings},
     Vec2, World,
 };
@@ -78,7 +78,7 @@ fn options() -> Result<Options, String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--help" | "-h" => {
-                println!("Claude Mascot Rust\n  --skin claude|tagilla\n  --fps 30..240         Set and persist target frame rate\n  --config FILE\n  --preview DIRECTORY   Export both characters' states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
+                println!("Claude Mascot Rust\n  --skin claude\n  --fps 30..240         Set and persist target frame rate\n  --config FILE\n  --preview DIRECTORY   Export Claude animation states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
                 std::process::exit(0)
             }
             "--preview" => {
@@ -104,8 +104,7 @@ fn options() -> Result<Options, String> {
             "--skin" => {
                 o.skin = Some(match args.next().as_deref() {
                     Some("claude") => Skin::Claude,
-                    Some("tagilla") => Skin::Tagilla,
-                    _ => return Err("Skin must be claude or tagilla".into()),
+                    _ => return Err("Only Claude is available".into()),
                 })
             }
             "--fps" => {
@@ -277,9 +276,11 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
         State::Dance,
         State::Wave,
         State::Climb,
-        State::Smash,
+        State::Laptop,
+        State::Stretch,
+        State::LookAround,
     ];
-    for skin in [Skin::Claude, Skin::Tagilla] {
+    for skin in [Skin::Claude] {
         for state in states {
             let mut p = Pet::new(1, skin, Vec2::default());
             p.state = state;
@@ -297,7 +298,7 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
                 .save_png(&dir.join(format!("{:?}-{:?}.png", skin, state)))?;
         }
     }
-    for skin in [Skin::Claude, Skin::Tagilla] {
+    for skin in [Skin::Claude] {
         for satisfaction in [10.0, 50.0, 95.0] {
             let mut p = Pet::new(1, skin, Vec2::default());
             p.satisfaction = satisfaction;
@@ -305,19 +306,27 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
                 .save_png(&dir.join(format!("{skin:?}-Mood-{}.png", satisfaction as u8)))?;
         }
     }
-    let crack = claude_mascot::effects::CrackEffect::new(
-        1,
-        Vec2::new(160.0, 120.0),
-        claude_mascot::Rect::new(0.0, 0.0, 320.0, 240.0),
-    );
-    crack.frame().save_png(&dir.join("Tagilla-Cracks.png"))?;
+    for (state, phases) in [
+        (State::Laptop, &[0.0, 0.5, 1.5, 3.0, 9.5][..]),
+        (State::Stretch, &[0.2, 1.2, 2.3][..]),
+        (State::LookAround, &[0.2, 0.8, 1.8][..]),
+    ] {
+        for &phase in phases {
+            let mut p = Pet::new(1, Skin::Claude, Vec2::default());
+            p.state = state;
+            p.time = phase;
+            p.state_time = phase;
+            r.frame(&p, false)
+                .save_png(&dir.join(format!("Claude-{state:?}-{phase:.1}.png")))?;
+        }
+    }
     Ok(())
 }
 fn headless(o: &Options) -> Result<(), String> {
     let world = World::default();
     let mut pets = vec![
         Pet::new(1, Skin::Claude, Vec2::new(500.0, 50.0)),
-        Pet::new(2, Skin::Tagilla, Vec2::new(700.0, 50.0)),
+        Pet::new(2, Skin::Claude, Vec2::new(700.0, 50.0)),
     ];
     for _ in 0..36000 {
         for p in &mut pets {
@@ -330,7 +339,6 @@ fn headless(o: &Options) -> Result<(), String> {
                 return Err("Nonfinite simulation state".into());
             }
         }
-        claude_mascot::engine::update_interactions(&mut pets, 1.0 / 60.0, &world);
     }
     let result = serde_json::json!({"headless_steps":36000,"simulated_seconds":600,"pets":pets.len(),"finite":true});
     println!("{result}");
@@ -346,7 +354,7 @@ mod native {
     use super::*;
     use claude_mascot::update::{UpdateEvent, UpdateService};
     use claude_mascot::{
-        engine::{update_interactions, Command},
+        engine::Command,
         platform::{self, InputEvent, InstanceGuard, MenuState, NativeHost},
         settings,
     };
@@ -382,7 +390,6 @@ mod native {
         pet: Pet,
         host: NativeHost,
         drag: Option<Drag>,
-        last_attack: u64,
     }
     fn host(settings: &Settings, tray: bool) -> Result<NativeHost, String> {
         NativeHost::new(
@@ -397,7 +404,6 @@ mod native {
             pet,
             host: host(settings, tray)?,
             drag: None,
-            last_attack: 0,
         })
     }
     pub fn run(o: Options, msi_mode: bool) -> Result<(), String> {
@@ -419,12 +425,6 @@ mod native {
             settings.skin = s;
         }
         let mut renderer = Renderer::new()?;
-        if let Some(dir) = &settings.custom_atlas {
-            renderer.custom = Some(Atlas::from_files(
-                &dir.join("tagilla_frames.png"),
-                &dir.join("tagilla_frames.json"),
-            )?);
-        }
         let mut world = platform::snapshot();
         let area = world.area_at(world.cursor);
         let media = claude_mascot::media::MediaMonitor::new();
@@ -447,8 +447,6 @@ mod native {
             entries[0].host.expose_for_inspection()?;
         }
         let mut next_id = 2;
-        let mut effects: Vec<(claude_mascot::effects::CrackEffect, NativeHost)> = Vec::new();
-        let mut effect_elapsed = 0.0;
         let start = Instant::now();
         let mut previous = start;
         let mut world_at = start - Duration::from_secs(1);
@@ -609,28 +607,17 @@ mod native {
                     continue;
                 };
                 match c {
-                    1..=8 => {
+                    1..=5 => {
                         let command = match c {
                             1 => Command::Wander,
                             2 => Command::Sit,
                             3 => Command::Sleep,
                             4 => Command::Climb,
-                            5 => Command::Chase,
-                            6 => Command::Smash,
-                            7 => Command::Rage,
-                            _ => Command::ToggleRage,
+                            _ => Command::Chase,
                         };
                         e.pet.command(command, &world);
                     }
-                    10 | 11 => {
-                        e.drag = None;
-                        e.pet
-                            .set_skin(if c == 10 { Skin::Claude } else { Skin::Tagilla });
-                        settings.skin = e.pet.skin;
-                        save = true;
-                    }
                     20 => spawn_skins.push(Skin::Claude),
-                    21 => spawn_skins.push(Skin::Tagilla),
                     30 => remove.push(i),
                     31 => running = false,
                     40 => {
@@ -661,6 +648,9 @@ mod native {
                     71 => e.pet.pet(),
                     72 => e.pet.command(Command::Dance, &world),
                     73 => e.pet.command(Command::Wave, &world),
+                    74 => e.pet.command(Command::Laptop, &world),
+                    75 => e.pet.command(Command::Stretch, &world),
+                    76 => e.pet.command(Command::LookAround, &world),
                     50..=52 => {
                         settings.scale = match c {
                             50 => 0.75,
@@ -764,15 +754,6 @@ mod native {
                         e.pet
                             .update(1.0 / claude_mascot::timing::SIMULATION_HZ as f64, &world);
                     }
-                    let mut pets = entries.iter().map(|e| e.pet.clone()).collect::<Vec<_>>();
-                    update_interactions(
-                        &mut pets,
-                        1.0 / claude_mascot::timing::SIMULATION_HZ as f64,
-                        &world,
-                    );
-                    for (e, p) in entries.iter_mut().zip(pets) {
-                        e.pet = p;
-                    }
                     accumulator -= 1.0 / claude_mascot::timing::SIMULATION_HZ as f64;
                 }
             }
@@ -789,31 +770,6 @@ mod native {
                 last_drag_frame = None;
             }
             for e in &mut entries {
-                if e.pet.attack_serial != e.last_attack {
-                    e.last_attack = e.pet.attack_serial;
-                    if let Some(claude_mascot::engine::Attack::Window { window_id, point }) =
-                        &e.pet.attack
-                    {
-                        if let Some(window) = world.windows.iter().find(|w| w.id == *window_id) {
-                            let effect = claude_mascot::effects::CrackEffect::new(
-                                *window_id,
-                                *point,
-                                window.rect,
-                            );
-                            let host = NativeHost::new(
-                                "Mascot cosmetic effect",
-                                effect.frame().width as i32,
-                                effect.frame().height as i32,
-                                false,
-                            )?;
-                            host.set_input_transparent()?;
-                            if effects.len() >= 8 {
-                                effects.remove(0);
-                            }
-                            effects.push((effect, host));
-                        }
-                    }
-                }
                 e.host.set_menu_state(MenuState {
                     auto_updates: settings.auto_updates && !msi_mode,
                     selected_action: match e.pet.state {
@@ -822,6 +778,9 @@ mod native {
                         claude_mascot::engine::State::Climb => 4,
                         claude_mascot::engine::State::Dance => 72,
                         claude_mascot::engine::State::Wave => 73,
+                        claude_mascot::engine::State::Laptop => 74,
+                        claude_mascot::engine::State::Stretch => 75,
+                        claude_mascot::engine::State::LookAround => 76,
                         _ if e.pet.chase => 5,
                         _ => 1,
                     },
@@ -829,8 +788,6 @@ mod native {
                     hide_fullscreen: settings.hide_fullscreen,
                     autostart,
                     chase: e.pet.chase,
-                    rage: e.pet.rage_forever,
-                    tagilla: e.pet.skin == Skin::Tagilla,
                     scale: settings.scale,
                     target_fps: settings.target_fps,
                     show_bubbles: settings.show_bubbles,
@@ -855,20 +812,6 @@ mod native {
                         }
                         last_drag_frame = Some(presented_at);
                     }
-                }
-            }
-            if !hidden && !settings.paused {
-                effect_elapsed += elapsed;
-            }
-            if render_due {
-                effects.retain_mut(|(effect, _)| effect.update(effect_elapsed, &world));
-                effect_elapsed = 0.0;
-            }
-            for (effect, host) in &mut effects {
-                host.set_visible(!hidden);
-                if !hidden && render_due {
-                    let (x, y) = effect.position();
-                    host.present(&effect.frame().pixels, x, y)?;
                 }
             }
             if render_due {

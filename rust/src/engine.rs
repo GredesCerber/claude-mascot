@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{Rect, Vec2, WindowInfo, World};
 
@@ -22,11 +22,23 @@ const WALL_BOUNCE_MIN_SPEED: f64 = 280.0;
 const WALL_RESTITUTION: f64 = 0.62;
 pub const CURSOR_HOLD_DY: f64 = 70.0;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Skin {
     #[default]
     Claude,
-    Tagilla,
+}
+
+impl<'de> Deserialize<'de> for Skin {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let skin = String::deserialize(deserializer)?;
+        match skin.as_str() {
+            "Claude" | "Tagilla" => Ok(Self::Claude),
+            _ => Err(de::Error::unknown_variant(&skin, &["Claude", "Tagilla"])),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,18 +53,16 @@ pub enum State {
     Jump,
     Thrown,
     Land,
-    Dizzy,
     Climb,
     Ledge,
     Chase,
     Hold,
     Peek,
-    Smash,
-    Hunt,
-    Flee,
-    Block,
     Dance,
     Wave,
+    Laptop,
+    Stretch,
+    LookAround,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,19 +72,11 @@ pub enum Command {
     Sleep,
     Climb,
     Chase,
-    Smash,
-    Rage,
-    ToggleRage,
     Dance,
     Wave,
-}
-
-/// A simulation-only attack impact for the host to render as an effect.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Attack {
-    Window { window_id: usize, point: Vec2 },
-    Cursor { point: Vec2 },
-    Pet { pet_id: u64, point: Vec2 },
+    Laptop,
+    Stretch,
+    LookAround,
 }
 
 #[derive(Clone, Debug)]
@@ -91,24 +93,18 @@ pub struct Pet {
     pub bubble: Option<String>,
     pub bubble_time: f64,
     pub hearts: f64,
-    pub rage: bool,
-    pub rage_forever: bool,
     pub dragging: bool,
     release_pending: bool,
     pub chase: bool,
     pub squash: f64,
     /// A small, transient mood signal for animation and gentle feedback.
     pub satisfaction: f64,
-    /// Target of the current or most recent swing. `attack_serial` identifies impacts.
-    pub attack: Option<Attack>,
-    pub attack_serial: u64,
     pub(crate) rng: u64,
     pub(crate) idle_for: f64,
     pub(crate) forced_sleep: bool,
     pub(crate) forced_sleep_max: f64,
     pub(crate) forced_sleep_armed: bool,
     pub(crate) pending_ground: Option<State>,
-    pub(crate) rage_timer: f64,
     pub(crate) state_duration: f64,
     pub(crate) prior_windows: Vec<(usize, Rect)>,
     pub(crate) surface_prev: Option<Rect>,
@@ -124,8 +120,6 @@ pub struct Pet {
     pub(crate) explore_cooldown: f64,
     pub(crate) peek_goal: Option<(usize, Vec2)>,
     pub(crate) peek_route_age: f64,
-    pub(crate) smash_goal: Option<(usize, Vec2)>,
-    pub(crate) smash_impacted: bool,
 }
 
 impl Pet {
@@ -148,22 +142,17 @@ impl Pet {
             bubble: None,
             bubble_time: 0.0,
             hearts: 0.0,
-            rage: false,
-            rage_forever: false,
             dragging: false,
             release_pending: false,
             chase: false,
             squash: 0.0,
             satisfaction: 75.0,
-            attack: None,
-            attack_serial: 0,
             rng: id.wrapping_mul(0x9e3779b97f4a7c15).max(1),
             idle_for: 0.0,
             forced_sleep: false,
             forced_sleep_max: 0.0,
             forced_sleep_armed: false,
             pending_ground: None,
-            rage_timer: 30.0 + (id % 61) as f64,
             state_duration: 0.0,
             prior_windows: Vec::new(),
             surface_prev: None,
@@ -179,8 +168,6 @@ impl Pet {
             explore_cooldown: 0.0,
             peek_goal: None,
             peek_route_age: 0.0,
-            smash_goal: None,
-            smash_impacted: false,
         }
     }
 
@@ -224,16 +211,7 @@ impl Pet {
 
         self.update_window_motion(world);
         self.update_idle_sleep(world);
-        self.update_rage(dt);
-        if self.skin == Skin::Tagilla
-            && self.state == State::Idle
-            && self.target.is_none()
-            && !self.chase
-            && !self.dragging
-            && self.random_chance(dt * 0.02)
-        {
-            self.plan_window_smash(world);
-        }
+        self.update_idle_animation(dt, world);
 
         if self.dragging {
             self.last_cursor = world.cursor;
@@ -333,19 +311,25 @@ impl Pet {
         }
 
         self.update_motion(dt, world);
-        self.advance_smash_route(world);
         self.advance_peek_route(dt, world);
         self.snapshot_windows(world);
         self.last_cursor = world.cursor;
     }
 
     pub fn command(&mut self, command: Command, world: &World) {
-        if command != Command::Smash {
-            self.smash_goal = None;
-            if self.state != State::Smash {
-                self.attack = None;
-                self.smash_impacted = false;
-            }
+        self.pending_ground = None;
+        if matches!(
+            self.state,
+            State::Laptop | State::Stretch | State::LookAround
+        ) {
+            self.set_state(
+                if self.has_support(world) {
+                    State::Idle
+                } else {
+                    State::Fall
+                },
+                0.0,
+            );
         }
         if command != Command::Sleep {
             self.forced_sleep = false;
@@ -414,57 +398,21 @@ impl Pet {
                     self.set_state(State::Idle, 0.0);
                 }
             }
-            Command::Smash => {
-                if self.skin == Skin::Tagilla {
-                    self.plan_window_smash(world);
-                }
-            }
-            Command::Rage => {
-                self.rage = true;
-                self.rage_timer = 30.0;
-                self.say("ГРАААА!", 2.0);
-            }
-            Command::ToggleRage => {
-                self.rage_forever = !self.rage_forever;
-                self.rage = self.rage_forever;
-                self.rage_timer = if self.rage { f64::MAX } else { 30.0 };
-            }
             Command::Dance => self.command_pose(State::Dance, 3.0, world),
             Command::Wave => self.command_pose(State::Wave, 2.0, world),
+            Command::Laptop => self.command_pose(State::Laptop, 10.0, world),
+            Command::Stretch => self.command_pose(State::Stretch, 2.5, world),
+            Command::LookAround => self.command_pose(State::LookAround, 2.0, world),
+        }
+        match command {
+            Command::Laptop => self.say("сейчас допечатаю", 2.0),
+            Command::Stretch => self.say("разомнусь немного", 2.0),
+            Command::LookAround => self.say("что тут интересного?", 2.0),
+            _ => {}
         }
     }
 
-    /// Change appearance without carrying stale Tagilla/Claude-only behavior
-    /// into the new skin. The current desktop position and valid surface stay.
-    pub fn set_skin(&mut self, skin: Skin) {
-        if self.skin == skin {
-            return;
-        }
-        let was_airborne = matches!(self.state, State::Fall | State::Jump | State::Thrown);
-        self.skin = skin;
-        self.rage = false;
-        self.rage_forever = false;
-        self.rage_timer = 30.0;
-        self.chase = false;
-        self.peek_goal = None;
-        self.dragging = false;
-        self.vel = Vec2::default();
-        self.bubble = None;
-        self.bubble_time = 0.0;
-        self.hearts = 0.0;
-        self.forced_sleep = false;
-        self.forced_sleep_armed = false;
-        self.set_state(
-            if was_airborne {
-                State::Fall
-            } else {
-                State::Idle
-            },
-            0.0,
-        );
-    }
-
-    /// The stable pet ID currently selected by this pet's hunt behavior.
+    /// Window ID targeted by the current autonomous window hop, if any.
     pub fn target_id(&self) -> Option<u64> {
         self.target
     }
@@ -474,6 +422,7 @@ impl Pet {
             return;
         }
         self.dragging = true;
+        self.pending_ground = None;
         self.release_pending = false;
         self.forced_sleep = false;
         self.surface = None;
@@ -541,9 +490,13 @@ impl Pet {
                     | State::Happy
                     | State::Dance
                     | State::Wave
+                    | State::Laptop
+                    | State::Stretch
+                    | State::LookAround
                     | State::Hold
             )
         {
+            self.pending_ground = None;
             self.forced_sleep = false;
             self.forced_sleep_armed = false;
             if self.state == State::Hold {
@@ -564,25 +517,10 @@ impl Pet {
             self.update_climb(dt, world);
             return;
         }
-        if self.state == State::Smash {
-            if !self.smash_impacted && self.state_time >= 0.35 && self.attack.is_some() {
-                self.attack_serial = self.attack_serial.wrapping_add(1);
-                self.smash_impacted = true;
-            }
-            if self.state_time > self.state_duration.max(0.35) {
-                self.set_state(State::Idle, 0.0);
-            } else {
-                self.vel = Vec2::default();
-            }
-            return;
-        }
-        if self.state == State::Block || self.state == State::Dizzy {
-            if self.state_time > 1.5 {
-                self.set_state(State::Idle, 0.0);
-            }
-            return;
-        }
-        if matches!(self.state, State::Dance | State::Wave) {
+        if matches!(
+            self.state,
+            State::Dance | State::Wave | State::Laptop | State::Stretch | State::LookAround
+        ) {
             if self.state_time >= self.state_duration.max(0.1) {
                 self.set_state(State::Idle, 0.0);
             } else if let Some(i) = self.current_surface_index(world) {
@@ -769,7 +707,7 @@ impl Pet {
                     return;
                 }
                 self.set_state(
-                    if self.skin == Skin::Tagilla || choice > 0.67 {
+                    if choice > 0.67 {
                         State::Run
                     } else {
                         State::Walk
@@ -931,18 +869,6 @@ impl Pet {
         if self.skin == Skin::Claude && self.try_catch_cursor(world) {
             return;
         }
-        if dx.abs() < 40.0
-            && (world.cursor.y - self.pos.y).abs() < 90.0
-            && self.skin == Skin::Tagilla
-        {
-            self.begin_smash(
-                Attack::Cursor {
-                    point: world.cursor,
-                },
-                0.7,
-            );
-            return;
-        }
         // Hop toward a cursor that is well above us. The grounded check and
         // cooldown keep the chase from repeatedly launching in midair.
         if self.cooldown <= 0.0 && self.has_support(world) && self.pos.y - world.cursor.y > 130.0 {
@@ -998,32 +924,35 @@ impl Pet {
             && world.video_window.is_none()
             && !self.dragging
             && self.has_support(world)
-            && !matches!(
-                self.state,
-                State::Fall | State::Jump | State::Thrown | State::Smash | State::Block
-            )
+            && !matches!(self.state, State::Fall | State::Jump | State::Thrown)
         {
             self.vel = Vec2::default();
             self.set_state(State::Sleep, 0.0);
         }
     }
 
-    fn update_rage(&mut self, dt: f64) {
-        if self.skin != Skin::Tagilla {
+    fn update_idle_animation(&mut self, dt: f64, world: &World) {
+        if self.state != State::Idle
+            || self.dragging
+            || self.chase
+            || !self.has_support(world)
+            || !self.random_chance(dt * 0.01)
+        {
             return;
         }
-        if self.rage_forever {
-            self.rage = true;
-            return;
-        }
-        self.rage_timer -= dt;
-        if self.rage_timer <= 0.0 {
-            self.rage = !self.rage;
-            self.rage_timer = if self.rage {
-                20.0
-            } else {
-                30.0 + self.random() * 90.0
-            };
+        match (self.random() * 3.0) as u8 {
+            0 => {
+                self.set_state(State::Laptop, 10.0);
+                self.say("сейчас допечатаю", 2.0);
+            }
+            1 => {
+                self.set_state(State::Stretch, 2.5);
+                self.say("разомнусь немного", 2.0);
+            }
+            _ => {
+                self.set_state(State::LookAround, 2.0);
+                self.say("что тут интересного?", 2.0);
+            }
         }
     }
 
@@ -1089,11 +1018,7 @@ impl Pet {
             let target_x =
                 (self.pos.x).clamp(w.rect.x + BODY_HALF_WIDTH, w.rect.right() - BODY_HALF_WIDTH);
             let area = world.area_at(Vec2::new(target_x, w.rect.y));
-            let headroom = if self.skin == Skin::Tagilla {
-                150.0
-            } else {
-                80.0
-            };
+            let headroom = 80.0;
             if !area.contains(Vec2::new(target_x, w.rect.y)) || w.rect.y < area.y + headroom {
                 continue;
             }
@@ -1128,146 +1053,6 @@ impl Pet {
         self.target = Some(world.windows[index].id as u64);
         self.explore_cooldown = 8.0 + self.random() * 10.0;
         true
-    }
-
-    fn plan_window_smash(&mut self, world: &World) {
-        let candidate = world
-            .windows
-            .iter()
-            .enumerate()
-            .filter(|(i, w)| {
-                valid_rect(w.rect)
-                    && w.rect.w >= 40.0
-                    && w.rect.h >= 30.0
-                    && !covered(
-                        world,
-                        Vec2::new(w.rect.x + w.rect.w * 0.5, w.rect.y + w.rect.h * 0.5),
-                        *i,
-                    )
-            })
-            .min_by(|(_, a), (_, b)| {
-                distance_sq(
-                    self.pos,
-                    Vec2::new(a.rect.x + a.rect.w * 0.5, a.rect.y + a.rect.h * 0.5),
-                )
-                .total_cmp(&distance_sq(
-                    self.pos,
-                    Vec2::new(b.rect.x + b.rect.w * 0.5, b.rect.y + b.rect.h * 0.5),
-                ))
-            });
-        let Some((index, window)) = candidate else {
-            self.attack = None;
-            self.smash_goal = None;
-            if self.state != State::Smash {
-                if self.has_support(world) {
-                    self.vel = Vec2::default();
-                    self.set_state(State::Idle, 0.0);
-                } else {
-                    self.set_state(State::Fall, 0.0);
-                }
-            }
-            return;
-        };
-
-        let center = Vec2::new(
-            window.rect.x + window.rect.w * 0.5,
-            window.rect.y + window.rect.h * 0.5,
-        );
-        let already_on_window = self.surface_id == Some(window.id)
-            || (self.surface == Some(index) && (self.pos.y - window.rect.y).abs() <= 3.0);
-        if already_on_window {
-            self.begin_smash(
-                Attack::Window {
-                    window_id: window.id,
-                    point: self.pos,
-                },
-                1.0,
-            );
-        } else {
-            self.attack = Some(Attack::Window {
-                window_id: window.id,
-                point: center,
-            });
-            self.smash_goal = Some((window.id, Vec2::new(center.x, window.rect.y)));
-            self.smash_impacted = false;
-            self.advance_smash_route(world);
-        }
-    }
-
-    fn begin_smash(&mut self, attack: Attack, duration: f64) {
-        self.attack = Some(attack);
-        self.smash_goal = None;
-        self.smash_impacted = false;
-        self.state_time = 0.0;
-        self.set_state(State::Smash, duration);
-        self.say("БАХ!", duration.min(1.0));
-    }
-
-    fn advance_smash_route(&mut self, world: &World) {
-        let Some((window_id, _)) = self.smash_goal else {
-            return;
-        };
-        let Some(window) = world
-            .windows
-            .iter()
-            .find(|w| w.id == window_id && valid_rect(w.rect))
-        else {
-            self.smash_goal = None;
-            self.attack = None;
-            if !self.is_airborne() {
-                self.set_state(State::Idle, 0.0);
-            }
-            return;
-        };
-        let goal = Vec2::new(window.rect.x + window.rect.w * 0.5, window.rect.y);
-        let center = Vec2::new(goal.x, window.rect.y + window.rect.h * 0.5);
-        self.attack = Some(Attack::Window {
-            window_id,
-            point: center,
-        });
-        self.smash_goal = Some((window_id, goal));
-        if self.state == State::Smash || self.is_airborne() {
-            return;
-        }
-        let dx = goal.x - self.pos.x;
-        let dy = goal.y - self.pos.y;
-        if self.has_support(world) && dx.abs() <= 32.0 && dy.abs() <= 5.0 {
-            self.pos = goal;
-            self.begin_smash(
-                Attack::Window {
-                    window_id,
-                    point: center,
-                },
-                1.0,
-            );
-            return;
-        }
-
-        if self.has_support(world) && dy < -5.0 {
-            // Leave headroom over the continuous ballistic estimate: the
-            // semi-implicit frame integrator loses a little jump height.
-            const LAUNCH: f64 = 1_500.0;
-            let disc = LAUNCH * LAUNCH + 2.0 * GRAVITY * dy;
-            if disc >= 0.0 {
-                let flight = (LAUNCH + disc.sqrt()) / GRAVITY;
-                if flight > 0.0 && dx.abs() <= 360.0 * flight {
-                    self.facing = if dx < 0.0 { -1.0 } else { 1.0 };
-                    self.vel = Vec2::new(dx / flight, -LAUNCH);
-                    self.surface = None;
-                    self.surface_id = None;
-                    self.surface_prev = None;
-                    self.set_state(State::Jump, 0.0);
-                    return;
-                }
-            }
-        }
-
-        if self.has_support(world) && dx.abs() > 32.0 {
-            self.facing = if dx < 0.0 { -1.0 } else { 1.0 };
-            self.set_state(State::Walk, 0.0);
-        } else if self.has_support(world) {
-            self.set_state(State::Idle, 0.0);
-        }
     }
 
     fn start_peek_route(&mut self, video_id: usize, world: &World) {
@@ -1359,15 +1144,12 @@ impl Pet {
     }
 
     fn snapshot_windows(&mut self, world: &World) {
-        self.prior_windows = window_rects(world);
+        self.prior_windows.clear();
+        self.prior_windows
+            .extend(world.windows.iter().map(|window| (window.id, window.rect)));
     }
     fn set_state(&mut self, state: State, duration: f64) {
         if self.state != state {
-            if self.state == State::Smash && state != State::Smash {
-                self.attack = None;
-                self.smash_goal = None;
-                self.smash_impacted = false;
-            }
             self.state = state;
             self.state_time = 0.0;
         }
@@ -1378,22 +1160,14 @@ impl Pet {
         self.bubble_time = duration;
     }
     fn speed(&self) -> f64 {
-        if self.state == State::Run
-            || self.state == State::Chase
-            || self.state == State::Hunt
-            || self.state == State::Flee
-        {
+        if self.state == State::Run || self.state == State::Chase {
             RUN_SPEED * self.skin_speed()
         } else {
             WALK_SPEED * self.skin_speed()
         }
     }
     fn skin_speed(&self) -> f64 {
-        if self.skin == Skin::Tagilla {
-            1.35
-        } else {
-            1.0
-        }
+        1.0
     }
     fn random(&mut self) -> f64 {
         self.rng ^= self.rng << 13;
@@ -1514,82 +1288,15 @@ impl Pet {
     }
 }
 
-/// Pairwise autonomous interaction pass. Call after each pet's normal update.
-/// It mutates only pet simulation state; the real cursor and desktop windows
-/// remain entirely outside the engine.
-pub fn update_interactions(pets: &mut [Pet], dt: f64, world: &World) {
-    let dt = if dt.is_finite() {
-        dt.clamp(0.0, 0.05)
-    } else {
-        0.0
-    };
-    let mut hits: Vec<(usize, usize)> = Vec::new();
-    for i in 0..pets.len() {
-        if pets[i].skin != Skin::Tagilla
-            || !pets[i].rage
-            || pets[i].cooldown > 0.0
-            || pets[i].dragging
-        {
-            continue;
-        }
-        let victim = (0..pets.len())
-            .filter(|&j| i != j && pets[j].skin != Skin::Tagilla && !pets[j].dragging)
-            .min_by(|&a, &b| {
-                distance_sq(pets[i].pos, pets[a].pos)
-                    .total_cmp(&distance_sq(pets[i].pos, pets[b].pos))
-            });
-        let Some(j) = victim else {
-            continue;
-        };
-        let dx = pets[j].pos.x - pets[i].pos.x;
-        pets[i].target = Some(pets[j].id);
-        if dx.abs() < 48.0 && (pets[i].pos.y - pets[j].pos.y).abs() < 100.0 {
-            if pets[i].random_chance(0.2) {
-                pets[i].vel = Vec2::new(-dx.signum() * 260.0, -500.0);
-                pets[i].surface = None;
-                pets[i].set_state(State::Thrown, 0.0);
-                pets[i].cooldown = 2.5;
-                pets[j].set_state(State::Block, 1.0);
-                pets[j].cooldown = 1.0;
-            } else {
-                pets[j].vel = Vec2::new(dx.signum() * 430.0, -650.0);
-                pets[j].surface = None;
-                pets[j].set_state(State::Thrown, 0.0);
-                pets[j].say("АЙ!", 1.5);
-                pets[i].set_state(State::Dizzy, 0.8);
-                pets[i].cooldown = 1.8;
-            }
-        } else {
-            pets[i].facing = if dx < 0.0 { -1.0 } else { 1.0 };
-            pets[i].pos.x += pets[i].facing * RUN_SPEED * 1.35 * dt;
-            pets[i].set_state(State::Hunt, 0.0);
-            pets[j].facing = -pets[i].facing;
-            pets[j].pos.x += pets[j].facing * RUN_SPEED * dt;
-            let trapped = (0..pets.len())
-                .any(|k| k != i && k != j && (pets[k].pos.x - pets[j].pos.x).abs() < 50.0);
-            if trapped && pets[j].surface.is_some() {
-                pets[j].jump();
-            } else {
-                pets[j].set_state(State::Flee, 0.0);
-            }
-        }
-        hits.push((i, j));
-    }
-    // If several Tagillas selected one victim, retain only outcomes already
-    // applied; a zero-dt update remains deterministic and cannot affect OS state.
-    for (i, j) in hits {
-        pets[i].target = Some(pets[j].id);
-    }
-    let _ = world;
-}
-
 fn valid_vec(p: Vec2) -> bool {
     p.x.is_finite() && p.y.is_finite() && p.x.abs() < MAX_COORD && p.y.abs() < MAX_COORD
 }
 fn pose_duration(state: State) -> f64 {
     match state {
         State::Dance => 3.0,
-        State::Wave => 2.0,
+        State::Wave | State::LookAround => 2.0,
+        State::Laptop => 10.0,
+        State::Stretch => 2.5,
         _ => 0.0,
     }
 }
@@ -1619,9 +1326,6 @@ fn valid_rect(r: Rect) -> bool {
         && r.bottom().is_finite()
         && r.right().abs() < MAX_COORD
         && r.bottom().abs() < MAX_COORD
-}
-fn window_rects(world: &World) -> Vec<(usize, Rect)> {
-    world.windows.iter().map(|w| (w.id, w.rect)).collect()
 }
 fn distance(a: Vec2, b: Vec2) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()

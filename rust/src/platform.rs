@@ -49,8 +49,6 @@ pub struct MenuState {
     pub autostart: bool,
     pub auto_updates: bool,
     pub chase: bool,
-    pub rage: bool,
-    pub tagilla: bool,
     pub scale: f64,
     pub target_fps: u32,
     pub show_bubbles: bool,
@@ -66,8 +64,6 @@ impl Default for MenuState {
             autostart: false,
             auto_updates: true,
             chase: false,
-            rage: false,
-            tagilla: false,
             scale: 1.0,
             target_fps: crate::timing::DEFAULT_FPS,
             show_bubbles: true,
@@ -666,10 +662,24 @@ unsafe fn append_submenu(parent: HMENU, child: MenuGuard, label: &str) -> bool {
 
 unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
     let root = MenuGuard::popup()?;
-    if !append_item(root.raw(), 70, "Прыгнуть", 0)
-        || !append_item(root.raw(), 71, "Погладить", 0)
-        || !append_item(root.raw(), 72, "Потанцевать", 0)
-        || !append_item(root.raw(), 73, "Помахать", 0)
+    let activities = MenuGuard::popup()?;
+    for (id, label) in [
+        (70, "Прыгнуть"),
+        (71, "Погладить"),
+        (72, "Потанцевать"),
+        (73, "Помахать"),
+        (74, "Печатать на ноутбуке"),
+        (75, "Потянуться"),
+        (76, "Осмотреться"),
+    ] {
+        if !append_item(activities.raw(), id, label, 0) {
+            return None;
+        }
+    }
+    for id in 74..=76 {
+        check_menu(activities.raw(), id, s.selected_action == id);
+    }
+    if !append_submenu(root.raw(), activities, "Заняться")
         || !append_item(
             root.raw(),
             0,
@@ -698,17 +708,8 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         (3, "Спать"),
         (4, "Карабкаться"),
         (5, "Бегать за курсором"),
-        (6, "Крушить"),
-        (7, "Ярость"),
-        (8, "Постоянная ярость"),
     ] {
-        let disabled = !s.tagilla && (6..=8).contains(&id);
-        if !append_item(
-            actions.raw(),
-            id,
-            label,
-            if disabled { MF_GRAYED } else { 0 },
-        ) {
+        if !append_item(actions.raw(), id, label, 0) {
             return None;
         }
     }
@@ -720,24 +721,14 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         }
     }
     check_menu(actions.raw(), 5, s.chase);
-    check_menu(actions.raw(), 8, s.rage);
     if !append_submenu(root.raw(), actions, "Поведение") {
         return None;
     }
 
-    let characters = MenuGuard::popup()?;
-    for (id, label, checked) in [(10, "Claude", !s.tagilla), (11, "Тагилла", s.tagilla)] {
-        if !append_item(characters.raw(), id, label, 0) {
-            return None;
-        }
-        check_menu(characters.raw(), id, checked);
-    }
-    if AppendMenuW(characters.raw(), MF_SEPARATOR, 0, null()) == 0
-        || !append_item(characters.raw(), 20, "Позвать Claude", 0)
-        || !append_item(characters.raw(), 21, "Позвать Тагиллу", 0)
-        || AppendMenuW(characters.raw(), MF_SEPARATOR, 0, null()) == 0
-        || !append_item(characters.raw(), 30, "Убрать этого питомца", 0)
-        || !append_submenu(root.raw(), characters, "Персонажи и друзья")
+    let friends = MenuGuard::popup()?;
+    if !append_item(friends.raw(), 20, "Позвать Claude", 0)
+        || !append_item(friends.raw(), 30, "Убрать этого питомца", 0)
+        || !append_submenu(root.raw(), friends, "Друзья")
     {
         return None;
     }
@@ -1291,67 +1282,60 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn context_menu_builds_compact_hierarchy_and_respects_character_state() {
+    fn context_menu_builds_claude_actions_and_valid_native_commands() {
         use super::*;
-        unsafe {
-            let menu = build_menu_tree(MenuState {
-                tagilla: false,
-                selected_action: 2,
-                target_fps: 90,
-                ..MenuState::default()
-            })
-            .unwrap();
-            assert_eq!(GetMenuItemCount(menu.raw()), 11);
-            let actions = GetSubMenu(menu.raw(), 6);
-            let characters = GetSubMenu(menu.raw(), 7);
-            let settings = GetSubMenu(menu.raw(), 8);
-            let fps = GetSubMenu(settings, 6);
-            assert!(!actions.is_null() && !characters.is_null() && !settings.is_null());
-            assert!(!fps.is_null());
-            let state = |menu, id| {
-                let state = GetMenuState(menu, id, MF_BYCOMMAND);
-                assert_ne!(state, u32::MAX, "menu command {id} must exist");
-                state
-            };
-            assert_ne!(state(actions, 2) & MF_CHECKED, 0);
-            assert_eq!(state(actions, 1) & MF_CHECKED, 0);
-            assert_ne!(state(actions, 6) & MF_GRAYED, 0);
-            assert_eq!(state(actions, 5) & MF_CHECKED, 0);
-            assert_eq!(GetMenuItemCount(fps), 6); // FPS presets plus current custom rate
-            for id in 80..=84 {
-                assert_eq!(state(fps, id) & MF_CHECKED, 0);
+
+        unsafe fn find_command(menu: HMENU, id: u16) -> Option<HMENU> {
+            for index in 0..GetMenuItemCount(menu).max(0) as u32 {
+                let item_id = GetMenuItemID(menu, index as i32);
+                if item_id == id as u32 {
+                    return Some(menu);
+                }
+                let submenu = GetSubMenu(menu, index as i32);
+                if !submenu.is_null() {
+                    if let Some(found) = find_command(submenu, id) {
+                        return Some(found);
+                    }
+                }
             }
+            None
         }
+
+        unsafe fn command_state(menu: HMENU, id: u16) -> u32 {
+            let owner =
+                find_command(menu, id).unwrap_or_else(|| panic!("menu command {id} must exist"));
+            let state = GetMenuState(owner, id as u32, MF_BYCOMMAND);
+            assert_ne!(state, u32::MAX, "native menu command {id} must be valid");
+            state
+        }
+
         unsafe {
             let menu = build_menu_tree(MenuState {
-                tagilla: true,
+                selected_action: 74,
                 chase: true,
                 target_fps: 120,
                 ..MenuState::default()
             })
-            .unwrap();
-            let actions = GetSubMenu(menu.raw(), 6);
-            let settings = GetSubMenu(menu.raw(), 8);
-            let fps = GetSubMenu(settings, 6);
-            let state = |menu, id| {
-                let state = GetMenuState(menu, id, MF_BYCOMMAND);
-                assert_ne!(state, u32::MAX, "menu command {id} must exist");
-                state
-            };
-            assert_eq!(state(actions, 6) & MF_GRAYED, 0);
-            assert_ne!(state(actions, 5) & MF_CHECKED, 0);
-            assert_ne!(state(fps, 82) & MF_CHECKED, 0);
-        }
-        unsafe {
-            let menu = build_menu_tree(MenuState {
-                selected_action: 72,
-                ..MenuState::default()
-            })
-            .unwrap();
-            let actions = GetSubMenu(menu.raw(), 6);
-            for id in 1..=4 {
-                assert_eq!(GetMenuState(actions, id, MF_BYCOMMAND) & MF_CHECKED, 0);
+            .expect("Windows should build the native menu tree");
+
+            for id in [
+                1, 2, 3, 4, 5, 20, 30, 31, 40, 41, 42, 43, 44, 50, 51, 52, 60, 61, 70, 71, 72, 73,
+                74, 75, 76, 80, 81, 82, 83, 84,
+            ] {
+                let _ = command_state(menu.raw(), id);
             }
+            for id in [6, 7, 8, 10, 11, 21] {
+                assert!(
+                    find_command(menu.raw(), id).is_none(),
+                    "removed command {id} must not exist"
+                );
+            }
+
+            assert_eq!(command_state(menu.raw(), 2) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 5) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 74) & MF_CHECKED, 0);
+            assert_eq!(command_state(menu.raw(), 75) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 82) & MF_CHECKED, 0);
         }
     }
 }

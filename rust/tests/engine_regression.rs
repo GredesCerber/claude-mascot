@@ -1,4 +1,4 @@
-use claude_mascot::engine::{update_interactions, Attack, Command, Pet, Skin, State};
+use claude_mascot::engine::{Command, Pet, Skin, State};
 use claude_mascot::{Rect, Vec2, WindowInfo, World};
 
 fn world() -> World {
@@ -275,10 +275,6 @@ fn repeated_rough_throws_make_pet_unhappy_and_petting_calms_it_faster() {
     }
     assert!(p.satisfaction >= 30.0);
     assert!(p.satisfaction - after_wait > 30.0);
-    assert!(
-        !p.rage,
-        "being unhappy must not turn Claude into Tagilla rage"
-    );
 }
 
 #[test]
@@ -597,46 +593,6 @@ fn confirmed_video_can_trigger_peek_and_stops_when_session_ends() {
 }
 
 #[test]
-fn tagilla_hunts_and_pairwise_outcome_is_reproducible() {
-    let w = world();
-    let mut pets = [
-        Pet::new(10, Skin::Tagilla, Vec2::new(100.0, 700.0)),
-        Pet::new(11, Skin::Claude, Vec2::new(500.0, 700.0)),
-    ];
-    pets[0].rage = true;
-    update_interactions(&mut pets, 0.05, &w);
-    assert_eq!(pets[0].target_id(), Some(11));
-    assert_eq!(pets[0].state, State::Hunt);
-    assert_eq!(pets[1].state, State::Flee);
-    let first = (pets[0].pos, pets[1].pos, pets[0].state, pets[1].state);
-
-    let mut again = [
-        Pet::new(10, Skin::Tagilla, Vec2::new(100.0, 700.0)),
-        Pet::new(11, Skin::Claude, Vec2::new(500.0, 700.0)),
-    ];
-    again[0].rage = true;
-    update_interactions(&mut again, 0.05, &w);
-    assert_eq!(
-        first,
-        (again[0].pos, again[1].pos, again[0].state, again[1].state)
-    );
-}
-
-#[test]
-fn tagilla_never_targets_itself_or_another_tagilla() {
-    let w = world();
-    let mut pets = [
-        Pet::new(80, Skin::Tagilla, Vec2::new(100.0, 700.0)),
-        Pet::new(81, Skin::Tagilla, Vec2::new(130.0, 700.0)),
-    ];
-    pets[0].rage = true;
-    update_interactions(&mut pets, 0.05, &w);
-    assert_eq!(pets[0].target_id(), None);
-    assert_eq!(pets[0].state, State::Fall);
-    assert_eq!(pets[1].state, State::Fall);
-}
-
-#[test]
 fn commands_drag_release_pet_and_jump_are_simulation_only() {
     let w = world();
     let mut p = Pet::new(12, Skin::Claude, Vec2::new(100.0, 700.0));
@@ -713,97 +669,92 @@ fn climb_uses_selected_edge_and_ledge_pose_finishes() {
 }
 
 #[test]
-fn smash_without_a_window_does_not_invent_an_attack_target() {
+fn legacy_tagilla_skin_deserializes_as_claude() {
+    let skin: Skin = serde_json::from_str("\"Tagilla\"").unwrap();
+    assert_eq!(skin, Skin::Claude);
+}
+
+#[test]
+fn laptop_open_typing_and_close_cancel_on_drag_jump_or_lost_support() {
+    for phase in [0.5, 3.0, 9.5] {
+        let mut w = world();
+        w.windows
+            .push(window(501, Rect::new(100.0, 300.0, 600.0, 300.0)));
+        let mut pet = Pet::new(501, Skin::Claude, Vec2::new(300.0, 100.0));
+        step(&mut pet, &w, 60);
+        assert_eq!(pet.surface, Some(0));
+        pet.command(Command::Laptop, &w);
+        pet.state_time = phase;
+
+        let mut dragged = pet.clone();
+        dragged.drag_to(Vec2::new(400.0, 200.0));
+        assert_ne!(dragged.state, State::Laptop);
+        assert!(dragged.dragging);
+
+        let mut jumping = pet.clone();
+        jumping.jump();
+        assert_eq!(jumping.state, State::Jump);
+
+        w.windows.clear();
+        pet.update(1.0 / 60.0, &w);
+        assert_eq!(pet.state, State::Fall);
+    }
+}
+
+#[test]
+fn laptop_pose_runs_for_ten_seconds_and_manual_sleep_overrides_it() {
     let w = world();
-    let mut p = Pet::new(122, Skin::Tagilla, Vec2::new(200.0, 700.0));
-    p.state = State::Idle;
-    p.command(Command::Smash, &w);
-    assert_eq!(p.state, State::Idle);
-    assert_eq!(p.attack, None);
-    assert_eq!(p.attack_serial, 0);
+    let mut p = Pet::new(301, Skin::Claude, Vec2::new(300.0, 700.0));
+    p.command(Command::Laptop, &w);
+    assert_eq!(p.state, State::Laptop);
+    step(&mut p, &w, 599);
+    assert_eq!(p.state, State::Laptop);
+    let mut timed = Pet::new(304, Skin::Claude, Vec2::new(350.0, 700.0));
+    timed.command(Command::Laptop, &w);
+    step(&mut timed, &w, 599);
+    assert_eq!(timed.state, State::Laptop);
+    timed.update(1.0 / 60.0, &w);
+    assert_eq!(timed.state, State::Idle);
+    p.command(Command::Sleep, &w);
+    assert_eq!(p.state, State::Sleep);
+    step(&mut p, &w, 5);
+    assert_eq!(p.state, State::Sleep);
 }
 
 #[test]
-fn window_smash_emits_one_typed_impact_for_real_window() {
-    let mut w = world();
-    w.windows
-        .push(window(123, Rect::new(100.0, 300.0, 500.0, 200.0)));
-    let mut p = Pet::new(123, Skin::Tagilla, Vec2::new(200.0, 300.0));
-    p.surface = Some(0);
-    p.state = State::Idle;
-    p.command(Command::Smash, &w);
-    assert_eq!(p.state, State::Smash);
-    assert!(matches!(
-        p.attack,
-        Some(Attack::Window { window_id: 123, .. })
-    ));
-    step(&mut p, &w, 22);
-    assert_eq!(p.attack_serial, 1);
-    step(&mut p, &w, 45);
-    assert_eq!(p.attack_serial, 1, "one swing emits one impact");
+fn grounded_short_poses_finish_and_jump_cancels_them() {
+    let w = world();
+    let mut p = Pet::new(302, Skin::Claude, Vec2::new(300.0, 700.0));
+    p.command(Command::Stretch, &w);
+    assert_eq!(p.state, State::Stretch);
+    step(&mut p, &w, 151);
     assert_eq!(p.state, State::Idle);
-    assert_eq!(p.attack, None);
+
+    p.command(Command::LookAround, &w);
+    assert_eq!(p.state, State::LookAround);
+    p.jump();
+    assert_eq!(p.state, State::Jump);
+    step(&mut p, &w, 240);
+    assert_ne!(p.state, State::LookAround);
 }
 
 #[test]
-fn window_smash_approaches_then_leaps_to_reachable_window_top() {
-    let mut w = world();
-    w.windows
-        .push(window(125, Rect::new(100.0, 300.0, 500.0, 200.0)));
-    let mut p = Pet::new(125, Skin::Tagilla, Vec2::new(900.0, 700.0));
-    p.state = State::Idle;
-    p.command(Command::Smash, &w);
-    assert_eq!(p.state, State::Walk);
-    assert!(matches!(
-        p.attack,
-        Some(Attack::Window { window_id: 125, .. })
-    ));
-    for _ in 0..600 {
-        p.update(0.05, &w);
-        if p.state == State::Smash {
+fn airborne_pose_waits_for_landing_and_drag_cancels_pending_pose() {
+    let w = world();
+    let mut p = Pet::new(303, Skin::Claude, Vec2::new(300.0, 150.0));
+    p.command(Command::Stretch, &w);
+    for _ in 0..120 {
+        p.update(1.0 / 60.0, &w);
+        if p.state == State::Stretch {
             break;
         }
     }
-    assert_eq!(
-        p.state,
-        State::Smash,
-        "route ended at {:?} pos={:?} vel={:?}",
-        p.state,
-        p.pos,
-        p.vel
-    );
-    assert_eq!(p.surface, Some(0));
-    assert!((p.pos.y - 300.0).abs() < 1.0);
-}
+    assert_eq!(p.state, State::Stretch);
 
-#[test]
-fn tagilla_cursor_attack_requires_chase_and_emits_typed_impact() {
-    let mut w = world();
-    w.cursor = Vec2::new(500.0, 300.0);
-    let mut p = Pet::new(124, Skin::Tagilla, Vec2::new(480.0, 300.0));
-    p.chase = true;
-    p.state = State::Idle;
-    p.update(0.016, &w);
-    assert_eq!(p.state, State::Smash);
-    assert!(matches!(p.attack, Some(Attack::Cursor { point }) if point == w.cursor));
-    step(&mut p, &w, 22);
-    assert_eq!(p.attack_serial, 1);
-}
-
-#[test]
-fn changing_skin_clears_skin_specific_state_but_keeps_position() {
-    let mut p = Pet::new(90, Skin::Tagilla, Vec2::new(230.0, 300.0));
-    p.rage = true;
-    p.rage_forever = true;
-    p.chase = true;
-    p.state = State::Smash;
-    p.bubble = Some("БАХ!".into());
-    p.surface = Some(3);
-    p.set_skin(Skin::Claude);
-    assert_eq!(p.skin, Skin::Claude);
-    assert_eq!(p.pos, Vec2::new(230.0, 300.0));
-    assert_eq!(p.surface, Some(3));
-    assert_eq!(p.state, State::Idle);
-    assert!(!p.rage && !p.rage_forever && !p.chase);
-    assert!(p.bubble.is_none());
+    let mut pending = Pet::new(305, Skin::Claude, Vec2::new(300.0, 150.0));
+    pending.command(Command::Laptop, &w);
+    pending.drag_to(Vec2::new(400.0, 250.0));
+    pending.release(Vec2::default());
+    step(&mut pending, &w, 180);
+    assert_ne!(pending.state, State::Laptop);
 }
