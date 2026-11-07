@@ -16,16 +16,25 @@ play cancels the pair and clears its motion intents.
 
 ## Tower
 
-Tower is a two-pet play first: the lower pet remains on the shared support while
-the upper pet makes a real ballistic jump toward the lower pet. The upper pet
-can perch only after normal physics reports a descending landing on its friend.
-The coordinator requires enough headroom for the scaled jump and a clear side
-runway for dismount. It holds for about 2.5 seconds, then the upper pet makes a
-small physical side hop before gravity returns it to the floor. Narrow supports
-and low ceilings are rejected. The coordinator keeps a small anchor relative to
-the lower pet, allowing only the engine's bounded perch-follow correction while
-the lower pet stands. The lower pet stays silent during the perch so the two
-bubbles do not collide.
+Tower reserves all available pets on one support, up to eight. A group base is
+chosen near the support center and the others jump in order of distance. Each
+trajectory rises clear of the column before crossing it and perches only on a
+descending head crossing. The complete group must fit by height and jump range;
+an unsafe group is refused with a bubble instead of taking a silent subset.
+
+After about 2.5 seconds together, upper pets dismount one by one, waiting for
+the preceding pet to clear the column horizontally. Mixed sizes, support loss,
+input, removal and timeout have explicit cancellation rules. Reserved members
+do not receive mutual free-steering or body impulses during planned stack motion.
+
+## Leapfrog
+
+Two friends alternate between crouching and jumping across one another, changing
+roles after landing. Headroom and a safe shared runway are required. Ordinary
+walking can also trigger a single jump over a friend, separate from this game.
+
+Greeting, dancing and comfort work from a distance without pulling friends
+together. High-five and shared laptop use separate, closer, scale-aware ranges.
 
 All interactions are cancelled when actor identity, support, or manual input
 becomes invalid. No pair may claim a ghost actor after list compaction because

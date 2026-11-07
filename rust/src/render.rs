@@ -11,6 +11,15 @@ pub const HEIGHT: usize = 240;
 pub const FEET_X: f64 = 140.0;
 pub const FEET_Y: f64 = 216.0;
 
+/// Sprite poses share one stepped clock; world-space physics stays at 240 Hz.
+pub(crate) fn pose_time(time: f64) -> f64 {
+    if time.is_finite() {
+        (time.max(0.0) * 12.0 + 1e-8).floor() / 12.0
+    } else {
+        0.0
+    }
+}
+
 pub struct Canvas {
     pub pixels: Vec<u32>,
     pub width: usize,
@@ -138,12 +147,13 @@ impl Renderer {
     }
     pub fn frame(&mut self, pet: &Pet, show_bubbles: bool) -> &Canvas {
         self.canvas.clear();
+        let animation_time = pose_time(pet.time);
         if pet.state == State::Activity && !pet.dragging {
             if let Some(activity) = pet.activity {
                 crate::activities::draw_activity(
                     &mut self.canvas,
                     activity,
-                    pet.state_time,
+                    pose_time(pet.state_time),
                     pet.facing,
                     pet.gaze,
                 );
@@ -154,8 +164,9 @@ impl Renderer {
         draw_claude(&mut self.canvas, pet);
         if self.show_mood {
             let width = 42.0;
-            let x = FEET_X - width / 2.0;
-            let y = 139.0;
+            let in_tower = pet.social.is_some_and(|s| s.kind == SocialKind::Tower);
+            let x = FEET_X - width / 2.0 - if in_tower { 72.0 } else { 0.0 };
+            let y = if in_tower { FEET_Y - 30.0 } else { 139.0 };
             self.canvas.rect(x, y, width, 4.0, 0xCC211B1B);
             self.canvas
                 .rect(x + 1.0, y + 1.0, width - 2.0, 2.0, 0xFF493B35);
@@ -177,8 +188,9 @@ impl Renderer {
         }
         if pet.hearts > 0.0 {
             for n in 0..3 {
-                let t = (pet.time * 0.8 + n as f64 * 0.3).fract();
-                let x = FEET_X - 32.0 + n as f64 * 30.0 + (pet.time * 3.0 + n as f64).sin() * 7.0;
+                let t = (animation_time * 0.8 + n as f64 * 0.3).fract();
+                let x =
+                    FEET_X - 32.0 + n as f64 * 30.0 + (animation_time * 3.0 + n as f64).sin() * 7.0;
                 let y = FEET_Y - 80.0 - t * 65.0;
                 heart(
                     &mut self.canvas,
@@ -192,7 +204,7 @@ impl Renderer {
             self.text(
                 "z z Z",
                 FEET_X + 20.0,
-                FEET_Y - 90.0 - (pet.time * 2.0).sin() * 3.0,
+                FEET_Y - 90.0 - (animation_time * 2.0).sin() * 3.0,
                 15.0,
                 0xFFDDD7CA,
             );
@@ -389,12 +401,19 @@ fn heart(c: &mut Canvas, x: f64, y: f64, color: u32) {
     c.rect(x + 4.0, y + 10.0, 4.0, 3.0, color);
 }
 fn draw_claude(c: &mut Canvas, p: &Pet) {
-    let sitting = matches!(p.state, State::Sit | State::Sleep | State::Ledge);
+    let animation_time = pose_time(p.time);
+    let state_time = pose_time(p.state_time);
+    let palette = crate::palette::Palette::from_rgb(p.body_color);
+    let sitting = matches!(p.state, State::Sit | State::Sleep | State::Ledge)
+        || (!p.dragging
+            && p.state == State::Social
+            && p.social
+                .is_some_and(|s| s.kind == SocialKind::Leapfrog && s.role == SocialRole::Partner));
     let moving = matches!(p.state, State::Walk | State::Run | State::Chase);
     let air = matches!(p.state, State::Fall | State::Jump | State::Thrown);
-    let phase = (p.time * 7.0) as usize % 2;
+    let phase = (animation_time * 7.0) as usize % 2;
     let climbing = p.state == State::Climb && !p.dragging;
-    let climb_phase = (p.state_time * 5.0).floor() as usize % 4;
+    let climb_phase = (state_time * 5.0).floor() as usize % 4;
     let social = if !p.dragging { p.social.as_ref() } else { None };
     let social_kind = social.map(|activity| activity.kind);
     let social_greeting = social_kind == Some(SocialKind::Greeting);
@@ -448,9 +467,9 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let looking = p.state == State::LookAround && !p.dragging;
     let laptop_phase = if activity_laptop {
         let duration = activity.map_or(3.8, |spec| spec.duration).max(0.1);
-        (p.state_time / duration * 10.0).clamp(0.0, 10.0)
+        (state_time / duration * 10.0).clamp(0.0, 10.0)
     } else {
-        p.state_time.clamp(0.0, 10.0)
+        state_time.clamp(0.0, 10.0)
     };
     let angry = p.satisfaction < 30.0 || activity_angry;
     let bob = if climbing {
@@ -460,13 +479,13 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             0.15
         }
     } else if dancing {
-        if ((p.state_time * 5.0).floor() as usize).is_multiple_of(2) {
+        if ((state_time * 5.0).floor() as usize).is_multiple_of(2) {
             -0.7
         } else {
             0.25
         }
     } else if p.state == State::Hold || p.dragging {
-        (p.time * 2.7).sin() * 0.25
+        (animation_time * 2.7).sin() * 0.25
     } else if moving && phase == 1 {
         -0.5
     } else {
@@ -478,8 +497,8 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         -11.0
     } + bob;
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
-        let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
-        let sy = 1.0 - p.squash.clamp(0.0, 1.0) * 0.32;
+        let sx = 1.0 + ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.16;
+        let sy = 1.0 - ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.32;
         let xx = if p.facing >= 0.0 { x } else { -x - w };
         c.rect(
             FEET_X + xx * 5.0 * sx,
@@ -500,45 +519,45 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
                 -3.0 + if lifted { -0.8 } else { 0.0 },
                 1.0,
                 if lifted { 2.4 } else { 3.2 },
-                0xFFB85C3E,
+                palette.shadow,
             );
         } else if typing_pose {
-            px(*lx, -3.0, 1.0, 3.0, 0xFFB85C3E);
+            px(*lx, -3.0, 1.0, 3.0, palette.shadow);
         } else if stretching {
             px(
                 *lx + if i % 2 == 0 { -0.5 } else { 0.5 },
                 -3.0,
                 1.0,
                 3.0,
-                0xFFB85C3E,
+                palette.shadow,
             );
         } else if dancing {
-            let pair_phase = (p.state_time * 5.0).floor() as usize % 2;
+            let pair_phase = (state_time * 5.0).floor() as usize % 2;
             let lifted = i / 2 == pair_phase;
             px(
                 *lx + if lifted { 0.5 } else { 0.0 },
                 -3.0 + if lifted { -0.8 } else { 0.0 },
                 1.0,
                 if lifted { 2.2 } else { 3.0 },
-                0xFFB85C3E,
+                palette.shadow,
             );
         } else if p.state == State::Hold || p.dragging {
             px(
-                lx + (p.time * 5.0 + i as f64).sin() * 0.5,
+                lx + (animation_time * 5.0 + i as f64).sin() * 0.5,
                 -3.0,
                 1.0,
                 4.0,
-                0xFFB85C3E,
+                palette.shadow,
             );
         } else if p.state == State::Ledge {
-            px(lx + 1.0, -1.0, 1.0, 3.5, 0xFFB85C3E);
+            px(lx + 1.0, -1.0, 1.0, 3.5, palette.shadow);
         } else if !sitting {
             let h = if air || moving && i % 2 == phase {
                 2.0
             } else {
                 3.0
             };
-            px(*lx, -3.0 + bob, 1.0, h, 0xFFB85C3E);
+            px(*lx, -3.0 + bob, 1.0, h, palette.shadow);
         }
     }
     let torso_shift = if social_high_five || social_watching_laptop || activity_nature {
@@ -548,9 +567,9 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         0.0
     };
-    px(-6.0 + torso_shift, top, 12.0, 8.0, 0xFFD97757);
-    px(-6.0, top + 7.0, 12.0, 1.0, 0xFFB85C3E);
-    px(-5.0, top, 3.0, 1.0, 0xFFE8957A);
+    px(-6.0 + torso_shift, top, 12.0, 8.0, palette.body);
+    px(-6.0, top + 7.0, 12.0, 1.0, palette.shadow);
+    px(-5.0, top, 3.0, 1.0, palette.highlight);
     drop(px);
     if laptop_front {
         draw_laptop(
@@ -565,8 +584,8 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         );
     }
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
-        let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
-        let sy = 1.0 - p.squash.clamp(0.0, 1.0) * 0.32;
+        let sx = 1.0 + ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.16;
+        let sy = 1.0 - ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.32;
         let xx = if p.facing >= 0.0 { x } else { -x - w };
         c.rect(
             FEET_X + xx * 5.0 * sx,
@@ -593,13 +612,13 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         let trail_x = if reach > 0.0 { -8.0 } else { 6.0 };
         let lead_arm_x = if reach > 0.0 { 5.0 } else { -7.0 };
         let trail_arm_x = if reach > 0.0 { -7.0 } else { 5.0 };
-        px(lead_arm_x, top - 2.6, 2.0, 3.4, 0xFFD97757);
-        px(trail_arm_x, top + 1.0, 2.0, 2.8, 0xFFD97757);
-        px(lead_x, top - 2.0, 2.0, 2.0, 0xFFD97757);
-        px(trail_x, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(lead_arm_x, top - 2.6, 2.0, 3.4, palette.body);
+        px(trail_arm_x, top + 1.0, 2.0, 2.8, palette.body);
+        px(lead_x, top - 2.0, 2.0, 2.0, palette.body);
+        px(trail_x, top + 2.0, 2.0, 2.0, palette.body);
     } else if social_high_five {
         // `px` already mirrors local coordinates for left-facing Claude.
-        let elapsed = social.map_or(p.state_time, |activity| activity.elapsed);
+        let elapsed = social.map_or(state_time, |activity| pose_time(activity.elapsed));
         let rise = if elapsed < 0.55 {
             let t = (elapsed / 0.55).clamp(0.0, 1.0);
             1.0 - (1.0 - t).powi(3)
@@ -620,114 +639,114 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             top + 3.0 - rise * 4.0 + recoil,
             2.0,
             2.0 + rise,
-            0xFFD97757,
+            palette.body,
         );
-        px(trailing_x, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(trailing_x, top + 3.0, 2.0, 2.0, palette.body);
         let contact_x = (peer_dx.abs() / 10.0 - 1.0).clamp(6.0, 8.6);
         px(
             lead_x + (contact_x - lead_x) * rise,
             top + 3.0 - rise * 6.0 + recoil,
             2.0,
             2.0,
-            0xFFE8957A,
+            palette.highlight,
         );
     } else if social_comfort {
-        let open = (p.state_time * 2.0).sin().abs() * 0.35;
-        px(-9.0, top + 1.5 + open, 3.0, 2.0, 0xFFD97757);
-        px(-11.0, top + 0.5 + open, 2.0, 2.0, 0xFFE8957A);
-        px(6.0, top + 1.5 - open, 3.0, 2.0, 0xFFD97757);
-        px(9.0, top + 0.5 - open, 2.0, 2.0, 0xFFE8957A);
+        let open = (state_time * 2.0).sin().abs() * 0.35;
+        px(-9.0, top + 1.5 + open, 3.0, 2.0, palette.body);
+        px(-11.0, top + 0.5 + open, 2.0, 2.0, palette.highlight);
+        px(6.0, top + 1.5 - open, 3.0, 2.0, palette.body);
+        px(9.0, top + 0.5 - open, 2.0, 2.0, palette.highlight);
     } else if social_watching_laptop || shared_laptop_owner {
         // Both poses reach toward the same world-space laptop, not two
         // unrelated centers. Only the owner draws the shared prop.
         let target = (peer_dx.abs() / 10.0).clamp(6.0, 11.0);
         let tap = if shared_laptop_owner {
-            (p.state_time * 12.0).sin() * 0.2
+            (state_time * 12.0).sin() * 0.2
         } else {
             0.0
         };
-        px(5.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
-        px(6.0, -2.6, (target - 6.0).max(1.0), 1.0, 0xFFD97757);
-        px(target - 1.0, -2.8 + tap, 2.0, 1.4, 0xFFE8957A);
-        px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(5.0, top + 3.0, 2.0, 2.0, palette.body);
+        px(6.0, -2.6, (target - 6.0).max(1.0), 1.0, palette.body);
+        px(target - 1.0, -2.8 + tap, 2.0, 1.4, palette.highlight);
+        px(-8.0, top + 3.0, 2.0, 2.0, palette.body);
     } else if activity_strength {
         // Lift on the effort beat, lower into a short breathing pause.
-        let beat = (p.state_time * 1.9).fract();
+        let beat = (state_time * 1.9).fract();
         if beat > 0.19 && beat < 0.59 {
-            px(-8.0, top - 1.0, 2.0, 3.0, 0xFFD97757);
-            px(6.0, top - 1.0, 2.0, 3.0, 0xFFD97757);
-            px(-9.0, top - 3.0, 2.0, 2.0, 0xFFE8957A);
-            px(7.0, top - 3.0, 2.0, 2.0, 0xFFE8957A);
+            px(-8.0, top - 1.0, 2.0, 3.0, palette.body);
+            px(6.0, top - 1.0, 2.0, 3.0, palette.body);
+            px(-9.0, top - 3.0, 2.0, 2.0, palette.highlight);
+            px(7.0, top - 3.0, 2.0, 2.0, palette.highlight);
         } else {
-            px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
-            px(6.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+            px(-8.0, top + 3.0, 2.0, 2.0, palette.body);
+            px(6.0, top + 3.0, 2.0, 2.0, palette.body);
         }
     } else if activity_food {
         // A small centered hold pose supports the food prop without changing
         // Claude's torso size or replacing the canonical hands.
-        px(-7.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
-        px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
-        px(-3.0, top + 4.0, 2.0, 2.0, 0xFFE8957A);
-        px(1.0, top + 4.0, 2.0, 2.0, 0xFFE8957A);
+        px(-7.0, top + 2.0, 2.0, 2.0, palette.body);
+        px(5.0, top + 2.0, 2.0, 2.0, palette.body);
+        px(-3.0, top + 4.0, 2.0, 2.0, palette.highlight);
+        px(1.0, top + 4.0, 2.0, 2.0, palette.highlight);
     } else if activity_nature {
         // Claude reaches down gently toward the growing prop beside him.
-        px(-7.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
-        px(5.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
-        px(7.0, top + 5.0, 2.0, 2.0, 0xFFE8957A);
+        px(-7.0, top + 3.0, 2.0, 2.0, palette.body);
+        px(5.0, top + 3.0, 2.0, 2.0, palette.body);
+        px(7.0, top + 5.0, 2.0, 2.0, palette.highlight);
     } else if activity_reflection {
         // A tiny hand-to-chin gesture reads as thought while keeping the face
         // and its eye grid in the same canonical position.
-        px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
-        px(4.0, top + 1.0, 2.0, 2.0, 0xFFE8957A);
-        px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(5.0, top + 2.0, 2.0, 2.0, palette.body);
+        px(4.0, top + 1.0, 2.0, 2.0, palette.highlight);
+        px(-8.0, top + 3.0, 2.0, 2.0, palette.body);
     } else if activity_celebration {
-        let beat = (p.state_time * 3.0).fract();
+        let beat = (state_time * 3.0).fract();
         let lift = if beat < 0.65 { -2.0 } else { -1.0 };
-        px(-9.0, top + lift, 2.0, 3.0, 0xFFD97757);
-        px(-11.0, top + lift - 1.0, 2.0, 2.0, 0xFFE8957A);
-        px(7.0, top + lift, 2.0, 3.0, 0xFFD97757);
-        px(9.0, top + lift - 1.0, 2.0, 2.0, 0xFFE8957A);
+        px(-9.0, top + lift, 2.0, 3.0, palette.body);
+        px(-11.0, top + lift - 1.0, 2.0, 2.0, palette.highlight);
+        px(7.0, top + lift, 2.0, 3.0, palette.body);
+        px(9.0, top + lift - 1.0, 2.0, 2.0, palette.highlight);
     } else if typing_pose {
         // Arms angle inward from Claude's shoulders to the laptop keyboard.
         let tapping = ((laptop_phase * 3.0).floor() as usize).is_multiple_of(2);
-        px(-7.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
-        px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
-        px(-5.0, top + 4.0, 2.0, 2.0, 0xFFD97757);
-        px(3.0, top + 4.0, 2.0, 2.0, 0xFFD97757);
+        px(-7.0, top + 2.0, 2.0, 2.0, palette.body);
+        px(5.0, top + 2.0, 2.0, 2.0, palette.body);
+        px(-5.0, top + 4.0, 2.0, 2.0, palette.body);
+        px(3.0, top + 4.0, 2.0, 2.0, palette.body);
         px(
             -3.0,
             top + 5.0 + if tapping { -0.3 } else { 0.3 },
             2.0,
             2.0,
-            0xFFD97757,
+            palette.body,
         );
         px(
             1.0,
             top + 5.0 + if tapping { 0.3 } else { -0.3 },
             2.0,
             2.0,
-            0xFFD97757,
+            palette.body,
         );
     } else if stretching {
-        let reach = (p.state_time * 2.5).sin() * 0.5;
-        px(-9.0, top - 2.0 + reach, 3.0, 2.0, 0xFFD97757);
-        px(-11.0, top - 4.0 + reach, 2.0, 2.0, 0xFFD97757);
-        px(6.0, top - 2.0 - reach, 3.0, 2.0, 0xFFD97757);
-        px(9.0, top - 4.0 - reach, 2.0, 2.0, 0xFFD97757);
+        let reach = (state_time * 2.5).sin() * 0.5;
+        px(-9.0, top - 2.0 + reach, 3.0, 2.0, palette.body);
+        px(-11.0, top - 4.0 + reach, 2.0, 2.0, palette.body);
+        px(6.0, top - 2.0 - reach, 3.0, 2.0, palette.body);
+        px(9.0, top - 4.0 - reach, 2.0, 2.0, palette.body);
     } else if dancing {
-        let beat = (p.state_time * 5.0).floor() as usize % 4;
+        let beat = (state_time * 5.0).floor() as usize % 4;
         let raised = if beat < 2 { -8.0 } else { 6.0 };
         let lowered = if raised < 0.0 { 6.0 } else { -8.0 };
-        px(raised, top - 2.0, 2.0, 2.0, 0xFFD97757);
-        px(lowered, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(raised, top - 2.0, 2.0, 2.0, palette.body);
+        px(lowered, top + 2.0, 2.0, 2.0, palette.body);
     } else if waving {
-        let wave = (p.state_time * 9.0).sin() * 1.2;
-        px(6.0, top - 2.0 + wave, 2.0, 2.0, 0xFFD97757);
-        px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        let wave = (state_time * 9.0).sin() * 1.2;
+        px(6.0, top - 2.0 + wave, 2.0, 2.0, palette.body);
+        px(-8.0, top + 3.0, 2.0, 2.0, palette.body);
     } else {
         let dangling = p.state == State::Hold || p.dragging;
         let swing = if dangling {
-            (p.time * 4.0).sin() * 0.45
+            (animation_time * 4.0).sin() * 0.45
         } else {
             0.0
         };
@@ -735,19 +754,19 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             let hand_y = -CURSOR_HOLD_DY / 5.0;
             // Forearms rise from the shoulders and turn inward toward the
             // grip. Keep the center gap open at the cursor's exact hotspot.
-            px(-7.0 + swing, -13.0, 1.5, 5.0, 0xFFD97757);
-            px(-7.0 + swing, -13.0, 4.0, 1.5, 0xFFD97757);
-            px(-3.5 + swing, hand_y, 1.5, 1.5, 0xFFD97757);
-            px(5.5 - swing, -13.0, 1.5, 5.0, 0xFFD97757);
-            px(1.5 - swing, -13.0, 4.0, 1.5, 0xFFD97757);
-            px(2.0 - swing, hand_y, 1.5, 1.5, 0xFFD97757);
+            px(-7.0 + swing, -13.0, 1.5, 5.0, palette.body);
+            px(-7.0 + swing, -13.0, 4.0, 1.5, palette.body);
+            px(-3.5 + swing, hand_y, 1.5, 1.5, palette.body);
+            px(5.5 - swing, -13.0, 1.5, 5.0, palette.body);
+            px(1.5 - swing, -13.0, 4.0, 1.5, palette.body);
+            px(2.0 - swing, hand_y, 1.5, 1.5, palette.body);
         } else {
-            px(-8.0, arm, 2.0, 2.0, 0xFFD97757);
-            px(6.0, arm, 2.0, 2.0, 0xFFD97757);
+            px(-8.0, arm, 2.0, 2.0, palette.body);
+            px(6.0, arm, 2.0, 2.0, palette.body);
         }
     }
-    let blink = (p.time * 0.2).fract() > 0.98;
-    let activity_closed_eyes = activity_sleepy && (p.state_time * 1.5).fract() > 0.35;
+    let blink = (animation_time * 0.2).fract() > 0.98;
+    let activity_closed_eyes = activity_sleepy && (state_time * 1.5).fract() > 0.35;
     let eyes_closed =
         p.state == State::Sleep || p.state == State::Happy || activity_closed_eyes || blink;
     let facing_sign = if p.facing < 0.0 { -1.0 } else { 1.0 };
@@ -762,7 +781,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         0.0
     };
     let look_around_x = if looking {
-        if ((p.state_time * 2.0).floor() as usize).is_multiple_of(2) {
+        if ((state_time * 2.0).floor() as usize).is_multiple_of(2) {
             1.0
         } else {
             -1.0
@@ -787,18 +806,18 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let eye_offset_y = gaze_y * 0.3;
     for eye in [-4.0, 3.0] {
         if p.state == State::Sleep || activity_closed_eyes || blink {
-            px(eye - 0.3, top + 3.2, 1.6, 0.6, 0xFF1B1B1B);
+            px(eye - 0.3, top + 3.2, 1.6, 0.6, palette.eyes);
         } else if p.state == State::Happy {
-            px(eye - 0.3, top + 2.8, 0.6, 0.6, 0xFF1B1B1B);
-            px(eye + 0.3, top + 2.2, 0.6, 0.6, 0xFF1B1B1B);
-            px(eye + 0.9, top + 2.8, 0.6, 0.6, 0xFF1B1B1B);
+            px(eye - 0.3, top + 2.8, 0.6, 0.6, palette.eyes);
+            px(eye + 0.3, top + 2.2, 0.6, 0.6, palette.eyes);
+            px(eye + 0.9, top + 2.8, 0.6, 0.6, palette.eyes);
         } else {
             px(
                 eye + eye_offset_x,
                 top + 2.0 + eye_offset_y,
                 1.0,
                 2.0,
-                0xFF1B1B1B,
+                palette.eyes,
             );
         }
     }
@@ -824,11 +843,13 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(2.0, top + 4.7, 0.6, 1.0, 0xFF8BC9D2);
     }
     if social_comfort {
-        let elapsed = social.map_or(0.0, |activity| activity.elapsed);
+        let elapsed = social.map_or(0.0, |activity| pose_time(activity.elapsed));
         let pulse = (elapsed * 2.0).sin() * 1.5;
         heart(c, FEET_X + 17.0, FEET_Y - 102.0 - pulse, 0xBFFF9AAE);
     }
-    if social_high_five && social.is_some_and(|activity| (0.55..0.95).contains(&activity.elapsed)) {
+    if social_high_five
+        && social.is_some_and(|activity| (0.55..0.95).contains(&pose_time(activity.elapsed)))
+    {
         // A small contact sparkle marks the raised hand without adding another
         // character or desktop object to the renderer.
         let x = FEET_X
@@ -840,7 +861,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         let y = FEET_Y - 73.0;
         c.rect(x - 1.0, y - 4.0, 2.0, 8.0, 0xFFD9C88C);
         c.rect(x - 4.0, y - 1.0, 8.0, 2.0, 0xFFD9C88C);
-        if social.is_some_and(|activity| (activity.elapsed * 8.0).fract() < 0.5) {
+        if social.is_some_and(|activity| (pose_time(activity.elapsed) * 8.0).fract() < 0.5) {
             // Pixel-center rounding is half-open at the canvas center; this
             // asymmetric pair mirrors exactly when facing is reversed.
             c.pixel(x.round() as i32 - 4, y.round() as i32 - 3, 0xFFD9C88C);
@@ -891,7 +912,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         c.rect(x + 3.0, y + 12.0, 13.0, 1.0, 0xFF8A8790);
         c.rect(x + 3.0, y + 16.0, 9.0, 1.0, 0xFF8A8790);
         c.rect(x + 3.0, y + 21.0, 13.0, 1.0, 0xFF8A8790);
-        c.rect(x - 2.0, y + 22.0, 4.0, 3.0, 0xFFD97757);
+        c.rect(x - 2.0, y + 22.0, 4.0, 3.0, palette.body);
     }
     if activity_malware {
         // Keep the security window small, green, and grounded beside Claude.
@@ -971,6 +992,55 @@ fn draw_laptop(c: &mut Canvas, phase: f64, center: f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pixel_poses_hold_between_common_animation_ticks() {
+        use super::*;
+        let mut pet = Pet::new(1, crate::engine::Skin::Claude, crate::Vec2::default());
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        for state in [
+            State::Walk,
+            State::Dance,
+            State::Hold,
+            State::Laptop,
+            State::Stretch,
+            State::LookAround,
+        ] {
+            pet.state = state;
+            pet.time = 2.01;
+            pet.state_time = 2.01;
+            let first = renderer.frame(&pet, false).pixels.clone();
+            pet.time = 2.06;
+            pet.state_time = 2.06;
+            assert_eq!(
+                first,
+                renderer.frame(&pet, false).pixels,
+                "{state:?} must hold its pose during a shared animation tick"
+            );
+        }
+        assert_eq!(pose_time(2.06), 2.0);
+        assert!(pose_time(2.09) > 2.0);
+    }
+    #[test]
+    fn recoloring_preserves_claude_geometry_and_laptop_colors() {
+        use super::*;
+        use crate::engine::Skin;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Idle;
+        let mut renderer = Renderer::new().unwrap();
+        let original = renderer.frame(&pet, false).pixels.clone();
+        pet.body_color = 0x609BD5;
+        let colored = renderer.frame(&pet, false).pixels.clone();
+        assert!(colored.iter().filter(|&&c| c == 0xFF609BD5).count() > 500);
+        assert!(original
+            .iter()
+            .zip(&colored)
+            .all(|(a, b)| a >> 24 == b >> 24));
+        assert!(!colored.contains(&0xFFD97757));
+        pet.state = State::Laptop;
+        pet.state_time = 4.0;
+        assert!(renderer.frame(&pet, false).pixels.contains(&0xFF5B5653));
+    }
     use super::*;
     use crate::engine::Skin;
     #[test]

@@ -12,7 +12,7 @@ fn world() -> World {
 }
 fn pair() -> Vec<Pet> {
     let mut a = Pet::new(1, Skin::Claude, Vec2::new(300.0, 700.0));
-    let mut b = Pet::new(2, Skin::Claude, Vec2::new(380.0, 700.0));
+    let mut b = Pet::new(2, Skin::Claude, Vec2::new(410.0, 700.0));
     a.state = State::Idle;
     b.state = State::Idle;
     vec![a, b]
@@ -41,6 +41,9 @@ fn all_kinds_start_and_complete_with_owned_states() {
     .enumerate()
     {
         let mut p = pair();
+        if k == SocialKind::HighFive {
+            p[1].pos.x = 390.0;
+        }
         let mut c = SocialCoordinator::new();
         c.request(Some(k));
         advance(&mut c, &mut p, &w, 0.11);
@@ -191,8 +194,8 @@ fn request_for_uses_nearest_friend_and_manual_laptop_is_excluded() {
     let w = world();
     let mut p = vec![
         Pet::new(1, Skin::Claude, Vec2::new(300.0, 700.0)),
-        Pet::new(2, Skin::Claude, Vec2::new(390.0, 700.0)),
-        Pet::new(3, Skin::Claude, Vec2::new(340.0, 700.0)),
+        Pet::new(2, Skin::Claude, Vec2::new(490.0, 700.0)),
+        Pet::new(3, Skin::Claude, Vec2::new(410.0, 700.0)),
     ];
     for x in &mut p {
         x.state = State::Idle;
@@ -247,7 +250,7 @@ fn active_pair_cancels_after_separation_and_cooldown_prevents_immediate_repeat()
     let mut c = SocialCoordinator::new();
     c.request(Some(SocialKind::Greeting));
     advance(&mut c, &mut p, &w, 0.0);
-    p[1].pos.x += 200.0;
+    p[1].pos.x += 400.0;
     c.update(0.0, p.iter_mut(), &w);
     assert!(p.iter().all(|pet| pet.social.is_none()));
     assert_eq!(c.stats.cancelled, 1);

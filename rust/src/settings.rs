@@ -18,6 +18,12 @@ pub struct Settings {
     pub auto_activities: bool,
     pub auto_reactions: bool,
     pub desktop_perches: bool,
+    /// Free space between visible body edges, in scale-1 pixels.
+    pub personal_space_min: f64,
+    pub personal_space_max: f64,
+    pub body_color: u32,
+    /// Frequency of optional activities, from quiet (0) to lively (100).
+    pub activity_intensity: u8,
     pub paused: bool,
     pub auto_updates: bool,
     pub update_repo: String,
@@ -36,6 +42,10 @@ impl Default for Settings {
             auto_activities: true,
             auto_reactions: true,
             desktop_perches: true,
+            personal_space_min: 24.0,
+            personal_space_max: 96.0,
+            body_color: crate::palette::DEFAULT_BODY_COLOR,
+            activity_intensity: 50,
             paused: false,
             auto_updates: true,
             update_repo: option_env!("MASCOT_UPDATE_REPO")
@@ -69,6 +79,12 @@ impl Settings {
         }
         if !valid_fps(value.target_fps) {
             return Err("FPS must be an integer from 30 to 240".into());
+        }
+        if !valid_personal_space(value.personal_space_min, value.personal_space_max) {
+            return Err("Personal space must be 8..256 minimum, up to 512 maximum, with a range of at least 8 pixels".into());
+        }
+        if value.body_color > 0xFFFFFF || value.activity_intensity > 100 {
+            return Err("Color must be a 24-bit RGB value; intensity must be 0..100".into());
         }
         Ok(value)
     }
@@ -107,6 +123,13 @@ impl Settings {
         std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+pub fn valid_personal_space(min: f64, max: f64) -> bool {
+    min.is_finite()
+        && max.is_finite()
+        && (8.0..=256.0).contains(&min)
+        && max <= 512.0
+        && max >= min + 8.0
 }
 pub fn config_path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -304,6 +327,23 @@ mod tests {
         assert!(s.auto_activities);
         assert!(s.auto_reactions);
         assert!(s.desktop_perches);
+        assert_eq!((s.personal_space_min, s.personal_space_max), (24.0, 96.0));
+    }
+    #[test]
+    fn spacing_range_rejects_nonfinite_reversed_and_unbounded_values() {
+        for (min, max) in [
+            (0.0, 96.0),
+            (48.0, 24.0),
+            (24.0, 28.0),
+            (24.0, 1000.0),
+            (f64::NAN, 96.0),
+            (24.0, f64::INFINITY),
+        ] {
+            assert!(!valid_personal_space(min, max));
+        }
+        assert!(valid_personal_space(12.0, 48.0));
+        assert!(valid_personal_space(24.0, 96.0));
+        assert!(valid_personal_space(48.0, 144.0));
     }
     #[test]
     fn autostart_match_requires_exact_quoted_executable_path() {
@@ -346,12 +386,18 @@ mod tests {
         s.auto_activities = false;
         s.auto_reactions = false;
         s.desktop_perches = false;
+        s.personal_space_min = 32.0;
+        s.personal_space_max = 112.0;
         s.save(&p).unwrap();
         let toggled = Settings::load(&p).unwrap();
         assert!(!toggled.social_enabled);
         assert!(!toggled.auto_activities);
         assert!(!toggled.auto_reactions);
         assert!(!toggled.desktop_perches);
+        assert_eq!(
+            (toggled.personal_space_min, toggled.personal_space_max),
+            (32.0, 112.0)
+        );
         std::fs::remove_file(p).unwrap();
     }
 

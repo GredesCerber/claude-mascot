@@ -57,6 +57,9 @@ pub struct MenuState {
     pub auto_activities: bool,
     pub auto_reactions: bool,
     pub desktop_perches: bool,
+    pub personal_space_min: f64,
+    pub personal_space_max: f64,
+    pub body_color: u32,
     pub satisfaction: u8,
 }
 impl Default for MenuState {
@@ -76,6 +79,9 @@ impl Default for MenuState {
             auto_activities: true,
             auto_reactions: true,
             desktop_perches: true,
+            personal_space_min: 24.0,
+            personal_space_max: 96.0,
+            body_color: crate::palette::DEFAULT_BODY_COLOR,
             satisfaction: 75,
         }
     }
@@ -154,6 +160,25 @@ pub struct NativeHost {
 }
 
 impl NativeHost {
+    pub fn choose_body_color(&self, initial: u32) -> Option<u32> {
+        use windows_sys::Win32::UI::Controls::Dialogs::*;
+        let convert = |rgb: u32| ((rgb & 255) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 255);
+        let mut custom = [0xFFFFFFu32; 16];
+        for (slot, (_, _, rgb)) in custom.iter_mut().zip(crate::palette::PRESETS.iter()) {
+            *slot = convert(*rgb);
+        }
+        let mut dialog = CHOOSECOLORW {
+            lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+            hwndOwner: self.state.hwnd,
+            rgbResult: convert(initial),
+            lpCustColors: custom.as_mut_ptr(),
+            Flags: CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR,
+            ..unsafe { std::mem::zeroed() }
+        };
+        // SAFETY: owner is a live native window; custom colors and dialog
+        // storage remain valid until this synchronous OS dialog returns.
+        (unsafe { ChooseColorW(&mut dialog) } != 0).then(|| convert(dialog.rgbResult))
+    }
     pub fn new(title: &str, width: i32, height: i32, tray: bool) -> Result<Self, String> {
         ensure_class()?;
         if width <= 0 || height <= 0 {
@@ -467,6 +492,9 @@ impl NativeHost {
                     running = false;
                     break;
                 }
+                if crate::preferences::preprocess_message(&msg) {
+                    continue;
+                }
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -769,7 +797,8 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         (94, "Посидеть за ноутбуком"),
         (95, "Подбодрить друга"),
         (96, "Поиграть в догонялки"),
-        (97, "Построить башенку"),
+        (97, "Построить башню всем вместе"),
+        (98, "Поиграть в чехарду"),
     ] {
         if !append_item(together.raw(), id, label, 0) {
             return None;
@@ -789,6 +818,11 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
     }
 
     let settings = MenuGuard::popup()?;
+    if !append_item(settings.raw(), 49, "Открыть настройки…", 0)
+        || AppendMenuW(settings.raw(), MF_SEPARATOR, 0, null()) == 0
+    {
+        return None;
+    }
     for (id, label, checked) in [
         (40, "Пауза", s.paused),
         (41, "Скрывать в полноэкранном режиме", s.hide_fullscreen),
@@ -829,6 +863,46 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         MF_BYCOMMAND,
     );
     if !append_submenu(settings.raw(), size, "Размер") {
+        return None;
+    }
+    let palette = MenuGuard::popup()?;
+    for &(id, label, color) in crate::palette::PRESETS {
+        if !append_item(palette.raw(), id, label, 0) {
+            return None;
+        }
+        check_menu(palette.raw(), id, s.body_color == color);
+    }
+    if !append_item(palette.raw(), 188, "Свой цвет…", 0)
+        || !append_submenu(settings.raw(), palette, "Цвет этого Claude")
+    {
+        return None;
+    }
+
+    let spacing = MenuGuard::popup()?;
+    for (id, min, max, label) in [
+        (85, 12.0, 48.0, "Поближе: 12–48 px"),
+        (86, 24.0, 96.0, "Обычно: 24–96 px"),
+        (87, 48.0, 144.0, "Свободнее: 48–144 px"),
+    ] {
+        if !append_item(spacing.raw(), id, label, 0) {
+            return None;
+        }
+        check_menu(
+            spacing.raw(),
+            id,
+            s.personal_space_min == min && s.personal_space_max == max,
+        );
+    }
+    if !append_item(
+        spacing.raw(),
+        0,
+        &format!(
+            "Сейчас: {:.0}–{:.0} px между краями",
+            s.personal_space_min, s.personal_space_max
+        ),
+        MF_GRAYED,
+    ) || !append_submenu(settings.raw(), spacing, "Личное пространство")
+    {
         return None;
     }
 

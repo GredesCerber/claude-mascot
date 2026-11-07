@@ -7,7 +7,8 @@ use crate::{
 const CAP: usize = 8;
 const TICK: f64 = 0.1;
 const INITIAL_DELAY: f64 = 2.0;
-const MAX_DISTANCE: f64 = 140.0;
+const MAX_DISTANCE: f64 = 600.0;
+const GRAVITY: f64 = crate::engine::GRAVITY;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocialKind {
@@ -18,6 +19,7 @@ pub enum SocialKind {
     Comfort,
     Tag,
     Tower,
+    Leapfrog,
 }
 
 /// Per-frame movement owned by the social coordinator. The normal pet physics
@@ -63,6 +65,32 @@ struct Pair {
     upper: u64,
     tower_anchor_dx: f64,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct TowerGroup {
+    ids: [u64; CAP],
+    len: usize,
+    support: Rect,
+    stack_x: f64,
+    next_upper: usize,
+    phase: TowerPhase,
+    elapsed: f64,
+    formation_time: f64,
+    dismounting: usize,
+    direction: f64,
+    clear_wait: f64,
+    active_id: u64,
+    active_target: Vec2,
+    active_vx: f64,
+    horizontal_started: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TowerPhase {
+    Forming,
+    Holding,
+    Dismounting,
+}
 impl Default for Pair {
     fn default() -> Self {
         Self {
@@ -100,9 +128,11 @@ pub struct SocialCoordinator {
     accumulator: f64,
     age: f64,
     pairs: [Option<Pair>; 4],
+    tower: Option<TowerGroup>,
     cooldowns: [Cooldown; CAP],
     request: Option<(Option<u64>, Option<SocialKind>)>,
     request_age: f64,
+    last_kind: Option<SocialKind>,
     pub stats: SocialStats,
 }
 impl Default for SocialCoordinator {
@@ -117,9 +147,11 @@ impl SocialCoordinator {
             accumulator: 0.0,
             age: 0.0,
             pairs: [None; 4],
+            tower: None,
             cooldowns: [Cooldown::default(); CAP],
             request: None,
             request_age: 0.0,
+            last_kind: None,
             stats: SocialStats::default(),
         }
     }
@@ -203,6 +235,7 @@ impl SocialCoordinator {
             self.request = None;
         }
         self.advance_pairs(&mut refs, count, world, step);
+        self.advance_tower(&mut refs, count, world, step);
         if step == 0.0 {
             if self.request.is_some() {
                 self.tick(&mut refs, count, world)
@@ -226,6 +259,122 @@ impl SocialCoordinator {
             let Some(mut pair) = self.pairs[ix] else {
                 continue;
             };
+            if pair.kind == SocialKind::Leapfrog {
+                let ai = find(refs, n, pair.a);
+                let bi = find(refs, n, pair.b);
+                let valid = match (ai, bi) {
+                    (Some(a), Some(b)) => {
+                        let pa = refs[a].as_deref().unwrap();
+                        let pb = refs[b].as_deref().unwrap();
+                        pa.social.is_some_and(|s| {
+                            s.kind == SocialKind::Leapfrog && s.partner_id == pair.b
+                        }) && pb.social.is_some_and(|s| {
+                            s.kind == SocialKind::Leapfrog && s.partner_id == pair.a
+                        }) && !pa.dragging
+                            && !pb.dragging
+                            && !pa.chase
+                            && !pb.chase
+                            && support_exists(
+                                pair.support,
+                                world,
+                                Vec2::new(pa.pos.x, pair.support.y),
+                            )
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    self.pairs[ix] = None;
+                    self.finish_pair(pair, refs, n, world, false);
+                    continue;
+                }
+                pair.elapsed += dt;
+                let jumper_id = pair.upper;
+                let croucher_id = if jumper_id == pair.a { pair.b } else { pair.a };
+                let landed=find(refs,n,jumper_id).is_some_and(|i|matches!(refs[i].as_deref().unwrap().social_motion,Some(SocialMotion::Perch{owner_id,..}) if owner_id==croucher_id));
+                if landed {
+                    if let Some(i) = find(refs, n, jumper_id) {
+                        let p = refs[i].as_deref_mut().unwrap();
+                        p.social_motion = None;
+                        p.state = State::Social;
+                        p.state_time = 0.0;
+                    }
+                    pair.chaser = pair.chaser.saturating_add(1);
+                    if pair.chaser >= 4 {
+                        self.pairs[ix] = None;
+                        self.finish_pair(pair, refs, n, world, true);
+                        continue;
+                    }
+                    pair.phase = 0.4;
+                } else if pair.phase > 0.0 {
+                    pair.phase = (pair.phase - dt).max(0.0);
+                    if pair.phase == 0.0 {
+                        let next = croucher_id;
+                        let Some(ji) = find(refs, n, next) else {
+                            self.pairs[ix] = None;
+                            self.finish_pair(pair, refs, n, world, false);
+                            continue;
+                        };
+                        let Some(ci) = find(refs, n, jumper_id) else {
+                            self.pairs[ix] = None;
+                            self.finish_pair(pair, refs, n, world, false);
+                            continue;
+                        };
+                        let target = leapfrog_target(
+                            refs[ji].as_deref().unwrap(),
+                            refs[ci].as_deref().unwrap(),
+                            pair.support,
+                        );
+                        let Some(target) = target else {
+                            self.pairs[ix] = None;
+                            self.finish_pair(pair, refs, n, world, false);
+                            continue;
+                        };
+                        pair.upper = next;
+                        for (id, role, other) in [
+                            (
+                                pair.a,
+                                if pair.a == next {
+                                    SocialRole::Initiator
+                                } else {
+                                    SocialRole::Partner
+                                },
+                                pair.b,
+                            ),
+                            (
+                                pair.b,
+                                if pair.b == next {
+                                    SocialRole::Initiator
+                                } else {
+                                    SocialRole::Partner
+                                },
+                                pair.a,
+                            ),
+                        ] {
+                            if let Some(i) = find(refs, n, id) {
+                                if let Some(s) = refs[i].as_deref_mut().unwrap().social.as_mut() {
+                                    s.role = role;
+                                    s.partner_id = other;
+                                    s.elapsed = pair.elapsed;
+                                }
+                            }
+                        }
+                        if let Some(i) = find(refs, n, next) {
+                            refs[i].as_deref_mut().unwrap().social_motion =
+                                Some(SocialMotion::Leap {
+                                    target,
+                                    owner_id: jumper_id,
+                                });
+                        }
+                    }
+                }
+                if pair.elapsed >= pair.duration {
+                    self.pairs[ix] = None;
+                    self.finish_pair(pair, refs, n, world, true);
+                } else {
+                    self.pairs[ix] = Some(pair);
+                }
+                continue;
+            }
             let ai = find(refs, n, pair.a);
             let bi = find(refs, n, pair.b);
             if matches!(pair.kind, SocialKind::Tag | SocialKind::Tower) {
@@ -282,7 +431,10 @@ impl SocialCoordinator {
                 if pair.kind == SocialKind::Tag {
                     let pa = refs[ai.unwrap()].as_deref().unwrap();
                     let pb = refs[bi.unwrap()].as_deref().unwrap();
-                    if (pa.pos.x - pb.pos.x).abs() <= 64.0 && pair.phase <= 0.0 {
+                    // Catch before physical body contacts keep the actors apart.
+                    let catch_distance =
+                        84.0 * pa.display_scale.max(pb.display_scale).clamp(0.5, 2.0);
+                    if (pa.pos.x - pb.pos.x).abs() <= catch_distance && pair.phase <= 0.0 {
                         pair.chaser = if pair.chaser == pair.a {
                             pair.b
                         } else {
@@ -330,7 +482,12 @@ impl SocialCoordinator {
                         && pb.socially_supported(world)
                         && same_support(pa, pb, world)
                         && (pa.pos.y - pb.pos.y).abs() <= 20.0
-                        && (pa.pos.x - pb.pos.x).abs() <= MAX_DISTANCE
+                        && (pa.pos.x - pb.pos.x).hypot(pa.pos.y - pb.pos.y)
+                            <= social_distance_range(
+                                pair.kind,
+                                pa.display_scale.max(pb.display_scale).clamp(0.5, 2.0),
+                            )
+                            .1 * 1.1
                 }
                 _ => false,
             };
@@ -355,6 +512,425 @@ impl SocialCoordinator {
             } else {
                 self.pairs[ix] = Some(pair)
             }
+        }
+    }
+
+    fn start_tower(
+        &mut self,
+        target: Option<u64>,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+        manual: bool,
+    ) -> bool {
+        if self.tower.is_some() {
+            return false;
+        }
+        let base_i = target
+            .and_then(|id| {
+                find(refs, n, id).filter(|&i| free_eligible(refs, i, world, self, manual))
+            })
+            .or_else(|| {
+                (0..n)
+                    .filter(|&i| free_eligible(refs, i, world, self, manual))
+                    .min_by_key(|&i| refs[i].as_deref().unwrap().id)
+            });
+        let Some(mut base_i) = base_i else {
+            return false;
+        };
+        let base = refs[base_i].as_deref().unwrap();
+        let base_id = base.id;
+        let support = support_rect(base, world);
+        let mut candidates: Vec<(u64, usize)> = (0..n)
+            .filter_map(|i| {
+                let p = refs[i].as_deref()?;
+                (free_eligible(refs, i, world, self, manual) && same_support(base, p, world))
+                    .then_some((p.id, i))
+            })
+            .collect();
+        candidates.sort_by_key(|x| x.0);
+        let mut chosen = [0u64; CAP];
+        let mut len = 0;
+        chosen[len] = base_id;
+        len += 1;
+        for (id, _) in candidates {
+            if id != base_id && len < CAP {
+                chosen[len] = id;
+                len += 1;
+            }
+        }
+        if len < 2 {
+            return false;
+        }
+        if len > 2 {
+            let mid = support.x + support.w * 0.5;
+            let slot = (0..len)
+                .min_by(|&a, &b| {
+                    let ax = find(refs, n, chosen[a])
+                        .map(|i| refs[i].as_deref().unwrap().pos.x)
+                        .unwrap_or(mid);
+                    let bx = find(refs, n, chosen[b])
+                        .map(|i| refs[i].as_deref().unwrap().pos.x)
+                        .unwrap_or(mid);
+                    (ax - mid)
+                        .abs()
+                        .total_cmp(&(bx - mid).abs())
+                        .then_with(|| chosen[a].cmp(&chosen[b]))
+                })
+                .unwrap_or(0);
+            chosen.swap(0, slot);
+            base_i = find(refs, n, chosen[0]).unwrap_or(base_i);
+            let center = refs[base_i].as_deref().unwrap().pos.x;
+            chosen[1..len].sort_by(|a, b| {
+                let ax = find(refs, n, *a)
+                    .map(|i| refs[i].as_deref().unwrap().pos.x)
+                    .unwrap_or(center);
+                let bx = find(refs, n, *b)
+                    .map(|i| refs[i].as_deref().unwrap().pos.x)
+                    .unwrap_or(center);
+                (ax - center)
+                    .abs()
+                    .total_cmp(&(bx - center).abs())
+                    .then_with(|| a.cmp(b))
+            });
+        }
+        let base_pos = refs[base_i].as_deref().unwrap().pos;
+        // Tower height is checked for the complete requested group before any reservation.
+        let scales: Vec<f64> = chosen[..len]
+            .iter()
+            .filter_map(|id| {
+                find(refs, n, *id)
+                    .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0))
+            })
+            .collect();
+        let height: f64 = (1..len)
+            .map(|j| 55.0 * scales[j - 1].max(scales[j]))
+            .sum::<f64>()
+            + 55.0 * scales[len - 1]
+            + 8.0;
+        let area = world.area_at(Vec2::new(base_pos.x, support.y));
+        let max_scale = scales.iter().copied().fold(1.0_f64, f64::max);
+        let dismount_room =
+            (base_pos.x - support.x - 35.0).max(support.right() - 35.0 - base_pos.x);
+        if support.w < 180.0
+            || support.y - area.y < height + 100.0
+            || dismount_room < 80.0 * max_scale + 35.0
+        {
+            if support.y - area.y < height + 100.0 {
+                if let Some(i) = find(refs, n, target.unwrap_or(base_id)) {
+                    let p = refs[i].as_deref_mut().unwrap();
+                    p.bubble = Some("слишком низкий потолок для башни".to_owned());
+                    p.bubble_time = 3.0;
+                }
+            }
+            return false;
+        }
+        let stack_x = base_pos.x;
+        let direction = if stack_x - support.x >= support.right() - stack_x {
+            -1.0
+        } else {
+            1.0
+        };
+        let mut group = TowerGroup {
+            ids: chosen,
+            len,
+            support,
+            stack_x,
+            next_upper: 1,
+            phase: TowerPhase::Forming,
+            elapsed: 0.0,
+            formation_time: 0.0,
+            dismounting: len,
+            direction,
+            clear_wait: 0.0,
+            active_id: 0,
+            active_target: Vec2::default(),
+            active_vx: 0.0,
+            horizontal_started: false,
+        };
+        if !tower_path_fits(refs, n, &group) {
+            if let Some(i) = find(refs, n, target.unwrap_or(chosen[0])) {
+                let p = refs[i].as_deref_mut().unwrap();
+                p.bubble = Some("не хватает места для башни".to_owned());
+                p.bubble_time = 2.5;
+            }
+            return false;
+        }
+        for pos in 0..len {
+            let id = chosen[pos];
+            let Some(i) = find(refs, n, id) else { continue };
+            let p = refs[i].as_deref_mut().unwrap();
+            p.social = Some(SocialActivity {
+                kind: SocialKind::Tower,
+                role: if pos == 0 {
+                    SocialRole::Initiator
+                } else {
+                    SocialRole::Partner
+                },
+                partner_id: chosen[if pos == 0 { 1 } else { pos - 1 }],
+                elapsed: 0.0,
+                partner_offset: Vec2::default(),
+            });
+            p.state = State::Social;
+            p.state_time = 0.0;
+            p.state_duration = 8.0;
+            p.vel = Vec2::default();
+            if pos == 0 {
+                p.bubble = None;
+                p.bubble_time = 0.0;
+            } else {
+                p.bubble = Some("я сверху!".to_owned());
+                p.bubble_time = 2.0;
+            }
+        }
+        if let Some(i) = find(refs, n, chosen[1]) {
+            let target_y = tower_target_y(refs, n, &group, 1);
+            let target = Vec2::new(stack_x, target_y);
+            group.active_vx =
+                set_tower_leap(refs[i].as_deref_mut().unwrap(), target, chosen[0]).unwrap_or(0.0);
+            group.active_id = chosen[1];
+            group.active_target = target;
+            group.next_upper = 2;
+        }
+        self.tower = Some(group);
+        let intensity = chosen[..len]
+            .iter()
+            .filter_map(|id| {
+                find(refs, n, *id).map(|i| refs[i].as_deref().unwrap().activity_intensity as f64)
+            })
+            .sum::<f64>()
+            / len as f64;
+        for id in chosen[..len].iter().copied() {
+            cooldown(
+                &mut self.cooldowns,
+                id,
+                (12.0 + (id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0),
+            );
+        }
+        self.last_kind = Some(SocialKind::Tower);
+        self.stats.started += 1;
+        true
+    }
+
+    fn advance_tower(
+        &mut self,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+        dt: f64,
+    ) {
+        let Some(mut g) = self.tower else { return };
+        g.formation_time += dt;
+        if g.active_id != 0 && !g.horizontal_started {
+            if let Some(i) = find(refs, n, g.active_id) {
+                let p = refs[i].as_deref_mut().unwrap();
+                if p.pos.y <= g.active_target.y {
+                    p.vel.x = g.active_vx;
+                    g.horizontal_started = true;
+                }
+            }
+        }
+        let valid = (0..g.len).all(|k| {
+            find(refs, n, g.ids[k]).is_some_and(|i| {
+                let p = refs[i].as_deref().unwrap();
+                !p.dragging
+                    && !p.chase
+                    && active_marker(
+                        p,
+                        Pair {
+                            a: g.ids[0],
+                            b: g.ids[1],
+                            kind: SocialKind::Tower,
+                            ..Pair::default()
+                        },
+                        p.id,
+                        if k == 0 { g.ids[1] } else { g.ids[k - 1] },
+                    )
+            })
+        }) && support_exists(g.support, world, Vec2::new(g.stack_x, g.support.y));
+        if !valid || g.formation_time > 20.0 {
+            self.tower = None;
+            self.finish_tower(g, refs, n, world, false);
+            return;
+        }
+        match g.phase {
+            TowerPhase::Forming => {
+                let landed=(1..g.next_upper).all(|k| find(refs,n,g.ids[k]).is_some_and(|i| matches!(refs[i].as_deref().unwrap().social_motion,Some(SocialMotion::Perch{owner_id,..}) if owner_id==g.ids[k-1])));
+                if g.active_id != 0
+                    && find(refs, n, g.active_id).is_some_and(|i| {
+                        matches!(
+                            refs[i].as_deref().unwrap().social_motion,
+                            Some(SocialMotion::Perch { .. })
+                        )
+                    })
+                {
+                    g.active_id = 0;
+                    g.horizontal_started = false;
+                }
+                if landed && g.next_upper < g.len {
+                    let k = g.next_upper;
+                    if let Some(i) = find(refs, n, g.ids[k]) {
+                        let target = Vec2::new(
+                            g.stack_x,
+                            g.support.y
+                                - (0..k)
+                                    .map(|j| {
+                                        let lower = find(refs, n, g.ids[j])
+                                            .map(|ii| {
+                                                refs[ii]
+                                                    .as_deref()
+                                                    .unwrap()
+                                                    .display_scale
+                                                    .clamp(0.5, 2.0)
+                                            })
+                                            .unwrap_or(1.0);
+                                        let upper = find(refs, n, g.ids[j + 1])
+                                            .map(|ii| {
+                                                refs[ii]
+                                                    .as_deref()
+                                                    .unwrap()
+                                                    .display_scale
+                                                    .clamp(0.5, 2.0)
+                                            })
+                                            .unwrap_or(1.0);
+                                        55.0 * lower.max(upper)
+                                    })
+                                    .sum::<f64>(),
+                        );
+                        let p = refs[i].as_deref_mut().unwrap();
+                        g.active_vx = set_tower_leap(p, target, g.ids[k - 1]).unwrap_or(0.0);
+                        g.active_id = g.ids[k];
+                        g.active_target = target;
+                        g.horizontal_started = false;
+                        g.next_upper += 1;
+                    }
+                }
+                if g.next_upper == g.len
+                    && (1..g.len).all(|k| {
+                        find(refs, n, g.ids[k]).is_some_and(|i| {
+                            matches!(
+                                refs[i].as_deref().unwrap().social_motion,
+                                Some(SocialMotion::Perch { .. })
+                            )
+                        })
+                    })
+                {
+                    g.phase = TowerPhase::Holding;
+                    g.elapsed = 0.0;
+                }
+            }
+            TowerPhase::Holding => {
+                g.elapsed += dt;
+                if g.elapsed >= 2.5 {
+                    g.phase = TowerPhase::Dismounting;
+                    g.dismounting = g.len - 1;
+                    self.launch_tower_top(g, refs, n);
+                    g.dismounting -= 1;
+                }
+            }
+            TowerPhase::Dismounting => {
+                g.clear_wait += dt;
+                if g.dismounting > 0 {
+                    let just_launched = g.ids[g.dismounting + 1];
+                    if find(refs, n, just_launched).is_some_and(|i| {
+                        refs[i].as_deref().unwrap().pos.x - g.stack_x
+                            >= 80.0 * refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0)
+                            || g.stack_x - refs[i].as_deref().unwrap().pos.x
+                                >= 80.0 * refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0)
+                    }) {
+                        g.clear_wait = 0.0;
+                        self.launch_tower_top(g, refs, n);
+                        g.dismounting -= 1;
+                    } else if g.clear_wait > 2.5 {
+                        self.tower = None;
+                        self.finish_tower(g, refs, n, world, false);
+                        return;
+                    }
+                } else if g.dismounting == 0 {
+                    self.tower = None;
+                    self.finish_tower(g, refs, n, world, true);
+                    return;
+                }
+            }
+        }
+        if g.phase == TowerPhase::Forming {
+            for k in 1..g.next_upper.min(g.len) {
+                let owner_id = g.ids[k - 1];
+                let Some(owner_i) = find(refs, n, owner_id) else {
+                    continue;
+                };
+                let owner_pos = refs[owner_i].as_deref().unwrap().pos;
+                let owner_scale = refs[owner_i]
+                    .as_deref()
+                    .unwrap()
+                    .display_scale
+                    .clamp(0.5, 2.0);
+                let Some(top_i) = find(refs, n, g.ids[k]) else {
+                    continue;
+                };
+                if !matches!(
+                    refs[top_i].as_deref().unwrap().social_motion,
+                    Some(SocialMotion::Perch { .. })
+                ) {
+                    continue;
+                }
+                let scale = refs[top_i]
+                    .as_deref()
+                    .unwrap()
+                    .display_scale
+                    .clamp(0.5, 2.0);
+                refs[top_i].as_deref_mut().unwrap().social_motion = Some(SocialMotion::Perch {
+                    target: Vec2::new(owner_pos.x, owner_pos.y - 55.0 * scale.max(owner_scale)),
+                    owner_id,
+                });
+            }
+        }
+        self.tower = Some(g);
+    }
+
+    fn launch_tower_top(&self, g: TowerGroup, refs: &mut [Option<&mut Pet>; CAP], n: usize) {
+        if g.dismounting == 0 {
+            return;
+        }
+        let id = g.ids[g.dismounting];
+        if let Some(i) = find(refs, n, id) {
+            let p = refs[i].as_deref_mut().unwrap();
+            let scale = p.display_scale.clamp(0.5, 2.0);
+            p.social_motion = None;
+            p.vel = Vec2::new(g.direction * 310.0, -330.0 * scale);
+            p.state = State::Jump;
+            p.state_time = 0.0;
+        }
+    }
+
+    fn finish_tower(
+        &mut self,
+        g: TowerGroup,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+        completed: bool,
+    ) {
+        for k in 0..g.len {
+            if let Some(i) = find(refs, n, g.ids[k]) {
+                let p = refs[i].as_deref_mut().unwrap();
+                let expected_partner = if k == 0 { g.ids[1] } else { g.ids[k - 1] };
+                let owned = p.social.is_some_and(|s| {
+                    s.kind == SocialKind::Tower && s.partner_id == expected_partner
+                });
+                if owned {
+                    p.social_motion = None;
+                    p.social = None;
+                    if p.state == State::Social {
+                        p.set_social_end(world);
+                    }
+                }
+            }
+        }
+        if completed {
+            self.stats.completed += 1;
+        } else {
+            self.stats.cancelled += 1;
         }
     }
 
@@ -421,6 +997,15 @@ impl SocialCoordinator {
     }
 
     fn tick(&mut self, refs: &mut [Option<&mut Pet>; CAP], n: usize, world: &World) {
+        if self.tower.is_some() {
+            return;
+        }
+        if let Some((target, Some(SocialKind::Tower))) = self.request {
+            if self.start_tower(target, refs, n, world, true) {
+                self.request = None;
+            }
+            return;
+        }
         if self.age < INITIAL_DELAY && self.request.is_none() {
             return;
         }
@@ -464,8 +1049,16 @@ impl SocialCoordinator {
                     }
                 }
                 if let Some((_, _, j)) = best {
-                    let mut kind = requested_kind
-                        .unwrap_or_else(|| choose(a, refs[j].as_deref().unwrap(), self.age));
+                    let mut kind = requested_kind.unwrap_or_else(|| {
+                        choose(
+                            a,
+                            refs[j].as_deref().unwrap(),
+                            self.age,
+                            self.last_kind,
+                            (a.pos.x - refs[j].as_deref().unwrap().pos.x)
+                                .hypot(a.pos.y - refs[j].as_deref().unwrap().pos.y),
+                        )
+                    });
                     if kind == SocialKind::HighFive
                         && (a.pos.x - refs[j].as_deref().unwrap().pos.x).abs() > 96.0
                     {
@@ -502,11 +1095,15 @@ impl SocialCoordinator {
                 {
                     continue;
                 }
-                let mut kind = self
-                    .request
-                    .take()
-                    .and_then(|(_, k)| k)
-                    .unwrap_or_else(|| choose(a, b, self.age));
+                let mut kind = self.request.take().and_then(|(_, k)| k).unwrap_or_else(|| {
+                    choose(
+                        a,
+                        b,
+                        self.age,
+                        self.last_kind,
+                        (a.pos.x - b.pos.x).hypot(a.pos.y - b.pos.y),
+                    )
+                });
                 if kind == SocialKind::HighFive && (a.pos.x - b.pos.x).abs() > 96.0 {
                     if let Some(request) = req {
                         self.request = Some(request);
@@ -529,6 +1126,10 @@ impl SocialCoordinator {
         refs: &mut [Option<&mut Pet>; CAP],
         world: &World,
     ) -> bool {
+        if kind == SocialKind::Tower {
+            let id = refs[i].as_deref().unwrap().id;
+            return self.start_tower(Some(id), refs, CAP, world, false);
+        }
         if !can_start_kind(
             kind,
             refs[i].as_deref().unwrap(),
@@ -597,9 +1198,19 @@ impl SocialCoordinator {
             elapsed: 0.0,
             duration,
             phase: initial_tag_separation,
-            chaser: a_id,
+            chaser: if kind == SocialKind::Leapfrog {
+                0
+            } else {
+                a_id
+            },
             support: support_rect(refs[i].as_deref().unwrap(), world),
-            upper: if kind == SocialKind::Tower { b_id } else { 0 },
+            upper: if kind == SocialKind::Tower {
+                b_id
+            } else if kind == SocialKind::Leapfrog {
+                a_id
+            } else {
+                0
+            },
             tower_anchor_dx: 0.0,
         });
         let pair = self.pairs[slot].unwrap();
@@ -617,9 +1228,33 @@ impl SocialCoordinator {
                     owner_id: lower_id,
                 });
             }
+        } else if kind == SocialKind::Leapfrog {
+            let jumper = refs[i].as_deref().unwrap();
+            let croucher = refs[j].as_deref().unwrap();
+            if let Some(target) = leapfrog_target(jumper, croucher, pair.support) {
+                if let Some(jumper_i) = find(refs, CAP, a_id) {
+                    refs[jumper_i].as_deref_mut().unwrap().social_motion =
+                        Some(SocialMotion::Leap {
+                            target,
+                            owner_id: b_id,
+                        });
+                }
+            }
         }
-        cooldown(&mut self.cooldowns, a_id, 12.0 + (a_id % 19) as f64);
-        cooldown(&mut self.cooldowns, b_id, 12.0 + (b_id % 19) as f64);
+        let intensity = (refs[i].as_deref().unwrap().activity_intensity as f64
+            + refs[j].as_deref().unwrap().activity_intensity as f64)
+            * 0.5;
+        cooldown(
+            &mut self.cooldowns,
+            a_id,
+            (12.0 + (a_id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0),
+        );
+        cooldown(
+            &mut self.cooldowns,
+            b_id,
+            (12.0 + (b_id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0),
+        );
+        self.last_kind = Some(kind);
         self.stats.started += 1;
         true
     }
@@ -638,7 +1273,15 @@ impl SocialCoordinator {
                         pet.social_motion,
                         Some(crate::social::SocialMotion::Perch { .. })
                     );
-                    if matches!(p.kind, SocialKind::Tag | SocialKind::Tower) {
+                    let owns_marker = pet.social.is_some_and(|s| {
+                        s.kind == p.kind && s.partner_id == if id == p.a { p.b } else { p.a }
+                    });
+                    if owns_marker
+                        && matches!(
+                            p.kind,
+                            SocialKind::Tag | SocialKind::Tower | SocialKind::Leapfrog
+                        )
+                    {
                         pet.social_motion = None;
                         if p.kind == SocialKind::Tower && id == p.upper {
                             if completed && was_perched {
@@ -703,6 +1346,9 @@ impl SocialCoordinator {
                 self.finish_pair(p, refs, n, world, false);
             }
         }
+        if let Some(g) = self.tower.take() {
+            self.finish_tower(g, refs, n, world, false);
+        }
     }
 }
 fn find(refs: &[Option<&mut Pet>; CAP], n: usize, id: u64) -> Option<usize> {
@@ -747,7 +1393,9 @@ fn free_eligible(
 ) -> bool {
     let p = refs[i].as_deref().unwrap();
     eligible(p, w, false)
+        && (bypass_cooldown || p.activity_intensity > 0)
         && !s.pairs.iter().flatten().any(|x| x.a == p.id || x.b == p.id)
+        && !s.tower.is_some_and(|g| g.ids[..g.len].contains(&p.id))
         && (bypass_cooldown || !cooling(&s.cooldowns, p.id))
 }
 fn eligible(p: &Pet, w: &World, active: bool) -> bool {
@@ -762,8 +1410,8 @@ fn eligible(p: &Pet, w: &World, active: bool) -> bool {
             matches!(p.state, State::Idle | State::Walk | State::Happy)
         }
 }
-fn choose(a: &Pet, b: &Pet, age: f64) -> SocialKind {
-    if a.satisfaction < 35.0 || b.satisfaction < 35.0 {
+fn choose(a: &Pet, b: &Pet, age: f64, previous: Option<SocialKind>, distance: f64) -> SocialKind {
+    let preferred = if a.satisfaction < 35.0 || b.satisfaction < 35.0 {
         SocialKind::Comfort
     } else {
         match ((a.id ^ b.id).wrapping_add(age as u64)) % 23 {
@@ -775,6 +1423,39 @@ fn choose(a: &Pet, b: &Pet, age: f64) -> SocialKind {
             13..=17 => SocialKind::ShareLaptop,
             _ => SocialKind::Comfort,
         }
+    };
+    let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.0);
+    let fits = |kind: SocialKind| {
+        let (min, max) = social_distance_range(kind, scale);
+        distance >= min && distance <= max
+    };
+    if Some(preferred) != previous && fits(preferred) {
+        return preferred;
+    }
+    [
+        SocialKind::Comfort,
+        SocialKind::Greeting,
+        SocialKind::DanceTogether,
+        SocialKind::ShareLaptop,
+        SocialKind::HighFive,
+        SocialKind::Tag,
+        SocialKind::Tower,
+    ]
+    .into_iter()
+    .find(|kind| Some(*kind) != previous && fits(*kind))
+    .unwrap_or(preferred)
+}
+
+fn social_distance_range(kind: SocialKind, scale: f64) -> (f64, f64) {
+    match kind {
+        SocialKind::Greeting | SocialKind::Comfort | SocialKind::DanceTogether => {
+            (104.0 * scale, 300.0 * scale)
+        }
+        SocialKind::HighFive => (74.0 * scale, 110.0 * scale),
+        SocialKind::ShareLaptop => (100.0 * scale, 160.0 * scale),
+        SocialKind::Tag => (64.0 * scale, 240.0 * scale),
+        SocialKind::Tower => (60.0 * scale, f64::INFINITY),
+        SocialKind::Leapfrog => (60.0 * scale, 260.0 * scale),
     }
 }
 fn duration(k: SocialKind) -> f64 {
@@ -786,6 +1467,7 @@ fn duration(k: SocialKind) -> f64 {
         SocialKind::Comfort => 4.0,
         SocialKind::Tag => 7.5,
         SocialKind::Tower => 8.0,
+        SocialKind::Leapfrog => 10.0,
     }
 }
 fn same_support(a: &Pet, b: &Pet, w: &World) -> bool {
@@ -802,8 +1484,11 @@ fn same_support(a: &Pet, b: &Pet, w: &World) -> bool {
 
 fn distance_allowed(kind: Option<SocialKind>, distance: f64) -> bool {
     match kind {
-        Some(SocialKind::Tag) => distance <= 240.0,
-        Some(SocialKind::Tower) => distance <= 175.0,
+        Some(SocialKind::Tag) => distance <= 480.0,
+        Some(SocialKind::Tower) => distance <= MAX_DISTANCE,
+        Some(SocialKind::HighFive) => distance <= 220.0,
+        Some(SocialKind::ShareLaptop) => distance <= 320.0,
+        Some(SocialKind::Leapfrog) => distance <= 520.0,
         _ => distance <= MAX_DISTANCE,
     }
 }
@@ -813,6 +1498,12 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
         return false;
     }
     let support = support_rect(a, w);
+    let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.0);
+    let d = (a.pos.x - b.pos.x).hypot(a.pos.y - b.pos.y);
+    let range = social_distance_range(kind, scale);
+    if d < range.0 || d > range.1 {
+        return false;
+    }
     match kind {
         SocialKind::Tag => {
             support.w >= 320.0
@@ -835,6 +1526,11 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
                 && b.pos.x >= support.x + 35.0
                 && b.pos.x <= support.right() - 35.0
         }
+        SocialKind::Leapfrog => {
+            support.w >= 320.0
+                && leapfrog_target(a, b, support).is_some()
+                && leapfrog_target(b, a, support).is_some()
+        }
         _ => true,
     }
 }
@@ -855,6 +1551,105 @@ fn support_rect_matches(p: &Pet, expected: Rect, w: &World) -> bool {
         && (actual.y - expected.y).abs() <= 1.0
         && (actual.w - expected.w).abs() <= 1.0
         && (actual.h - expected.h).abs() <= 1.0
+}
+
+fn support_exists(expected: Rect, world: &World, at: Vec2) -> bool {
+    let same = |actual: Rect| {
+        (actual.x - expected.x).abs() <= 1.0
+            && (actual.y - expected.y).abs() <= 1.0
+            && (actual.w - expected.w).abs() <= 1.0
+    };
+    if world
+        .windows
+        .iter()
+        .any(|win| win.rect.is_valid() && same(win.rect))
+    {
+        return true;
+    }
+    let area = world.area_at(at);
+    same(Rect::new(area.x, area.bottom() - 1.0, area.w, 1.0))
+}
+
+fn leapfrog_target(jumper: &Pet, croucher: &Pet, support: Rect) -> Option<Vec2> {
+    let scale = jumper
+        .display_scale
+        .max(croucher.display_scale)
+        .clamp(0.5, 2.0);
+    let direction = if jumper.pos.x < croucher.pos.x {
+        1.0
+    } else {
+        -1.0
+    };
+    let x = croucher.pos.x + direction * 100.0 * scale;
+    let margin = 35.0 * scale;
+    if x < support.x + margin
+        || x > support.right() - margin
+        || (x - jumper.pos.x).abs() < 60.0 * scale
+    {
+        return None;
+    }
+    Some(Vec2::new(
+        x,
+        support.y + if support.h <= 1.0 { 1.0 } else { 0.0 },
+    ))
+}
+
+fn tower_target_y(refs: &[Option<&mut Pet>; CAP], n: usize, g: &TowerGroup, k: usize) -> f64 {
+    let rise = (0..k)
+        .map(|j| {
+            let a = find(refs, n, g.ids[j])
+                .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0))
+                .unwrap_or(1.0);
+            let b = find(refs, n, g.ids[j + 1])
+                .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0))
+                .unwrap_or(1.0);
+            55.0 * a.max(b)
+        })
+        .sum::<f64>();
+    g.support.y - rise
+}
+
+fn tower_path_fits(refs: &[Option<&mut Pet>; CAP], n: usize, g: &TowerGroup) -> bool {
+    for k in 1..g.len {
+        let Some(i) = find(refs, n, g.ids[k]) else {
+            return false;
+        };
+        let p = refs[i].as_deref().unwrap();
+        let target = Vec2::new(g.stack_x, tower_target_y(refs, n, g, k));
+        if tower_launch(p, target).is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+fn tower_launch(pet: &Pet, target: Vec2) -> Option<(f64, f64)> {
+    let scale = pet.display_scale.clamp(0.5, 2.0);
+    let rise = (pet.pos.y - target.y + 65.0 * scale + 100.0 * scale).clamp(80.0, 900.0);
+    let vy = (2.0 * GRAVITY * rise).sqrt().min(2050.0);
+    let dy = target.y - pet.pos.y;
+    let disc = vy * vy + 2.0 * GRAVITY * dy;
+    if disc < 0.0 {
+        return None;
+    }
+    let root = disc.sqrt();
+    let t_up = (vy - root) / GRAVITY;
+    let t_down = (vy + root) / GRAVITY;
+    let flight = t_down - t_up;
+    if flight <= 0.0 || !flight.is_finite() {
+        return None;
+    }
+    let vx = (target.x - pet.pos.x) / flight;
+    (vx.is_finite() && vx.abs() <= 600.0).then_some((vx, vy))
+}
+
+fn set_tower_leap(pet: &mut Pet, target: Vec2, owner_id: u64) -> Option<f64> {
+    let (vx, launch) = tower_launch(pet, target)?;
+    pet.social_motion = Some(SocialMotion::Leap { target, owner_id });
+    pet.vel = Vec2::new(0.0, -launch);
+    pet.state = State::Jump;
+    pet.state_time = 0.0;
+    Some(vx)
 }
 impl Pet {
     fn set_social_state(&mut self, k: SocialKind, role: SocialRole, d: f64, _w: &World) {
@@ -905,6 +1700,13 @@ impl Pet {
                 }
             }
             SocialKind::Tower => "я сверху!",
+            SocialKind::Leapfrog => {
+                if role == SocialRole::Initiator {
+                    "прыгаю!"
+                } else {
+                    "прыгай!"
+                }
+            }
         };
         self.bubble = Some(text.to_owned());
         self.bubble_time = 2.0;

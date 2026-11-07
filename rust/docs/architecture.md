@@ -1,4 +1,4 @@
-# Rust port architecture (0.6.0)
+# Rust port architecture (0.7.0)
 
 The Python application at the repository root is preserved. Rust is Windows-first
 and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0.
@@ -7,6 +7,10 @@ and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0
 | --- | --- |
 | lib.rs | Physical-pixel coordinates, rectangles, world/window snapshots |
 | engine.rs | Deterministic physics, support tracking, mood, commands and timed activities |
+| contacts.rs | Body contacts, swept crossings, scaled masses and impact impulses |
+| behavior.rs | Personal space, safe jump-over avoidance and context decisions |
+| preferences.rs | Modeless native controls, bubble-style theme and settings events |
+| palette.rs | User-selected body colors with consistent shading and readable eyes |
 | social.rs | Fixed-capacity pair coordinator, stable IDs, 10 Hz selection, smooth timelines and cancellation |
 | activities.rs | Props adapted from all 75 illustrations, Russian catalog, bounded decorative timelines and accents |
 | render.rs | Procedural Claude/laptop pixels, gestures, cached fonts, transparent BGRA and PNG previews |
@@ -18,6 +22,10 @@ and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0
 | media.rs | Background best-effort playback monitoring |
 | update*.rs | Portable staging, digest checks, rollback and MSI ownership safeguards |
 
+Each physics step advances pets, resolves contacts, updates free behavior, then
+advances social scenes, using bounded storage and stable IDs. Owned scenes
+exclude free steering; removed IDs release their context slots.
+
 The engine consumes a World snapshot and never draws, creates windows, moves
 the real cursor or sends input to other applications. Pet.pos is between its
 feet. Surfaces follow native IDs across enumeration reordering; losing support
@@ -25,6 +33,8 @@ causes a fall. Window snapshots reuse vector capacity. Removing combat also
 removes the host's per-physics-step cloning of all pets for pairwise interactions.
 
 Physics advances at 240 Hz independently of the selected 30..240 render FPS.
+Sprite poses and prop timelines share a stepped 12 Hz rendering clock.
+World position, velocity, contacts and input keep their physics rate.
 Each message pump processes at most 256 messages; consecutive captured moves
 coalesce without crossing button/command boundaries. Visibility calls occur only
 on changes. Render deadlines are checked after input. These safeguards preserve
@@ -45,9 +55,10 @@ The host also validates ownership after input/removal without advancing time.
 Gaze is a bounded, smoothed world direction; the renderer mirrors it into local
 face coordinates. The laptop shows its rear lid to the viewer.
 
-Tag and two-pet towers send bounded motion intents through normal physics.
-Tower capture requires a descending crossing of the partner's head; dismount
-uses a side hop. Manual commands clear the intent before new input takes effect.
+Tag, leapfrog and group towers send bounded intents through normal physics.
+Towers reserve all eligible members of one support after checking whole-group
+height and trajectories; upper members dismount in order. Manual commands
+clear ownership before new input takes effect.
 Responsive behavior compares bounded window metadata at 10 Hz, rebaselines
 while disabled, and gives manual commands priority. Nearby cursor interest is
 short-lived and independent of the user's persistent chase setting.
@@ -78,6 +89,6 @@ Native tests cover menu commands, message budgeting, coalescing and handle clean
 PNG previews and bounded smoke traces complement these checks.
 
 Physical mixed-DPI testing, installed MSI lifecycle and a published updater
-cycle require separate acceptance. See [0.6.0 verification](verification-0.6.0.md)
+cycle require separate acceptance. See [0.7.0 verification](verification-0.7.0.md)
 and [remaining work](planning/PLAN-RU.md). Historical reports describe their
 named versions; removed features in those reports are not current capabilities.

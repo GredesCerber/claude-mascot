@@ -740,7 +740,7 @@ pub fn draw_activity(canvas: &mut Canvas, id: ActivityId, elapsed: f64, facing: 
     let left = FEET_X - width * 0.5;
     let top = feet_y - height;
 
-    let t = elapsed.max(0.0);
+    let t = crate::render::pose_time(elapsed);
     let duration = id.duration();
     let reveal = (t / 0.26).clamp(0.0, 1.0);
     let close = ((duration - t) / 0.34).clamp(0.0, 1.0);

@@ -12,7 +12,7 @@ use crate::social::SocialMotion;
 use crate::{Rect, Vec2, WindowInfo, World};
 
 const BODY_HALF_WIDTH: f64 = 24.0;
-const GRAVITY: f64 = 2_200.0;
+pub(crate) const GRAVITY: f64 = 2_200.0;
 const WALK_SPEED: f64 = 55.0;
 const RUN_SPEED: f64 = 150.0;
 const IDLE_SLEEP: f64 = 60.0;
@@ -87,6 +87,8 @@ pub enum Command {
 pub struct Pet {
     pub id: u64,
     pub skin: Skin,
+    pub body_color: u32,
+    pub activity_intensity: u8,
     pub pos: Vec2,
     pub vel: Vec2,
     pub state: State,
@@ -153,6 +155,9 @@ pub struct Pet {
     pub(crate) explore_cooldown: f64,
     pub(crate) peek_goal: Option<(usize, Vec2)>,
     pub(crate) peek_route_age: f64,
+    pub(crate) behavior_velocity: Option<f64>,
+    pub(crate) behavior_velocity_ttl: f64,
+    pub(crate) behavior_manual_lock: f64,
 }
 
 impl Pet {
@@ -165,6 +170,8 @@ impl Pet {
         Self {
             id,
             skin,
+            body_color: crate::palette::DEFAULT_BODY_COLOR,
+            activity_intensity: 50,
             pos,
             vel: Vec2::default(),
             state: State::Fall,
@@ -224,6 +231,9 @@ impl Pet {
             explore_cooldown: 0.0,
             peek_goal: None,
             peek_route_age: 0.0,
+            behavior_velocity: None,
+            behavior_velocity_ttl: 0.0,
+            behavior_manual_lock: 0.0,
         }
     }
 
@@ -236,6 +246,11 @@ impl Pet {
             0.0
         };
         self.time += dt;
+        self.behavior_manual_lock = (self.behavior_manual_lock - dt).max(0.0);
+        self.behavior_velocity_ttl = (self.behavior_velocity_ttl - dt).max(0.0);
+        if self.behavior_velocity_ttl == 0.0 {
+            self.behavior_velocity = None;
+        }
         self.state_time += dt;
         self.frame = self.frame.wrapping_add(1);
         self.cooldown = (self.cooldown - dt).max(0.0);
@@ -431,6 +446,9 @@ impl Pet {
     }
 
     pub fn command(&mut self, command: Command, world: &World) {
+        self.behavior_manual_lock = 3.0;
+        self.behavior_velocity = None;
+        self.behavior_velocity_ttl = 0.0;
         self.social_motion = None;
         self.cancel_auto_pursuit();
         self.cursor_dwell = 0.0;
@@ -829,7 +847,7 @@ impl Pet {
                 return;
             }
             let old = self.pos;
-            self.vel.y = (self.vel.y + GRAVITY * dt).clamp(-1400.0, 2200.0);
+            self.vel.y = (self.vel.y + GRAVITY * dt).clamp(-2050.0, 2200.0);
             self.pos.x += self.vel.x * dt;
             self.pos.y += self.vel.y * dt;
             if self.state == State::Thrown {
@@ -907,6 +925,32 @@ impl Pet {
             self.pos.y = floor;
         }
         if self.state == State::Walk || self.state == State::Run {
+            if self.state == State::Walk {
+                if let Some(vx) = self
+                    .behavior_velocity
+                    .filter(|_| self.behavior_velocity_ttl > 0.0)
+                {
+                    self.pos.x += vx * dt;
+                    self.facing = if vx.abs() > 2.0 {
+                        vx.signum()
+                    } else {
+                        self.facing
+                    };
+                    if !self.platform_under(self.pos.x, world) {
+                        self.vel.x = self.facing * self.speed();
+                        self.vel.y = 20.0;
+                        self.surface = None;
+                        self.set_state(State::Fall, 0.0);
+                    } else {
+                        self.vel.x = 0.0;
+                        if vx.abs() < 2.0 {
+                            self.set_state(State::Idle, 0.0);
+                        }
+                    }
+                    self.clamp_to_area(world);
+                    return;
+                }
+            }
             let cue_speed = match self.social_motion {
                 Some(SocialMotion::Run { speed, .. }) if speed.is_finite() => {
                     speed.clamp(0.0, 280.0)
@@ -926,7 +970,7 @@ impl Pet {
                 }
             }
         } else if self.state == State::Idle
-            && self.random_chance(dt * 0.16)
+            && self.random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0)
             && !self.try_explore_jump(world)
         {
             let choice = self.random();
@@ -1206,7 +1250,7 @@ impl Pet {
         }
         if self.auto_activities
             && self.auto_activity_cooldown <= 0.0
-            && self.random_chance(dt * 0.1)
+            && self.random_chance(dt * 0.1 * self.activity_intensity.min(100) as f64 / 50.0)
         {
             let len = crate::activities::CATALOG.len();
             let mut index = (self.random() * len as f64) as usize;
@@ -1225,7 +1269,7 @@ impl Pet {
                 return;
             }
         }
-        if !self.random_chance(dt * 0.01) {
+        if !self.random_chance(dt * 0.01 * self.activity_intensity.min(100) as f64 / 50.0) {
             return;
         }
         match (self.random() * 3.0) as u8 {
@@ -1274,6 +1318,205 @@ impl Pet {
 
     pub(crate) fn socially_supported(&self, world: &World) -> bool {
         !self.dragging && self.has_support(world)
+    }
+
+    pub(crate) fn behavior_support_key(&self, world: &World) -> Option<(Option<usize>, u64, i64)> {
+        if !self.has_support(world) || self.dragging || self.is_airborne() {
+            return None;
+        }
+        let surface = self.current_surface_index(world);
+        let surface_id = if let Some(i) = surface {
+            world.windows.get(i).map(|w| w.id as u64).unwrap_or(0)
+        } else {
+            let monitor = world
+                .work_areas
+                .iter()
+                .position(|r| r.is_valid() && r.contains(self.pos))
+                .unwrap_or(usize::MAX);
+            (u64::MAX / 2).wrapping_add(monitor as u64)
+        };
+        let y = (self.pos.y * 2.0).round() as i64;
+        Some((surface, surface_id, y))
+    }
+
+    /// Smooth, bounded horizontal steering owned by the behavior coordinator.
+    pub(crate) fn behavior_steer(&mut self, desired_vx: Option<f64>, dt: f64) {
+        if self.dragging
+            || self.social.is_some()
+            || self.social_motion.is_some()
+            || self.chase
+            || self.activity.is_some()
+            || self.forced_sleep
+            || self.behavior_manual_lock > 0.0
+            || !matches!(self.state, State::Idle | State::Walk)
+        {
+            return;
+        }
+        let dt = if dt.is_finite() {
+            dt.clamp(0.0, 0.05)
+        } else {
+            0.0
+        };
+        let Some(desired_vx) = desired_vx else {
+            self.behavior_velocity = None;
+            self.behavior_velocity_ttl = 0.0;
+            return;
+        };
+        let goal = if desired_vx.is_finite() {
+            desired_vx.clamp(-55.0, 55.0)
+        } else {
+            0.0
+        };
+        let current = self.behavior_velocity.unwrap_or(0.0);
+        let change = (goal - current).clamp(-220.0 * dt, 220.0 * dt);
+        let velocity = (current + change).clamp(-55.0, 55.0);
+        self.behavior_velocity = Some(velocity);
+        self.behavior_velocity_ttl = 0.3;
+        if velocity.abs() > 3.0 {
+            self.facing = velocity.signum();
+            self.set_state(State::Walk, 0.0);
+        } else {
+            if self.state == State::Walk {
+                self.set_state(State::Idle, 0.0);
+            }
+        }
+    }
+
+    pub(crate) fn behavior_context(
+        &mut self,
+        intent: crate::behavior::BehaviorIntent,
+        target: Option<Vec2>,
+    ) {
+        if self.behavior_manual_lock > 0.0
+            || self.dragging
+            || self.social.is_some()
+            || self.social_motion.is_some()
+            || self.chase
+            || self.activity.is_some()
+            || self.forced_sleep
+            || self.state != State::Idle
+        {
+            return;
+        }
+        match intent {
+            crate::behavior::BehaviorIntent::Observe
+            | crate::behavior::BehaviorIntent::CalmActivity => {
+                self.attention_target = target;
+                self.attention_time = 1.8;
+                self.set_state(State::LookAround, 1.0);
+            }
+            crate::behavior::BehaviorIntent::Rest => self.set_state(State::Sit, 3.0),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn contact_position(&mut self, position: Vec2, world: &World, body_half_width: f64) {
+        if !self.dragging && position.x.is_finite() && position.y.is_finite() {
+            self.pos = position;
+            let area = world.area_at(self.pos);
+            if valid_rect(area) {
+                let inset = body_half_width.max(0.0).min(area.w * 0.5);
+                let (left_connected, right_connected) =
+                    horizontal_neighbors(area, self.pos.y, world);
+                let left = if left_connected {
+                    area.x
+                } else {
+                    area.x + inset
+                };
+                let right = if right_connected {
+                    area.right()
+                } else {
+                    area.right() - inset
+                };
+                self.pos.x = self.pos.x.clamp(left, right);
+            }
+        }
+    }
+
+    pub(crate) fn contact_impact(&mut self, velocity: Vec2, strong: bool) {
+        if self.dragging {
+            return;
+        }
+        if velocity.x.is_finite() && velocity.y.is_finite() {
+            self.vel = Vec2::new(
+                velocity.x.clamp(-2_200.0, 2_200.0),
+                velocity.y.clamp(-2_200.0, 2_200.0),
+            );
+        }
+        if strong {
+            self.social = None;
+            self.social_motion = None;
+            self.activity = None;
+            self.pending_activity = None;
+            self.auto_pursuit = false;
+            self.auto_pursuit_time = 0.0;
+            self.behavior_velocity = None;
+            self.behavior_velocity_ttl = 0.0;
+            self.state = State::Thrown;
+            self.state_time = 0.0;
+        }
+    }
+
+    pub(crate) fn behavior_jump_over(&mut self, target_x: f64, world: &World) -> bool {
+        if self.dragging
+            || self.social.is_some()
+            || self.social_motion.is_some()
+            || self.chase
+            || self.activity.is_some()
+            || self.forced_sleep
+            || self.behavior_manual_lock > 0.0
+            || !matches!(self.state, State::Walk | State::Idle)
+            || !self.has_support(world)
+        {
+            return false;
+        }
+        let scale = self.display_scale.clamp(0.5, 2.0);
+        let rise = 140.0 * scale;
+        let area = world.area_at(self.pos);
+        if !valid_rect(area) || self.pos.y - area.y < rise + self.head_clearance() {
+            return false;
+        }
+        let inset = 40.0 * scale;
+        let target_x = target_x.clamp(area.x + inset, area.right() - inset);
+        if (target_x - self.pos.x).abs() < 1.0 || !self.platform_under(target_x, world) {
+            return false;
+        }
+        let runway = 80.0 * scale;
+        if let Some(index) = self.current_surface_index(world) {
+            if !world.windows.get(index).is_some_and(|w| {
+                target_x - runway >= w.rect.x && target_x + runway <= w.rect.right()
+            }) {
+                return false;
+            }
+        } else if target_x - runway < area.x || target_x + runway > area.right() {
+            return false;
+        }
+        let lo = self.pos.x.min(target_x) - inset;
+        let hi = self.pos.x.max(target_x) + inset;
+        if world.windows.iter().any(|w| {
+            valid_rect(w.rect)
+                && w.rect.x < hi
+                && w.rect.right() > lo
+                && w.rect.bottom() > self.pos.y - rise
+                && w.rect.y < self.pos.y - 45.0 * scale
+        }) {
+            return false;
+        }
+        let launch = (2.0 * GRAVITY * rise).sqrt();
+        let flight = 2.0 * launch / GRAVITY;
+        let vx = (target_x - self.pos.x) / flight;
+        if !vx.is_finite() || vx.abs() > 400.0 * scale.sqrt() {
+            return false;
+        }
+        self.behavior_velocity = None;
+        self.behavior_velocity_ttl = 0.0;
+        self.facing = vx.signum();
+        self.vel = Vec2::new(vx, -launch);
+        self.surface = None;
+        self.surface_id = None;
+        self.surface_prev = None;
+        self.set_state(State::Jump, 0.0);
+        true
     }
 
     fn update_gaze(&mut self, dt: f64, world: &World) {
@@ -1484,7 +1727,7 @@ impl Pet {
                     return false;
                 }
                 if self.state != State::Jump && !self.is_airborne() {
-                    let rise = (self.pos.y - target.y + self.head_clearance()).clamp(80.0, 600.0);
+                    let rise = (self.pos.y - target.y + self.head_clearance()).clamp(80.0, 900.0);
                     let area = world.area_at(self.pos);
                     let available_rise = (self.pos.y - area.y - self.head_clearance()).max(0.0);
                     if rise > available_rise {

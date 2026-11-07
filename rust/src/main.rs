@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use claude_mascot::{
+    behavior::{BehaviorCoordinator, BehaviorSettings, SpacingPolicy},
     engine::{Pet, Skin},
     render::{Renderer, FEET_X, FEET_Y, HEIGHT, WIDTH},
     settings::{config_path, Settings},
@@ -61,8 +62,10 @@ struct Options {
     trace: Option<PathBuf>,
     skin: Option<Skin>,
     fps: Option<u32>,
+    spacing: Option<(f64, f64)>,
     pets: usize,
     activity: Option<claude_mascot::activities::ActivityId>,
+    open_settings: bool,
 }
 fn options() -> Result<Options, String> {
     let mut o = Options {
@@ -77,14 +80,16 @@ fn options() -> Result<Options, String> {
         trace: None,
         skin: None,
         fps: None,
+        spacing: None,
         pets: 1,
         activity: None,
+        open_settings: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--help" | "-h" => {
-                println!("Claude Mascot Rust\n  --skin claude\n  --pets 1..8           Start with several Claudes\n  --activity SLUG       Start a catalog scene after landing\n  --fps 30..240         Set and persist target frame rate\n  --config FILE\n  --preview DIRECTORY   Export Claude animation states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
+                println!("Claude Mascot Rust\n  --skin claude\n  --pets 1..8           Start with several Claudes\n  --activity SLUG       Start a catalog scene after landing\n  --fps 30..240         Set and persist target frame rate\n  --spacing MIN:MAX    Set and persist free edge distance (e.g. 24:96)\n  --config FILE\n  --preview DIRECTORY   Export Claude animation states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --desktop-probe       Inspect desktop-icon geometry only\n  --trace FILE          Write smoke-test metrics as JSON");
                 std::process::exit(0)
             }
             "--preview" => {
@@ -92,6 +97,7 @@ fn options() -> Result<Options, String> {
             }
             "--headless" => o.headless = true,
             "--desktop-probe" => o.desktop_probe = true,
+            "--settings" => o.open_settings = true,
             "--pets" => {
                 o.pets = args
                     .next()
@@ -144,6 +150,18 @@ fn options() -> Result<Options, String> {
                     return Err("FPS must be an integer from 30 to 240".into());
                 }
                 o.fps = Some(fps);
+            }
+            "--spacing" => {
+                let value = args
+                    .next()
+                    .ok_or("--spacing needs MIN:MAX (for example 24:96)")?;
+                let (min, max) = value.split_once(':').ok_or("--spacing needs MIN:MAX")?;
+                let min = min.parse().map_err(|_| "Invalid minimum spacing")?;
+                let max = max.parse().map_err(|_| "Invalid maximum spacing")?;
+                if !claude_mascot::settings::valid_personal_space(min, max) {
+                    return Err("Spacing needs 8..256 minimum, up to 512 maximum, and a range of at least 8".into());
+                }
+                o.spacing = Some((min, max));
             }
             _ => return Err(format!("Unknown option {a}")),
         }
@@ -435,7 +453,108 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
             pair.save_png(&dir.join(format!("Pair-{kind:?}-{phase:.1}.png")))?;
         }
     }
+    for &(_, _, color) in claude_mascot::palette::PRESETS {
+        let mut pet = Pet::new(1, Skin::Claude, Vec2::default());
+        pet.state = State::Idle;
+        pet.body_color = color;
+        r.frame(&pet, false)
+            .save_png(&dir.join(format!("Palette-{color:06X}.png")))?;
+    }
     preview_social_play(dir)?;
+    preview_group_tower(dir)?;
+    Ok(())
+}
+
+fn preview_group_tower(dir: &std::path::Path) -> Result<(), String> {
+    use claude_mascot::{
+        engine::State,
+        social::{SocialCoordinator, SocialKind, SocialMotion},
+        Rect,
+    };
+    let world = World {
+        work_areas: vec![Rect::new(0.0, 0.0, 1800.0, 1000.0)],
+        ..World::default()
+    };
+    let mut pets: Vec<_> = (0..8)
+        .map(|i| {
+            let mut pet = Pet::new(
+                i + 1,
+                Skin::Claude,
+                Vec2::new(450.0 + i as f64 * 112.0, 1000.0),
+            );
+            pet.state = State::Idle;
+            pet.auto_activities = false;
+            pet.auto_reactions = false;
+            pet.body_color = claude_mascot::palette::PRESETS[i as usize].2;
+            pet
+        })
+        .collect();
+    let mut social = SocialCoordinator::new();
+    social.request_for(1, Some(SocialKind::Tower));
+    social.update(0.0, pets.iter_mut(), &world);
+    let mut renderer = Renderer::new()?;
+    let mut snapshots = Vec::new();
+    let mut last_perched = usize::MAX;
+    let mut max_perched = 0;
+    let mut seen_completed = false;
+    for step in 0..=7200 {
+        if step > 0 {
+            for pet in &mut pets {
+                pet.update(1.0 / 240.0, &world);
+            }
+            social.update(1.0 / 240.0, pets.iter_mut(), &world);
+        }
+        let perched = pets
+            .iter()
+            .filter(|p| matches!(p.social_motion, Some(SocialMotion::Perch { .. })))
+            .count();
+        max_perched = max_perched.max(perched);
+        let completed_now = social.stats.completed > 0 && !seen_completed;
+        let capture = perched != last_perched || completed_now || step == 7200;
+        if capture {
+            last_perched = perched;
+            seen_completed |= completed_now;
+            let mut scene = claude_mascot::render::Canvas::new(1800, 1060);
+            scene.rect(0.0, 1000.0, 1800.0, 1.0, 0xFF68706B);
+            for pet in &pets {
+                let frame = renderer.frame(pet, true);
+                let ox = (pet.pos.x - FEET_X).round() as i32;
+                let oy = (pet.pos.y - FEET_Y).round() as i32;
+                for y in 0..HEIGHT {
+                    for x in 0..WIDTH {
+                        let color = frame.pixels[y * WIDTH + x];
+                        let a = color >> 24;
+                        if a == 0 {
+                            continue;
+                        }
+                        let channel = |shift: u32| (((color >> shift) & 255u32) * 255 / a).min(255);
+                        scene.pixel(
+                            ox + x as i32,
+                            oy + y as i32,
+                            (a << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0),
+                        );
+                    }
+                }
+            }
+            let file = format!("Group-Tower-8-{step:04}-{perched}-perched.png");
+            scene.save_png(&dir.join(&file))?;
+            snapshots.push(serde_json::json!({"step":step,"perched":perched,"file":file,"completed":social.stats.completed,"cancelled":social.stats.cancelled,"positions":pets.iter().map(|p|serde_json::json!({"id":p.id,"x":p.pos.x,"y":p.pos.y})).collect::<Vec<_>>() }));
+        }
+        if seen_completed && pets.iter().all(|p| p.pos.y >= 999.0 && p.social.is_none()) {
+            break;
+        }
+    }
+    std::fs::write(
+        dir.join("group-tower.json"),
+        serde_json::to_vec_pretty(&snapshots).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if max_perched != 7 || !seen_completed {
+        return Err(format!(
+            "Eight-pet tower preview did not complete: {max_perched} levels, {} cancellations",
+            social.stats.cancelled
+        ));
+    }
     Ok(())
 }
 
@@ -450,7 +569,7 @@ fn preview_social_play(dir: &std::path::Path) -> Result<(), String> {
         ..World::default()
     };
     let mut renderer = Renderer::new()?;
-    for kind in [SocialKind::Tag, SocialKind::Tower] {
+    for kind in [SocialKind::Tag, SocialKind::Tower, SocialKind::Leapfrog] {
         let mut pets: Vec<_> = [300.0, 380.0]
             .into_iter()
             .enumerate()
@@ -465,12 +584,12 @@ fn preview_social_play(dir: &std::path::Path) -> Result<(), String> {
         let mut social = SocialCoordinator::new();
         social.request_for(1, Some(kind));
         social.update(0.0, pets.iter_mut(), &world);
-        for step in 1..=1680 {
+        for step in 1..=2640 {
             for pet in &mut pets {
                 pet.update(1.0 / 240.0, &world);
             }
             social.update(1.0 / 240.0, pets.iter_mut(), &world);
-            if ![24, 144, 288, 720, 1440, 1680].contains(&step) {
+            if ![24, 144, 288, 720, 1440, 1680, 2400, 2640].contains(&step) {
                 continue;
             }
             let mut scene = claude_mascot::render::Canvas::new(1100, 400);
@@ -513,6 +632,9 @@ fn headless(o: &Options) -> Result<(), String> {
         })
         .collect();
     let mut social = claude_mascot::social::SocialCoordinator::new();
+    let (min, max) = o.spacing.unwrap_or((24.0, 96.0));
+    let mut behavior = BehaviorCoordinator::new(behavior_settings(min, max));
+    let mut contacts = claude_mascot::contacts::ContactCoordinator::new();
     for _ in 0..36000 {
         for p in &mut pets {
             p.update(1.0 / 60.0, &world);
@@ -528,15 +650,27 @@ fn headless(o: &Options) -> Result<(), String> {
                 return Err("Nonfinite simulation state".into());
             }
         }
+        contacts.update(1.0 / 60.0, pets.iter_mut(), &world);
+        behavior.update(1.0 / 60.0, pets.iter_mut(), &world);
         social.update(1.0 / 60.0, pets.iter_mut(), &world);
     }
-    let result = serde_json::json!({"headless_steps":36000,"simulated_seconds":600,"pets":pets.len(),"finite":true,"social_started":social.stats.started,"social_completed":social.stats.completed,"social_cancelled":social.stats.cancelled});
+    let result = serde_json::json!({"headless_steps":36000,"simulated_seconds":600,"pets":pets.len(),"finite":true,"social_started":social.stats.started,"social_completed":social.stats.completed,"social_cancelled":social.stats.cancelled,"behavior_decisions":behavior.decision_count,"spacing_actions":behavior.steering_count});
     println!("{result}");
     if let Some(path) = &o.trace {
         std::fs::write(path, serde_json::to_vec_pretty(&result).unwrap())
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn behavior_settings(min: f64, max: f64) -> BehaviorSettings {
+    BehaviorSettings {
+        spacing: SpacingPolicy {
+            min_free_gap_px: min,
+            max_free_gap_px: max,
+        },
+        ..BehaviorSettings::default()
+    }
 }
 
 #[cfg(windows)]
@@ -581,6 +715,34 @@ mod native {
         host: NativeHost,
         drag: Option<Drag>,
     }
+    fn panel_state(
+        settings: &Settings,
+        entries: &[Entry],
+        selected: u64,
+    ) -> claude_mascot::preferences::PreferencesState {
+        let pet = &entries
+            .iter()
+            .find(|e| e.pet.id == selected)
+            .unwrap_or(&entries[0])
+            .pet;
+        claude_mascot::preferences::PreferencesState {
+            selected_pet_id: pet.id,
+            pet_ids: entries.iter().map(|e| e.pet.id).collect(),
+            body_color: pet.body_color,
+            fps: settings.target_fps,
+            scale: settings.scale,
+            intensity: settings.activity_intensity,
+            min_gap: settings.personal_space_min,
+            max_gap: settings.personal_space_max,
+            show_mood: settings.show_mood,
+            show_bubbles: settings.show_bubbles,
+            auto_reactions: settings.auto_reactions,
+            auto_activities: settings.auto_activities,
+            social_enabled: settings.social_enabled,
+            desktop_perches: settings.desktop_perches,
+            paused: settings.paused,
+        }
+    }
     fn host(settings: &Settings, tray: bool) -> Result<NativeHost, String> {
         NativeHost::new(
             "Claude Mascot Rust",
@@ -589,7 +751,9 @@ mod native {
             tray,
         )
     }
-    fn spawn(pet: Pet, settings: &Settings, tray: bool) -> Result<Entry, String> {
+    fn spawn(mut pet: Pet, settings: &Settings, tray: bool) -> Result<Entry, String> {
+        pet.body_color = settings.body_color;
+        pet.activity_intensity = settings.activity_intensity;
         Ok(Entry {
             pet,
             host: host(settings, tray)?,
@@ -609,6 +773,11 @@ mod native {
         let mut settings = Settings::load(&o.config)?;
         if let Some(fps) = o.fps {
             settings.target_fps = fps;
+            settings.save(&o.config)?;
+        }
+        if let Some((min, max)) = o.spacing {
+            settings.personal_space_min = min;
+            settings.personal_space_max = max;
             settings.save(&o.config)?;
         }
         if let Some(s) = o.skin {
@@ -667,8 +836,17 @@ mod native {
         }
         let mut social = claude_mascot::social::SocialCoordinator::new();
         social.enabled = settings.social_enabled;
+        let mut behavior = BehaviorCoordinator::new(behavior_settings(
+            settings.personal_space_min,
+            settings.personal_space_max,
+        ));
+        let mut preferences: Option<claude_mascot::preferences::PreferencesWindow> = None;
+        let mut contacts = claude_mascot::contacts::ContactCoordinator::new();
+        let mut selected_pet_id = 1;
+        let mut open_preferences = o.open_settings;
         let mut next_id = o.pets as u64 + 1;
         let start = Instant::now();
+        let mut preferences_at = start;
         let mut previous = start;
         let mut world_at = start - Duration::from_secs(1);
         let mut pacer = claude_mascot::timing::FramePacer::new(start, settings.target_fps);
@@ -826,12 +1004,98 @@ mod native {
             let mut spawn_skins = Vec::new();
             let mut rebuild = false;
             let mut save = false;
+            if let Some(panel) = preferences.as_mut() {
+                use claude_mascot::preferences::PreferencesEvent::*;
+                for event in panel.poll() {
+                    let selected = entries
+                        .iter()
+                        .position(|e| e.pet.id == selected_pet_id)
+                        .unwrap_or(0);
+                    match event {
+                        SelectPet(id) => selected_pet_id = id,
+                        SetFps(fps) => {
+                            settings.target_fps = fps;
+                            pacer = claude_mascot::timing::FramePacer::new(Instant::now(), fps);
+                            save = true;
+                        }
+                        SetScale(scale) => {
+                            settings.scale = scale;
+                            rebuild = true;
+                            save = true;
+                        }
+                        SetIntensity(value) => {
+                            settings.activity_intensity = value.min(100);
+                            save = true;
+                        }
+                        SetSpacing(min, max) => {
+                            if settings::valid_personal_space(min, max) {
+                                settings.personal_space_min = min;
+                                settings.personal_space_max = max;
+                                save = true;
+                            }
+                        }
+                        ToggleMood(value) => {
+                            settings.show_mood = value;
+                            save = true;
+                        }
+                        ToggleBubbles(value) => {
+                            settings.show_bubbles = value;
+                            save = true;
+                        }
+                        ToggleReactions(value) => {
+                            settings.auto_reactions = value;
+                            save = true;
+                        }
+                        ToggleActivities(value) => {
+                            settings.auto_activities = value;
+                            save = true;
+                        }
+                        ToggleSocial(value) => {
+                            settings.social_enabled = value;
+                            save = true;
+                        }
+                        TogglePaused(value) => {
+                            settings.paused = value;
+                            save = true;
+                        }
+                        ToggleDesktop(value) => {
+                            settings.desktop_perches = value;
+                            desktop.set_enabled(value);
+                            world = platform::snapshot();
+                            desktop.apply(&mut world);
+                            save = true;
+                        }
+                        ChooseColor => commands.push((selected, 188)),
+                        ResetColor => commands.push((selected, 180)),
+                        RunAction(action) => commands.push((selected, action)),
+                    }
+                }
+            }
             let friend_count = entries.len();
             for (i, c) in commands {
                 let Some(e) = entries.get_mut(i) else {
                     continue;
                 };
                 match c {
+                    49 => {
+                        selected_pet_id = e.pet.id;
+                        open_preferences = true;
+                    }
+                    180..=188 => {
+                        let color = if c == 188 {
+                            e.host.choose_body_color(e.pet.body_color)
+                        } else {
+                            claude_mascot::palette::PRESETS
+                                .iter()
+                                .find(|(id, _, _)| *id == c)
+                                .map(|(_, _, rgb)| *rgb)
+                        };
+                        if let Some(color) = color {
+                            e.pet.body_color = color;
+                            settings.body_color = color;
+                            save = true;
+                        }
+                    }
                     1..=5 => {
                         let command = match c {
                             1 => Command::Wander,
@@ -885,6 +1149,16 @@ mod native {
                         desktop.apply(&mut world);
                         save = true;
                     }
+                    85..=87 => {
+                        let (min, max) = match c {
+                            85 => (12.0, 48.0),
+                            87 => (48.0, 144.0),
+                            _ => (24.0, 96.0),
+                        };
+                        settings.personal_space_min = min;
+                        settings.personal_space_max = max;
+                        save = true;
+                    }
                     70 => {
                         e.drag = None;
                         e.pet.dragging = false;
@@ -896,7 +1170,7 @@ mod native {
                     74 => e.pet.command(Command::Laptop, &world),
                     75 => e.pet.command(Command::Stretch, &world),
                     76 => e.pet.command(Command::LookAround, &world),
-                    90..=97 => {
+                    90..=98 => {
                         use claude_mascot::social::SocialKind;
                         let kind = match c {
                             91 => Some(SocialKind::Greeting),
@@ -906,6 +1180,7 @@ mod native {
                             95 => Some(SocialKind::Comfort),
                             96 => Some(SocialKind::Tag),
                             97 => Some(SocialKind::Tower),
+                            98 => Some(SocialKind::Leapfrog),
                             _ => None,
                         };
                         e.pet.command(Command::Wander, &world);
@@ -914,7 +1189,7 @@ mod native {
                         } else if friend_count < 2 {
                             "позови ещё одного Клода :)"
                         } else {
-                            "кто со мной? подойди поближе!"
+                            "кто со мной?"
                         };
                         e.pet.bubble = Some(prompt.into());
                         e.pet.bubble_time = 2.0;
@@ -1022,11 +1297,38 @@ mod native {
             if save {
                 settings.save(&o.config)?;
             }
+            if open_preferences {
+                if preferences.is_none() {
+                    match claude_mascot::preferences::PreferencesWindow::new() {
+                        Ok(panel) => preferences = Some(panel),
+                        Err(error) => {
+                            update_dialog(&error, false);
+                        }
+                    }
+                }
+                if let Some(panel) = preferences.as_mut() {
+                    panel.show(panel_state(&settings, &entries, selected_pet_id));
+                }
+                open_preferences = false;
+            }
+            if let Some(panel) = preferences.as_mut() {
+                if panel.is_visible()
+                    && (save || now.duration_since(preferences_at) >= Duration::from_millis(200))
+                {
+                    panel.sync(panel_state(&settings, &entries, selected_pet_id));
+                    preferences_at = now;
+                }
+            }
             social.enabled = settings.social_enabled;
+            behavior.set_settings(behavior_settings(
+                settings.personal_space_min,
+                settings.personal_space_max,
+            ));
             for entry in &mut entries {
                 entry.pet.auto_activities = settings.auto_activities;
                 entry.pet.auto_reactions = settings.auto_reactions;
                 entry.pet.display_scale = settings.scale;
+                entry.pet.activity_intensity = settings.activity_intensity;
             }
             social.update(0.0, entries.iter_mut().map(|entry| &mut entry.pet), &world);
             let hidden = settings.hide_fullscreen && world.fullscreen_active();
@@ -1039,6 +1341,16 @@ mod native {
                         e.pet
                             .update(1.0 / claude_mascot::timing::SIMULATION_HZ as f64, &world);
                     }
+                    contacts.update(
+                        1.0 / claude_mascot::timing::SIMULATION_HZ as f64,
+                        entries.iter_mut().map(|entry| &mut entry.pet),
+                        &world,
+                    );
+                    behavior.update(
+                        1.0 / claude_mascot::timing::SIMULATION_HZ as f64,
+                        entries.iter_mut().map(|entry| &mut entry.pet),
+                        &world,
+                    );
                     social.update(
                         1.0 / claude_mascot::timing::SIMULATION_HZ as f64,
                         entries.iter_mut().map(|entry| &mut entry.pet),
@@ -1089,6 +1401,9 @@ mod native {
                     auto_activities: settings.auto_activities,
                     auto_reactions: settings.auto_reactions,
                     desktop_perches: settings.desktop_perches,
+                    personal_space_min: settings.personal_space_min,
+                    personal_space_max: settings.personal_space_max,
+                    body_color: e.pet.body_color,
                     satisfaction: e.pet.satisfaction.clamp(0.0, 100.0).round() as u8,
                 });
                 e.host.set_visible(!hidden);
@@ -1143,6 +1458,14 @@ mod native {
                 "desktop_icon_count": world.windows.iter().filter(|w| w.is_desktop_icon).count(),
                 "desktop_perches": settings.desktop_perches,
                 "auto_reactions": settings.auto_reactions,
+                "personal_space_min": settings.personal_space_min,
+                "personal_space_max": settings.personal_space_max,
+                "activity_intensity": settings.activity_intensity,
+                "behavior_decisions": behavior.decision_count,
+                "spacing_actions": behavior.steering_count,
+                "contacts": contacts.contact_count,
+                "strong_impacts": contacts.strong_impacts,
+                "pet_states": entries.iter().map(|entry|serde_json::json!({"id":entry.pet.id,"state":format!("{:?}",entry.pet.state),"x":entry.pet.pos.x,"y":entry.pet.pos.y,"vx":entry.pet.vel.x,"vy":entry.pet.vel.y})).collect::<Vec<_>>(),
                 "elapsed_seconds": start.elapsed().as_secs_f64(),
                 "pets": entries.len(),
                 "social_started": social.stats.started,

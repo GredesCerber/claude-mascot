@@ -1,9 +1,10 @@
 # Claude Mascot Rust
 
-Windows-first native Rust port. Version 0.6.0 keeps **Claude only** and adds
-desktop-icon perches, adaptive high jumps, brief reactions to Explorer activity,
-stronger cursor gaze, tag and occasional two-pet towers. It includes
-75 activities from the supplied pixel pack and seven friendly pair interactions.
+Windows-first native Rust port. Version 0.7.0 keeps **Claude only** and adds
+a separate native settings window, recoloring, personal space, collision
+impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
+It includes desktop-icon perches, adaptive jumps, cursor/Explorer reactions,
+75 activities from the supplied pixel pack and eight friendly social activities.
 The original Python/Linux
 application at the repository root is maintained separately.
 
@@ -31,6 +32,11 @@ The built-in updater applies to portable installs; see [updates](docs/updates.md
 
 Click to pet, drag with the left button to carry, release quickly to throw,
 double-click to jump. Right-click the pet or its tray icon for the native menu.
+Open **Settings → Open settings** for the modeless control window, or launch
+with `--settings`. The window applies preferences immediately and contains
+color, frame rate, scale, activity intensity, personal space, display/behavior
+switches, the complete activity catalog and quick commands. Closing it leaves
+the pets running. Intensity changes optional behavior frequency, not FPS.
 
 | Menu | Actions |
 | --- | --- |
@@ -38,7 +44,7 @@ double-click to jump. Right-click the pet or its tray icon for the native menu.
 | Заняться → Все занятия (75) | All pack scenes grouped by mood, code, workshop, nature, food, celebration, adventure, reflection and sport |
 | Поведение | Wander, sit, sleep, climb, chase the cursor |
 | Друзья | Invite another Claude (up to eight), remove the selected pet |
-| Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend, tag, tower |
+| Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend, tag, group tower, leapfrog |
 | Настройки | Scale, speech, mood meter, fullscreen hiding, startup, frame rate |
 
 Laptop opens for 1 second, types for 8 seconds and closes for 1 second.
@@ -66,10 +72,22 @@ No full pet objects are cloned each step. Disable friend interactions under
 Friends, or disable random activities under Settings. Manual activities remain
 available when random activities are disabled. Nearby gaze relaxes to neutral
 when the cursor moves away, and does not override closed/blinking eyes.
-Tag uses a sufficiently wide shared runway. Towers contain two real pets:
-the upper one jumps, perches briefly, then hops aside and falls normally.
-Low ceilings and narrow supports prevent the tower from starting.
+Tag and leapfrog require a sufficiently wide shared runway. A tower gathers all
+available pets on one support (up to eight), forms through real jumps, then
+dismounts from the top down. Low ceilings or unsafe routes prevent the entire
+group from starting. Busy, sleeping or manually controlled pets remain excluded.
 See [social play](docs/social-play.md) and [desktop perches](docs/desktop-perches.md).
+
+The default edge-to-edge settling range is 24–96 pixels at scale 1. Greeting,
+dancing and comfort work from a distance; they do not pull pets into contact.
+Safe ordinary encounters can trigger a jump over a friend. Strong throws use
+body contacts and pass part of their velocity to the other pet. See
+[behavior and contact](docs/behavior-model.md). Custom spacing is saved with
+`--spacing 32:112`; the context menu also offers three presets.
+
+Each live pet can be recolored independently. Presets and a system color picker
+derive matching limb/shadow/highlight colors while preserving Claude's geometry.
+The last selected color is saved as the default for new pets and future sessions.
 
 The pack contained 75 static illustrations, not ready-made animation frames.
 Each is a timed cosmetic activity with an entry/exit and animated accents;
@@ -117,7 +135,7 @@ embed the icon and package a portable ZIP. Executable QA arguments:
 .\target\release\claude-mascot.exe --smoke-test 5 --trace .\smoke.json
 ```
 
-See [architecture](docs/architecture.md), [0.6.0 checks](docs/verification-0.6.0.md)
+See [architecture](docs/architecture.md), [0.7.0 checks](docs/verification-0.7.0.md)
 and the [remaining roadmap](docs/planning/PLAN-RU.md).
 The proposed phrase bank is planning data, not a runtime dialogue engine.
 

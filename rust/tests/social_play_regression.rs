@@ -84,10 +84,62 @@ fn tag_runs_swaps_chaser_and_stays_on_the_shared_runway() {
         speeds.into_iter().all(|seen| seen),
         "both pets should take the runaway role"
     );
-    assert_eq!(c.stats.completed, 1);
+    assert_eq!(
+        c.stats.completed,
+        1,
+        "stats={:?} pets={:?}",
+        c.stats,
+        pets.iter()
+            .map(|p| (p.id, p.pos, p.state, p.social, p.social_motion))
+            .collect::<Vec<_>>()
+    );
     assert!(pets
         .iter()
         .all(|p| p.social.is_none() && p.social_motion.is_none()));
+}
+
+#[test]
+fn leapfrog_jumps_over_partner_then_swaps_crouch_and_jump_roles() {
+    let w = world();
+    let mut pets = pair();
+    let mut c = SocialCoordinator::new();
+    c.request_for(1, Some(SocialKind::Leapfrog));
+    c.update(0.0, pets.iter_mut(), &w);
+    assert_eq!(pets[0].social.unwrap().kind, SocialKind::Leapfrog);
+    assert!(matches!(
+        pets[0].social_motion,
+        Some(SocialMotion::Leap { owner_id: 2, .. })
+    ));
+    let mut saw_swap = false;
+    for _ in 0..(12 * 240) {
+        for p in &mut pets {
+            p.update(1.0 / 240.0, &w);
+        }
+        c.update(1.0 / 240.0, pets.iter_mut(), &w);
+        if pets[1]
+            .social
+            .is_some_and(|s| s.role == claude_mascot::social::SocialRole::Initiator)
+        {
+            saw_swap = true;
+        }
+        assert!(pets
+            .iter()
+            .all(|p| p.pos.x.is_finite() && p.pos.y.is_finite()));
+    }
+    assert!(saw_swap, "the partner should take a turn jumping");
+    assert_eq!(
+        c.stats.completed,
+        1,
+        "stats={:?} pets={:?}",
+        c.stats,
+        pets.iter()
+            .map(|p| (p.id, p.pos, p.state, p.social, p.social_motion))
+            .collect::<Vec<_>>()
+    );
+    assert!(pets
+        .iter()
+        .all(|p| p.social.is_none() && p.social_motion.is_none()));
+    assert!(pets.iter().all(|p| (p.pos.y - 700.0).abs() < 3.0));
 }
 
 #[test]
