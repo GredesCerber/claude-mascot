@@ -63,6 +63,8 @@ pub enum State {
     Laptop,
     Stretch,
     LookAround,
+    Social,
+    Activity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +79,7 @@ pub enum Command {
     Laptop,
     Stretch,
     LookAround,
+    Activity(crate::activities::ActivityId),
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +102,15 @@ pub struct Pet {
     pub squash: f64,
     /// A small, transient mood signal for animation and gentle feedback.
     pub satisfaction: f64,
+    /// Current coordinated interaction, when one is active.
+    pub social: Option<crate::social::SocialActivity>,
+    /// Normalized gaze direction in world axes, smoothed toward the cursor.
+    pub gaze: Vec2,
+    pub activity: Option<crate::activities::ActivityId>,
+    pub auto_activities: bool,
+    pub(crate) auto_activity_cooldown: f64,
+    pub(crate) last_activity: Option<crate::activities::ActivityId>,
+    pub(crate) pending_activity: Option<crate::activities::ActivityId>,
     pub(crate) rng: u64,
     pub(crate) idle_for: f64,
     pub(crate) forced_sleep: bool,
@@ -147,6 +159,13 @@ impl Pet {
             chase: false,
             squash: 0.0,
             satisfaction: 75.0,
+            social: None,
+            gaze: Vec2::default(),
+            activity: None,
+            auto_activities: true,
+            auto_activity_cooldown: 12.0,
+            last_activity: None,
+            pending_activity: None,
             rng: id.wrapping_mul(0x9e3779b97f4a7c15).max(1),
             idle_for: 0.0,
             forced_sleep: false,
@@ -185,6 +204,7 @@ impl Pet {
         self.cooldown = (self.cooldown - dt).max(0.0);
         self.grab_cooldown = (self.grab_cooldown - dt).max(0.0);
         self.explore_cooldown = (self.explore_cooldown - dt).max(0.0);
+        self.auto_activity_cooldown = (self.auto_activity_cooldown - dt).max(0.0);
         self.bubble_time = (self.bubble_time - dt).max(0.0);
         if self.bubble_time == 0.0 {
             self.bubble = None;
@@ -198,11 +218,33 @@ impl Pet {
         } else {
             self.satisfaction = self.satisfaction.clamp(0.0, 100.0);
         }
+        self.update_gaze(dt, world);
         if !valid_vec(self.pos) || !valid_vec(self.vel) {
             self.recover(world);
             return;
         }
         self.prune_shake();
+
+        if self.social.is_some() && self.state == State::Social {
+            if self.dragging {
+                return;
+            }
+            if let Some(i) = self.current_surface_index(world) {
+                self.follow_surface(i, world);
+            } else {
+                let floor = self.floor_y(world);
+                if self.surface_id.is_some() || (self.pos.y - floor).abs() > 3.0 {
+                    self.social = None;
+                    self.surface = None;
+                    self.surface_id = None;
+                    self.surface_prev = None;
+                    self.vel.y = self.vel.y.max(0.0);
+                    self.set_state(State::Fall, 0.0);
+                }
+            }
+            self.snapshot_windows(world);
+            return;
+        }
 
         if !self.initialized {
             self.last_cursor = world.cursor;
@@ -317,10 +359,13 @@ impl Pet {
     }
 
     pub fn command(&mut self, command: Command, world: &World) {
+        self.social = None;
+        self.activity = None;
+        self.pending_activity = None;
         self.pending_ground = None;
         if matches!(
             self.state,
-            State::Laptop | State::Stretch | State::LookAround
+            State::Laptop | State::Stretch | State::LookAround | State::Social | State::Activity
         ) {
             self.set_state(
                 if self.has_support(world) {
@@ -403,6 +448,31 @@ impl Pet {
             Command::Laptop => self.command_pose(State::Laptop, 10.0, world),
             Command::Stretch => self.command_pose(State::Stretch, 2.5, world),
             Command::LookAround => self.command_pose(State::LookAround, 2.0, world),
+            Command::Activity(id) => {
+                self.chase = false;
+                self.peek_goal = None;
+                self.target = None;
+                if self.has_support(world) {
+                    self.vel = Vec2::default();
+                    self.activity = Some(id);
+                    self.set_state(State::Activity, id.spec().duration);
+                    self.say(id.spec().phrase, id.spec().duration.min(3.0));
+                } else {
+                    self.pending_activity = Some(id);
+                    self.pending_ground = Some(State::Activity);
+                    self.chase = false;
+                    self.peek_goal = None;
+                    self.target = None;
+                    self.hold_offset = Vec2::default();
+                    if !self.is_airborne() {
+                        self.surface = None;
+                        self.surface_id = None;
+                        self.surface_prev = None;
+                        self.vel.x = 0.0;
+                        self.set_state(State::Fall, 0.0);
+                    }
+                }
+            }
         }
         match command {
             Command::Laptop => self.say("сейчас допечатаю", 2.0),
@@ -422,6 +492,9 @@ impl Pet {
             return;
         }
         self.dragging = true;
+        self.social = None;
+        self.activity = None;
+        self.pending_activity = None;
         self.pending_ground = None;
         self.release_pending = false;
         self.forced_sleep = false;
@@ -434,6 +507,9 @@ impl Pet {
     }
 
     pub fn release(&mut self, velocity: Vec2) {
+        self.social = None;
+        self.activity = None;
+        self.pending_activity = None;
         self.dragging = false;
         self.release_pending = true;
         self.vel = if valid_vec(velocity) {
@@ -466,17 +542,30 @@ impl Pet {
     }
 
     pub fn pet(&mut self) {
+        self.social = None;
+        self.activity = None;
+        self.pending_activity = None;
+        self.pending_ground = None;
         self.forced_sleep = false;
         self.satisfaction = (self.satisfaction + 12.0).min(100.0);
         self.hearts = 1.5;
         self.squash = 0.35;
         self.say("приятно :) ", 1.8);
-        if matches!(self.state, State::Idle | State::Walk | State::Sit) {
+        if matches!(
+            self.state,
+            State::Idle | State::Walk | State::Sit | State::Social | State::Activity
+        ) {
             self.set_state(State::Happy, 1.1);
         }
     }
 
     pub fn jump(&mut self) {
+        self.social = None;
+        self.activity = None;
+        self.pending_activity = None;
+        if self.pending_ground == Some(State::Activity) {
+            self.pending_ground = None;
+        }
         if self.surface.is_some()
             || matches!(
                 self.state,
@@ -493,6 +582,8 @@ impl Pet {
                     | State::Laptop
                     | State::Stretch
                     | State::LookAround
+                    | State::Activity
+                    | State::Social
                     | State::Hold
             )
         {
@@ -519,9 +610,17 @@ impl Pet {
         }
         if matches!(
             self.state,
-            State::Dance | State::Wave | State::Laptop | State::Stretch | State::LookAround
+            State::Dance
+                | State::Wave
+                | State::Laptop
+                | State::Stretch
+                | State::LookAround
+                | State::Activity
         ) {
             if self.state_time >= self.state_duration.max(0.1) {
+                if self.state == State::Activity {
+                    self.activity = None;
+                }
                 self.set_state(State::Idle, 0.0);
             } else if let Some(i) = self.current_surface_index(world) {
                 self.follow_surface(i, world);
@@ -548,7 +647,15 @@ impl Pet {
         if self.state == State::Land {
             if self.state_time > self.state_duration.max(0.55) {
                 let next = self.pending_ground.take().unwrap_or(State::Idle);
-                self.set_state(next, pose_duration(next));
+                if next == State::Activity {
+                    self.activity = self.pending_activity.take();
+                    if let Some(id) = self.activity {
+                        self.say(id.spec().phrase, id.spec().duration.min(3.0));
+                    }
+                    self.set_state(next, self.activity.map_or(0.0, |id| id.spec().duration));
+                } else {
+                    self.set_state(next, pose_duration(next));
+                }
             } else {
                 // Preserve horizontal impact momentum and let ground friction
                 // bring the pet to rest instead of snapping it to a stop.
@@ -691,9 +798,9 @@ impl Pet {
             && !self.try_explore_jump(world)
         {
             let choice = self.random();
-            if choice < 0.12 && self.satisfaction >= 30.0 {
+            if choice < 0.12 && self.satisfaction >= 30.0 && self.auto_activities {
                 self.set_state(State::Dance, 2.6);
-            } else if choice < 0.22 && self.satisfaction >= 30.0 {
+            } else if choice < 0.22 && self.satisfaction >= 30.0 && self.auto_activities {
                 self.set_state(State::Wave, 1.8);
             } else if choice < 0.42 {
                 let sit_duration = 4.0 + self.random() * 5.0;
@@ -932,12 +1039,31 @@ impl Pet {
     }
 
     fn update_idle_animation(&mut self, dt: f64, world: &World) {
-        if self.state != State::Idle
-            || self.dragging
-            || self.chase
-            || !self.has_support(world)
-            || !self.random_chance(dt * 0.01)
+        if self.state != State::Idle || self.dragging || self.chase || !self.has_support(world) {
+            return;
+        }
+        if self.auto_activities
+            && self.auto_activity_cooldown <= 0.0
+            && self.random_chance(dt * 0.1)
         {
+            let len = crate::activities::CATALOG.len();
+            let mut index = (self.random() * len as f64) as usize;
+            if self
+                .last_activity
+                .is_some_and(|last| len > 1 && crate::activities::CATALOG[index].id == last)
+            {
+                index = (index + 1) % len;
+            }
+            if let Some(spec) = crate::activities::CATALOG.get(index) {
+                self.last_activity = Some(spec.id);
+                self.activity = Some(spec.id);
+                self.auto_activity_cooldown = 20.0 + self.random() * 15.0;
+                self.set_state(State::Activity, spec.duration);
+                self.say(spec.phrase, spec.duration.min(3.0));
+                return;
+            }
+        }
+        if !self.random_chance(dt * 0.01) {
             return;
         }
         match (self.random() * 3.0) as u8 {
@@ -978,6 +1104,41 @@ impl Pet {
             });
         }
         (self.pos.y - self.floor_y(world)).abs() <= 3.0
+    }
+
+    pub(crate) fn socially_supported(&self, world: &World) -> bool {
+        !self.dragging && self.has_support(world)
+    }
+
+    fn update_gaze(&mut self, dt: f64, world: &World) {
+        let eye = Vec2::new(self.pos.x, self.pos.y - 40.0);
+        let dx = world.cursor.x - eye.x;
+        let dy = world.cursor.y - eye.y;
+        let length = dx.hypot(dy);
+        let target = if self.state == State::Sleep || !length.is_finite() || length >= 260.0 {
+            Vec2::default()
+        } else if length > 0.0 {
+            let amount = (length / 220.0).min(1.0);
+            Vec2::new(
+                (dx / length * amount).clamp(-1.0, 1.0),
+                (dy / length * amount).clamp(-1.0, 1.0),
+            )
+        } else {
+            Vec2::default()
+        };
+        let blend = 1.0 - (-12.0 * dt).exp();
+        self.gaze.x = if self.gaze.x.is_finite() {
+            self.gaze.x
+        } else {
+            0.0
+        };
+        self.gaze.y = if self.gaze.y.is_finite() {
+            self.gaze.y
+        } else {
+            0.0
+        };
+        self.gaze.x = (self.gaze.x + (target.x - self.gaze.x) * blend).clamp(-1.0, 1.0);
+        self.gaze.y = (self.gaze.y + (target.y - self.gaze.y) * blend).clamp(-1.0, 1.0);
     }
 
     fn nearest_edge<'a>(&self, world: &'a World) -> Option<(usize, &'a WindowInfo, f64)> {
@@ -1149,6 +1310,12 @@ impl Pet {
             .extend(world.windows.iter().map(|window| (window.id, window.rect)));
     }
     fn set_state(&mut self, state: State, duration: f64) {
+        if self.state == State::Activity && state != State::Activity {
+            self.activity = None;
+        }
+        if self.state == State::Social && state != State::Social {
+            self.social = None;
+        }
         if self.state != state {
             self.state = state;
             self.state_time = 0.0;

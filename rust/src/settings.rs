@@ -14,6 +14,8 @@ pub struct Settings {
     pub hide_fullscreen: bool,
     pub show_bubbles: bool,
     pub show_mood: bool,
+    pub social_enabled: bool,
+    pub auto_activities: bool,
     pub paused: bool,
     pub auto_updates: bool,
     pub update_repo: String,
@@ -28,6 +30,8 @@ impl Default for Settings {
             hide_fullscreen: true,
             show_bubbles: true,
             show_mood: true,
+            social_enabled: true,
+            auto_activities: true,
             paused: false,
             auto_updates: true,
             update_repo: option_env!("MASCOT_UPDATE_REPO")
@@ -292,6 +296,8 @@ mod tests {
         assert_eq!(s.target_fps, DEFAULT_FPS);
         assert!(s.hide_fullscreen);
         assert!(!s.paused);
+        assert!(s.social_enabled);
+        assert!(s.auto_activities);
     }
     #[test]
     fn autostart_match_requires_exact_quoted_executable_path() {
@@ -330,6 +336,12 @@ mod tests {
         s.save(&p).unwrap();
         assert_eq!(Settings::load(&p).unwrap().skin, Skin::Claude);
         assert_eq!(Settings::load(&p).unwrap().target_fps, 144);
+        s.social_enabled = false;
+        s.auto_activities = false;
+        s.save(&p).unwrap();
+        let toggled = Settings::load(&p).unwrap();
+        assert!(!toggled.social_enabled);
+        assert!(!toggled.auto_activities);
         std::fs::remove_file(p).unwrap();
     }
 

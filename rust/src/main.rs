@@ -60,6 +60,8 @@ struct Options {
     trace: Option<PathBuf>,
     skin: Option<Skin>,
     fps: Option<u32>,
+    pets: usize,
+    activity: Option<claude_mascot::activities::ActivityId>,
 }
 fn options() -> Result<Options, String> {
     let mut o = Options {
@@ -73,18 +75,40 @@ fn options() -> Result<Options, String> {
         trace: None,
         skin: None,
         fps: None,
+        pets: 1,
+        activity: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--help" | "-h" => {
-                println!("Claude Mascot Rust\n  --skin claude\n  --fps 30..240         Set and persist target frame rate\n  --config FILE\n  --preview DIRECTORY   Export Claude animation states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
+                println!("Claude Mascot Rust\n  --skin claude\n  --pets 1..8           Start with several Claudes\n  --activity SLUG       Start a catalog scene after landing\n  --fps 30..240         Set and persist target frame rate\n  --config FILE\n  --preview DIRECTORY   Export Claude animation states as PNGs\n  --headless            Run deterministic simulation checks without a window\n  --smoke-test SECONDS  Open native pet, then exit automatically\n  --trace FILE          Write smoke-test metrics as JSON");
                 std::process::exit(0)
             }
             "--preview" => {
                 o.preview = Some(args.next().ok_or("--preview needs a directory")?.into())
             }
             "--headless" => o.headless = true,
+            "--pets" => {
+                o.pets = args
+                    .next()
+                    .ok_or("--pets needs a number")?
+                    .parse()
+                    .map_err(|_| "Pets must be an integer from 1 to 8")?;
+                if !(1..=8).contains(&o.pets) {
+                    return Err("Pets must be an integer from 1 to 8".into());
+                }
+            }
+            "--activity" => {
+                let slug = args.next().ok_or("--activity needs a scene slug")?;
+                o.activity = Some(
+                    claude_mascot::activities::CATALOG
+                        .iter()
+                        .find(|spec| spec.slug == slug)
+                        .ok_or("Unknown activity slug")?
+                        .id,
+                );
+            }
             "--check-updates" => o.check_updates = true,
             "--skip-update-check" => o.skip_update_check = true,
             "--inspect-window" => o.inspect = true,
@@ -261,6 +285,16 @@ fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
 fn preview(dir: &std::path::Path) -> Result<(), String> {
     use claude_mascot::engine::State;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let catalog: Vec<_> = claude_mascot::activities::CATALOG.iter().map(|scene|
+        serde_json::json!({"id":scene.id.0,"source":format!("{}.svg",scene.slug),
+            "title":scene.title_ru,"category":scene.group.label_ru(),
+            "duration_seconds":scene.duration,"phrase":scene.phrase,"menu_command":100+scene.id.0 as u16})
+    ).collect();
+    std::fs::write(
+        dir.join("catalog.json"),
+        serde_json::to_vec_pretty(&catalog).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let mut r = Renderer::new()?;
     let states = [
         State::Idle,
@@ -320,27 +354,91 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
                 .save_png(&dir.join(format!("Claude-{state:?}-{phase:.1}.png")))?;
         }
     }
+    for scene in &claude_mascot::activities::CATALOG {
+        for phase in [0.4, scene.duration * 0.5, scene.duration * 0.92] {
+            let mut pet = Pet::new(1, Skin::Claude, Vec2::default());
+            pet.state = State::Activity;
+            pet.activity = Some(scene.id);
+            pet.time = phase;
+            pet.state_time = phase;
+            r.frame(&pet, false)
+                .save_png(&dir.join(format!("Scene-{}-{phase:.1}.png", scene.slug)))?;
+        }
+    }
+    use claude_mascot::social::{SocialActivity, SocialKind, SocialRole};
+    for kind in [
+        SocialKind::Greeting,
+        SocialKind::HighFive,
+        SocialKind::DanceTogether,
+        SocialKind::ShareLaptop,
+        SocialKind::Comfort,
+    ] {
+        for phase in [0.4, 1.2, 2.0] {
+            let mut pair = claude_mascot::render::Canvas::new(WIDTH + 90, HEIGHT);
+            for (index, role) in [SocialRole::Initiator, SocialRole::Partner]
+                .into_iter()
+                .enumerate()
+            {
+                let mut pet = Pet::new(index as u64 + 1, Skin::Claude, Vec2::default());
+                pet.state = if kind == SocialKind::ShareLaptop && index == 0 {
+                    State::Laptop
+                } else {
+                    State::Social
+                };
+                pet.social = Some(SocialActivity {
+                    kind,
+                    role,
+                    partner_id: 2 - index as u64,
+                    elapsed: phase,
+                });
+                pet.facing = if index == 0 { 1.0 } else { -1.0 };
+                pet.time = phase;
+                pet.state_time = phase;
+                let frame = r.frame(&pet, false);
+                for y in 0..HEIGHT {
+                    for x in 0..WIDTH {
+                        let pixel = frame.pixels[y * WIDTH + x];
+                        if pixel >> 24 != 0 {
+                            pair.pixels[y * pair.width + x + index * 90] = pixel;
+                        }
+                    }
+                }
+            }
+            pair.save_png(&dir.join(format!("Pair-{kind:?}-{phase:.1}.png")))?;
+        }
+    }
     Ok(())
 }
 fn headless(o: &Options) -> Result<(), String> {
     let world = World::default();
-    let mut pets = vec![
-        Pet::new(1, Skin::Claude, Vec2::new(500.0, 50.0)),
-        Pet::new(2, Skin::Claude, Vec2::new(700.0, 50.0)),
-    ];
+    let mut pets: Vec<_> = (0..o.pets.max(2))
+        .map(|i| {
+            Pet::new(
+                i as u64 + 1,
+                Skin::Claude,
+                Vec2::new(400.0 + i as f64 * 70.0, 50.0),
+            )
+        })
+        .collect();
+    let mut social = claude_mascot::social::SocialCoordinator::new();
     for _ in 0..36000 {
         for p in &mut pets {
             p.update(1.0 / 60.0, &world);
             if !p.pos.x.is_finite()
                 || !p.pos.y.is_finite()
+                || !p.vel.x.is_finite()
+                || !p.vel.y.is_finite()
+                || !p.gaze.x.is_finite()
+                || !p.gaze.y.is_finite()
                 || !p.satisfaction.is_finite()
                 || !(0.0..=100.0).contains(&p.satisfaction)
             {
                 return Err("Nonfinite simulation state".into());
             }
         }
+        social.update(1.0 / 60.0, pets.iter_mut(), &world);
     }
-    let result = serde_json::json!({"headless_steps":36000,"simulated_seconds":600,"pets":pets.len(),"finite":true});
+    let result = serde_json::json!({"headless_steps":36000,"simulated_seconds":600,"pets":pets.len(),"finite":true,"social_started":social.stats.started,"social_completed":social.stats.completed,"social_cancelled":social.stats.cancelled});
     println!("{result}");
     if let Some(path) = &o.trace {
         std::fs::write(path, serde_json::to_vec_pretty(&result).unwrap())
@@ -446,7 +544,33 @@ mod native {
         if o.inspect {
             entries[0].host.expose_for_inspection()?;
         }
-        let mut next_id = 2;
+        for index in 1..o.pets {
+            entries.push(spawn(
+                Pet::new(
+                    index as u64 + 1,
+                    Skin::Claude,
+                    Vec2::new(
+                        (area.x + area.w / 2.0 + index as f64 * 72.0)
+                            .clamp(area.x + 60.0, area.right() - 60.0),
+                        area.y + 60.0,
+                    ),
+                ),
+                &settings,
+                false,
+            )?);
+            if o.inspect {
+                entries.last().unwrap().host.expose_for_inspection()?;
+            }
+        }
+        for entry in &mut entries {
+            entry.pet.auto_activities = settings.auto_activities;
+            if let Some(activity) = o.activity {
+                entry.pet.command(Command::Activity(activity), &world);
+            }
+        }
+        let mut social = claude_mascot::social::SocialCoordinator::new();
+        social.enabled = settings.social_enabled;
+        let mut next_id = o.pets as u64 + 1;
         let start = Instant::now();
         let mut previous = start;
         let mut world_at = start - Duration::from_secs(1);
@@ -455,6 +579,8 @@ mod native {
         let mut accumulator = 0.0;
         let mut frames = 0u64;
         let mut presented_frames = 0u64;
+        let mut activity_presented_frames = 0u64;
+        let mut social_presented_frames = 0u64;
         let mut drag_presented_frames = 0u64;
         let mut dragging_seconds = 0.0;
         let mut last_drag_frame = None::<Instant>;
@@ -602,6 +728,7 @@ mod native {
             let mut spawn_skins = Vec::new();
             let mut rebuild = false;
             let mut save = false;
+            let friend_count = entries.len();
             for (i, c) in commands {
                 let Some(e) = entries.get_mut(i) else {
                     continue;
@@ -640,6 +767,14 @@ mod native {
                         settings.show_mood = !settings.show_mood;
                         save = true;
                     }
+                    45 => {
+                        settings.social_enabled = !settings.social_enabled;
+                        save = true;
+                    }
+                    46 => {
+                        settings.auto_activities = !settings.auto_activities;
+                        save = true;
+                    }
                     70 => {
                         e.drag = None;
                         e.pet.dragging = false;
@@ -651,6 +786,37 @@ mod native {
                     74 => e.pet.command(Command::Laptop, &world),
                     75 => e.pet.command(Command::Stretch, &world),
                     76 => e.pet.command(Command::LookAround, &world),
+                    90..=95 => {
+                        use claude_mascot::social::SocialKind;
+                        let kind = match c {
+                            91 => Some(SocialKind::Greeting),
+                            92 => Some(SocialKind::HighFive),
+                            93 => Some(SocialKind::DanceTogether),
+                            94 => Some(SocialKind::ShareLaptop),
+                            95 => Some(SocialKind::Comfort),
+                            _ => None,
+                        };
+                        e.pet.command(Command::Wander, &world);
+                        let prompt = if !settings.social_enabled {
+                            "включи взаимодействия в меню друзей"
+                        } else if friend_count < 2 {
+                            "позови ещё одного Клода :)"
+                        } else {
+                            "кто со мной? подойди поближе!"
+                        };
+                        e.pet.bubble = Some(prompt.into());
+                        e.pet.bubble_time = 2.0;
+                        if settings.social_enabled && friend_count > 1 {
+                            social.request_for(e.pet.id, kind);
+                        }
+                    }
+                    100..=174 => {
+                        if let Some(activity) =
+                            claude_mascot::activities::ActivityId::new((c - 100) as usize)
+                        {
+                            e.pet.command(Command::Activity(activity), &world);
+                        }
+                    }
                     50..=52 => {
                         settings.scale = match c {
                             50 => 0.75,
@@ -744,6 +910,11 @@ mod native {
             if save {
                 settings.save(&o.config)?;
             }
+            social.enabled = settings.social_enabled;
+            for entry in &mut entries {
+                entry.pet.auto_activities = settings.auto_activities;
+            }
+            social.update(0.0, entries.iter_mut().map(|entry| &mut entry.pet), &world);
             let hidden = settings.hide_fullscreen && world.fullscreen_active();
             if settings.paused || hidden {
                 accumulator = 0.0;
@@ -754,6 +925,11 @@ mod native {
                         e.pet
                             .update(1.0 / claude_mascot::timing::SIMULATION_HZ as f64, &world);
                     }
+                    social.update(
+                        1.0 / claude_mascot::timing::SIMULATION_HZ as f64,
+                        entries.iter_mut().map(|entry| &mut entry.pet),
+                        &world,
+                    );
                     accumulator -= 1.0 / claude_mascot::timing::SIMULATION_HZ as f64;
                 }
             }
@@ -781,6 +957,9 @@ mod native {
                         claude_mascot::engine::State::Laptop => 74,
                         claude_mascot::engine::State::Stretch => 75,
                         claude_mascot::engine::State::LookAround => 76,
+                        claude_mascot::engine::State::Activity => {
+                            e.pet.activity.map_or(1, |id| 100 + id.0 as u16)
+                        }
                         _ if e.pet.chase => 5,
                         _ => 1,
                     },
@@ -792,6 +971,8 @@ mod native {
                     target_fps: settings.target_fps,
                     show_bubbles: settings.show_bubbles,
                     show_mood: settings.show_mood,
+                    social_enabled: settings.social_enabled,
+                    auto_activities: settings.auto_activities,
                     satisfaction: e.pet.satisfaction.clamp(0.0, 100.0).round() as u8,
                 });
                 e.host.set_visible(!hidden);
@@ -803,6 +984,12 @@ mod native {
                     let y = (e.pet.pos.y - FEET_Y * settings.scale).round() as i32;
                     e.host.present(&frame.pixels, x, y)?;
                     presented_frames += 1;
+                    if e.pet.state == claude_mascot::engine::State::Activity {
+                        activity_presented_frames += 1;
+                    }
+                    if e.pet.social.is_some() {
+                        social_presented_frames += 1;
+                    }
                     if e.drag.as_ref().is_some_and(|d| d.moved) {
                         drag_presented_frames += 1;
                         let presented_at = Instant::now();
@@ -829,6 +1016,8 @@ mod native {
                 "version": env!("CARGO_PKG_VERSION"),
                 "native_frames": frames,
                 "presented_frames": presented_frames,
+                "activity_presented_frames": activity_presented_frames,
+                "social_presented_frames": social_presented_frames,
                 "drag_presented_frames": drag_presented_frames,
                 "dragging_seconds": dragging_seconds,
                 "max_drag_frame_interval_ms": max_drag_frame_interval * 1000.0,
@@ -837,6 +1026,9 @@ mod native {
                 "world_snapshots": snapshots,
                 "elapsed_seconds": start.elapsed().as_secs_f64(),
                 "pets": entries.len(),
+                "social_started": social.stats.started,
+                "social_completed": social.stats.completed,
+                "social_cancelled": social.stats.cancelled,
                 "exit": "clean"
             });
             std::fs::write(path, serde_json::to_vec_pretty(&result).unwrap())

@@ -1,3 +1,4 @@
+pub mod activities;
 pub mod engine;
 #[cfg(windows)]
 pub mod media;
@@ -5,6 +6,7 @@ pub mod media;
 pub mod platform;
 pub mod render;
 pub mod settings;
+pub mod social;
 pub mod timing;
 #[cfg(windows)]
 pub mod update;

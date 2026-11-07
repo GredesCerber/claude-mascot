@@ -53,6 +53,8 @@ pub struct MenuState {
     pub target_fps: u32,
     pub show_bubbles: bool,
     pub show_mood: bool,
+    pub social_enabled: bool,
+    pub auto_activities: bool,
     pub satisfaction: u8,
 }
 impl Default for MenuState {
@@ -68,6 +70,8 @@ impl Default for MenuState {
             target_fps: crate::timing::DEFAULT_FPS,
             show_bubbles: true,
             show_mood: true,
+            social_enabled: true,
+            auto_activities: true,
             satisfaction: 75,
         }
     }
@@ -679,6 +683,32 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
     for id in 74..=76 {
         check_menu(activities.raw(), id, s.selected_action == id);
     }
+    let scenes = MenuGuard::popup()?;
+    for (index, spec) in crate::activities::CATALOG.iter().enumerate() {
+        if crate::activities::CATALOG[..index]
+            .iter()
+            .any(|previous| previous.group == spec.group)
+        {
+            continue;
+        }
+        let group = MenuGuard::popup()?;
+        for scene in crate::activities::CATALOG
+            .iter()
+            .filter(|scene| scene.group == spec.group)
+        {
+            let command = 100 + scene.id.0 as u16;
+            if !append_item(group.raw(), command, scene.title_ru, 0) {
+                return None;
+            }
+            check_menu(group.raw(), command, s.selected_action == command);
+        }
+        if !append_submenu(scenes.raw(), group, spec.group.label_ru()) {
+            return None;
+        }
+    }
+    if !append_submenu(activities.raw(), scenes, "Все занятия (75)") {
+        return None;
+    }
     if !append_submenu(root.raw(), activities, "Заняться")
         || !append_item(
             root.raw(),
@@ -726,8 +756,27 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
     }
 
     let friends = MenuGuard::popup()?;
+    let together = MenuGuard::popup()?;
+    for (id, label) in [
+        (90, "Выбрать вместе"),
+        (91, "Поздороваться"),
+        (92, "Дать пять"),
+        (93, "Потанцевать вместе"),
+        (94, "Посидеть за ноутбуком"),
+        (95, "Подбодрить друга"),
+    ] {
+        if !append_item(together.raw(), id, label, 0) {
+            return None;
+        }
+    }
     if !append_item(friends.raw(), 20, "Позвать Claude", 0)
-        || !append_item(friends.raw(), 30, "Убрать этого питомца", 0)
+        || !append_submenu(friends.raw(), together, "Вместе с другом")
+        || !append_item(friends.raw(), 45, "Взаимодействовать с друзьями", 0)
+    {
+        return None;
+    }
+    check_menu(friends.raw(), 45, s.social_enabled);
+    if !append_item(friends.raw(), 30, "Убрать этого питомца", 0)
         || !append_submenu(root.raw(), friends, "Друзья")
     {
         return None;
@@ -740,6 +789,7 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         (42, "Запускать вместе с Windows", s.autostart),
         (43, "Показывать реплики", s.show_bubbles),
         (44, "Показывать настроение", s.show_mood),
+        (46, "Случайные занятия", s.auto_activities),
     ] {
         if !append_item(settings.raw(), id, label, 0) {
             return None;
@@ -1320,7 +1370,7 @@ mod tests {
 
             for id in [
                 1, 2, 3, 4, 5, 20, 30, 31, 40, 41, 42, 43, 44, 50, 51, 52, 60, 61, 70, 71, 72, 73,
-                74, 75, 76, 80, 81, 82, 83, 84,
+                45, 46, 74, 75, 76, 80, 81, 82, 83, 84, 90, 91, 92, 93, 94, 95,
             ] {
                 let _ = command_state(menu.raw(), id);
             }
@@ -1336,6 +1386,24 @@ mod tests {
             assert_ne!(command_state(menu.raw(), 74) & MF_CHECKED, 0);
             assert_eq!(command_state(menu.raw(), 75) & MF_CHECKED, 0);
             assert_ne!(command_state(menu.raw(), 82) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 45) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 46) & MF_CHECKED, 0);
+            for scene in &crate::activities::CATALOG {
+                assert_eq!(
+                    command_state(menu.raw(), 100 + scene.id.0 as u16) & MF_CHECKED,
+                    0
+                );
+            }
+            let selected_scene = build_menu_tree(MenuState {
+                selected_action: 121,
+                social_enabled: false,
+                auto_activities: false,
+                ..MenuState::default()
+            })
+            .unwrap();
+            assert_ne!(command_state(selected_scene.raw(), 121) & MF_CHECKED, 0);
+            assert_eq!(command_state(selected_scene.raw(), 45) & MF_CHECKED, 0);
+            assert_eq!(command_state(selected_scene.raw(), 46) & MF_CHECKED, 0);
         }
     }
 }

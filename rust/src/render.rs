@@ -1,6 +1,8 @@
 //! CPU renderer. Pixels are premultiplied ARGB u32 (BGRA in little-endian memory).
 //! No native handles or behavior decisions live here.
+use crate::activities::ActivityGroup;
 use crate::engine::{Pet, State, CURSOR_HOLD_DY};
+use crate::social::{SocialKind, SocialRole};
 use fontdue::{Font, FontSettings};
 use std::{collections::BTreeMap, path::Path};
 
@@ -136,6 +138,19 @@ impl Renderer {
     }
     pub fn frame(&mut self, pet: &Pet, show_bubbles: bool) -> &Canvas {
         self.canvas.clear();
+        if pet.state == State::Activity && !pet.dragging {
+            if let Some(activity) = pet.activity {
+                crate::activities::draw_activity(
+                    &mut self.canvas,
+                    activity,
+                    pet.state_time,
+                    pet.facing,
+                    pet.gaze,
+                );
+            }
+        }
+        // Activities contribute only their props. Claude's recognizable body,
+        // palette, eyes, and proportions always come from this renderer.
         draw_claude(&mut self.canvas, pet);
         if self.show_mood {
             let width = 42.0;
@@ -380,13 +395,60 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let phase = (p.time * 7.0) as usize % 2;
     let climbing = p.state == State::Climb && !p.dragging;
     let climb_phase = (p.state_time * 5.0).floor() as usize % 4;
-    let dancing = p.state == State::Dance;
-    let waving = p.state == State::Wave;
+    let social = if p.state == State::Social && !p.dragging {
+        p.social.as_ref()
+    } else {
+        None
+    };
+    let social_kind = social.map(|activity| activity.kind);
+    let social_greeting = social_kind == Some(SocialKind::Greeting);
+    let social_high_five = social_kind == Some(SocialKind::HighFive);
+    let social_dance = social_kind == Some(SocialKind::DanceTogether);
+    let social_comfort = social_kind == Some(SocialKind::Comfort);
+    let social_watching_laptop = social_kind == Some(SocialKind::ShareLaptop)
+        && social.is_some_and(|activity| activity.role == SocialRole::Partner);
+    let activity = if p.state == State::Activity && !p.dragging {
+        p.activity.map(|id| id.spec())
+    } else {
+        None
+    };
+    let activity_group = activity.map(|spec| spec.group);
+    let activity_slug = activity.map_or("", |spec| spec.slug);
+    let activity_food = activity_group == Some(ActivityGroup::Food);
+    let activity_strength = activity_group == Some(ActivityGroup::Strength);
+    let activity_nature = activity_group == Some(ActivityGroup::Nature);
+    let activity_reflection = activity_group == Some(ActivityGroup::Reflection);
+    let activity_celebration = activity_group == Some(ActivityGroup::Celebration);
+    let activity_coding = activity_group == Some(ActivityGroup::Coding);
+    let activity_laptop = matches!(
+        activity_slug,
+        "angry-at-laptop" | "writing-software-code" | "developer-pair-programming-scene"
+    );
+    let activity_angry = matches!(
+        activity_slug,
+        "angry-at-laptop" | "angry-pixel-coffee" | "angry-powerful-lightning"
+    );
+    let activity_sad = matches!(activity_slug, "crying-sad-reaction" | "broken-heart-sad");
+    let activity_sleepy = matches!(activity_slug, "sleeping-soundly" | "artboard-24cla2");
+    let activity_lightning = activity_slug == "angry-powerful-lightning";
+    let activity_wizard = activity_slug == "artboard-2cla3";
+    let activity_document = activity_slug == "reading-data-document";
+    let activity_malware = activity_slug == "malware-detection-window";
+    let activity_ninja = activity_slug == "stealth-ninja-security";
+    let dancing = p.state == State::Dance || social_dance;
+    let waving = p.state == State::Wave || social_greeting;
     let typing = p.state == State::Laptop && !p.dragging;
+    let typing_pose = typing || activity_coding;
+    let laptop_front = typing || activity_laptop;
     let stretching = p.state == State::Stretch && !p.dragging;
     let looking = p.state == State::LookAround && !p.dragging;
-    let laptop_phase = p.state_time.clamp(0.0, 10.0);
-    let angry = p.satisfaction < 30.0;
+    let laptop_phase = if activity_laptop {
+        let duration = activity.map_or(3.8, |spec| spec.duration).max(0.1);
+        (p.state_time / duration * 10.0).clamp(0.0, 10.0)
+    } else {
+        p.state_time.clamp(0.0, 10.0)
+    };
+    let angry = p.satisfaction < 30.0 || activity_angry;
     let bob = if climbing {
         if climb_phase < 2 {
             -0.35
@@ -406,7 +468,11 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         0.0
     };
-    let top = if sitting || typing { -8.0 } else { -11.0 } + bob;
+    let top = if sitting || typing || social_watching_laptop {
+        -8.0
+    } else {
+        -11.0
+    } + bob;
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
         let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
         let sy = 1.0 - p.squash.clamp(0.0, 1.0) * 0.32;
@@ -432,7 +498,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
                 if lifted { 2.4 } else { 3.2 },
                 0xFFB85C3E,
             );
-        } else if typing {
+        } else if typing_pose {
             px(*lx, -3.0, 1.0, 3.0, 0xFFB85C3E);
         } else if stretching {
             px(
@@ -471,7 +537,9 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(*lx, -3.0 + bob, 1.0, h, 0xFFB85C3E);
         }
     }
-    let torso_shift = if climbing {
+    let torso_shift = if social_high_five || social_watching_laptop || activity_nature {
+        0.3
+    } else if climbing {
         (climb_phase as f64 - 1.5) * 0.12
     } else {
         0.0
@@ -480,7 +548,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     px(-6.0, top + 7.0, 12.0, 1.0, 0xFFB85C3E);
     px(-5.0, top, 3.0, 1.0, 0xFFE8957A);
     drop(px);
-    if typing {
+    if laptop_front {
         draw_laptop(c, laptop_phase);
     }
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
@@ -516,9 +584,63 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(trail_arm_x, top + 1.0, 2.0, 2.8, 0xFFD97757);
         px(lead_x, top - 2.0, 2.0, 2.0, 0xFFD97757);
         px(trail_x, top + 2.0, 2.0, 2.0, 0xFFD97757);
-    } else if typing {
+    } else if social_high_five {
+        // `px` already mirrors local coordinates for left-facing Claude.
+        let lead_x = 6.0;
+        let trailing_x = -8.0;
+        px(lead_x, top - 1.0, 2.0, 3.0, 0xFFD97757);
+        px(trailing_x, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(lead_x + 1.0, top - 3.0, 2.0, 2.0, 0xFFE8957A);
+    } else if social_comfort {
+        let open = (p.state_time * 2.0).sin().abs() * 0.35;
+        px(-9.0, top + 1.5 + open, 3.0, 2.0, 0xFFD97757);
+        px(-11.0, top + 0.5 + open, 2.0, 2.0, 0xFFE8957A);
+        px(6.0, top + 1.5 - open, 3.0, 2.0, 0xFFD97757);
+        px(9.0, top + 0.5 - open, 2.0, 2.0, 0xFFE8957A);
+    } else if social_watching_laptop {
+        // The watcher leans toward the shared laptop and keeps arms relaxed.
+        px(-7.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(5.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+    } else if activity_strength {
+        // Lift on the effort beat, lower into a short breathing pause.
+        let beat = (p.state_time * 1.9).fract();
+        if beat > 0.19 && beat < 0.59 {
+            px(-8.0, top - 1.0, 2.0, 3.0, 0xFFD97757);
+            px(6.0, top - 1.0, 2.0, 3.0, 0xFFD97757);
+            px(-9.0, top - 3.0, 2.0, 2.0, 0xFFE8957A);
+            px(7.0, top - 3.0, 2.0, 2.0, 0xFFE8957A);
+        } else {
+            px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+            px(6.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        }
+    } else if activity_food {
+        // A small centered hold pose supports the food prop without changing
+        // Claude's torso size or replacing the canonical hands.
+        px(-7.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(-3.0, top + 4.0, 2.0, 2.0, 0xFFE8957A);
+        px(1.0, top + 4.0, 2.0, 2.0, 0xFFE8957A);
+    } else if activity_nature {
+        // Claude reaches down gently toward the growing prop beside him.
+        px(-7.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(5.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(7.0, top + 5.0, 2.0, 2.0, 0xFFE8957A);
+    } else if activity_reflection {
+        // A tiny hand-to-chin gesture reads as thought while keeping the face
+        // and its eye grid in the same canonical position.
+        px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
+        px(4.0, top + 1.0, 2.0, 2.0, 0xFFE8957A);
+        px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+    } else if activity_celebration {
+        let beat = (p.state_time * 3.0).fract();
+        let lift = if beat < 0.65 { -2.0 } else { -1.0 };
+        px(-9.0, top + lift, 2.0, 3.0, 0xFFD97757);
+        px(-11.0, top + lift - 1.0, 2.0, 2.0, 0xFFE8957A);
+        px(7.0, top + lift, 2.0, 3.0, 0xFFD97757);
+        px(9.0, top + lift - 1.0, 2.0, 2.0, 0xFFE8957A);
+    } else if typing_pose {
         // Arms angle inward from Claude's shoulders to the laptop keyboard.
-        let tapping = ((laptop_phase * 5.0).floor() as usize).is_multiple_of(2);
+        let tapping = ((laptop_phase * 3.0).floor() as usize).is_multiple_of(2);
         px(-7.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
         px(5.0, top + 2.0, 2.0, 2.0, 0xFFD97757);
         px(-5.0, top + 4.0, 2.0, 2.0, 0xFFD97757);
@@ -575,24 +697,58 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(6.0, arm, 2.0, 2.0, 0xFFD97757);
         }
     }
-    let glance = if looking {
+    let blink = (p.time * 0.2).fract() > 0.98;
+    let activity_closed_eyes = activity_sleepy && (p.state_time * 1.5).fract() > 0.35;
+    let eyes_closed =
+        p.state == State::Sleep || p.state == State::Happy || activity_closed_eyes || blink;
+    let facing_sign = if p.facing < 0.0 { -1.0 } else { 1.0 };
+    let cursor_gaze_x = if p.gaze.x.is_finite() {
+        p.gaze.x.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let cursor_gaze_y = if p.gaze.y.is_finite() {
+        p.gaze.y.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let look_around_x = if looking {
         if ((p.state_time * 2.0).floor() as usize).is_multiple_of(2) {
-            0.8
+            1.0
         } else {
-            -0.6
+            -1.0
         }
     } else {
         0.0
     };
+    let social_look = if social_watching_laptop || social_greeting || social_high_five {
+        facing_sign * 0.8
+    } else {
+        0.0
+    };
+    let gaze_x = if eyes_closed {
+        0.0
+    } else {
+        (cursor_gaze_x + look_around_x + social_look).clamp(-1.0, 1.0)
+    };
+    let gaze_y = if eyes_closed { 0.0 } else { cursor_gaze_y };
+    let eye_offset_x = gaze_x * facing_sign * 0.16;
+    let eye_offset_y = gaze_y * 0.1;
     for eye in [-4.0, 3.0] {
-        if p.state == State::Sleep || (p.time * 0.2).fract() > 0.98 {
+        if p.state == State::Sleep || activity_closed_eyes || blink {
             px(eye - 0.3, top + 3.2, 1.6, 0.6, 0xFF1B1B1B);
         } else if p.state == State::Happy {
             px(eye - 0.3, top + 2.8, 0.6, 0.6, 0xFF1B1B1B);
             px(eye + 0.3, top + 2.2, 0.6, 0.6, 0xFF1B1B1B);
             px(eye + 0.9, top + 2.8, 0.6, 0.6, 0xFF1B1B1B);
         } else {
-            px(eye + glance, top + 2.0, 1.0, 2.0, 0xFF1B1B1B);
+            px(
+                eye + eye_offset_x,
+                top + 2.0 + eye_offset_y,
+                1.0,
+                2.0,
+                0xFF1B1B1B,
+            );
         }
     }
     if angry && !matches!(p.state, State::Happy | State::Sleep) {
@@ -606,10 +762,109 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(-5.5, top + 4.6, 1.5, 0.8, 0xAAFF8C96);
         px(4.0, top + 4.6, 1.5, 0.8, 0xAAFF8C96);
     }
+    if social_greeting {
+        px(-0.4, top + 5.1, 1.8, 1.1, 0xFF6E3029);
+    }
+    if activity_sad {
+        // Keep the canonical eye locations and mark sadness with a small
+        // downturned mouth and restrained tear pixels.
+        px(-0.5, top + 5.1, 1.0, 0.6, 0xFF6E3029);
+        px(-2.5, top + 4.7, 0.6, 1.0, 0xFF8BC9D2);
+        px(2.0, top + 4.7, 0.6, 1.0, 0xFF8BC9D2);
+    }
+    if social_comfort {
+        let elapsed = social.map_or(0.0, |activity| activity.elapsed);
+        let pulse = (elapsed * 2.0).sin() * 1.5;
+        heart(c, FEET_X + 17.0, FEET_Y - 102.0 - pulse, 0xBFFF9AAE);
+    }
+    if social_high_five {
+        // A small contact sparkle marks the raised hand without adding another
+        // character or desktop object to the renderer.
+        let x = FEET_X + p.facing.signum() * 39.0;
+        let y = FEET_Y - 73.0;
+        c.rect(x - 1.0, y - 4.0, 2.0, 8.0, 0xFFD9C88C);
+        c.rect(x - 4.0, y - 1.0, 8.0, 2.0, 0xFFD9C88C);
+        if social.is_some_and(|activity| (activity.elapsed * 8.0).fract() < 0.5) {
+            // Pixel-center rounding is half-open at the canvas center; this
+            // asymmetric pair mirrors exactly when facing is reversed.
+            c.pixel(x.round() as i32 - 4, y.round() as i32 - 3, 0xFFD9C88C);
+            c.pixel(x.round() as i32 + 3, y.round() as i32 + 3, 0xFFD9C88C);
+        }
+    }
+    if activity_lightning {
+        // The source bolt was masked with its imported body; this small
+        // green bolt sits above Claude's head and stays clear of the eyes.
+        let x = FEET_X + 17.0;
+        let y = FEET_Y + top * 5.0 - 16.0;
+        c.rect(x + 3.0, y, 5.0, 4.0, 0xFF78C56A);
+        c.rect(x + 1.0, y + 4.0, 5.0, 4.0, 0xFF78C56A);
+        c.rect(x - 1.0, y + 8.0, 5.0, 4.0, 0xFF78C56A);
+        c.rect(x - 3.0, y + 12.0, 5.0, 4.0, 0xFF78C56A);
+    }
+    if activity_wizard {
+        // A blue pointed hat preserves the activity cue without importing a
+        // differently proportioned face or body.
+        let x = FEET_X;
+        let y = FEET_Y + top * 5.0 - 18.0;
+        c.rect(x - 9.0, y + 12.0, 18.0, 3.0, 0xFF527CC2);
+        c.rect(x - 6.0, y + 8.0, 12.0, 4.0, 0xFF527CC2);
+        c.rect(x - 3.0, y + 4.0, 6.0, 4.0, 0xFF527CC2);
+        c.rect(x - 1.0, y, 3.0, 4.0, 0xFF527CC2);
+        c.rect(x - 7.0, y + 13.0, 3.0, 1.0, 0xFFE7C766);
+    }
+    if activity_ninja {
+        // Headband crosses the forehead above the canonical eye row.
+        let x = FEET_X;
+        let y = FEET_Y + (top + 1.0) * 5.0;
+        c.rect(x - 29.0, y, 58.0, 3.0, 0xFF4A9B54);
+        c.rect(x + 27.0, y + 1.0, 9.0, 2.0, 0xFF4A9B54);
+        c.rect(x + 33.0, y + 3.0, 2.0, 5.0, 0xFF4A9B54);
+    }
+    if activity_document {
+        // A page held beside the torso remains visible without covering
+        // Claude's canonical face or changing its proportions.
+        let x = if p.facing >= 0.0 {
+            FEET_X + 31.0
+        } else {
+            FEET_X - 51.0
+        };
+        let y = FEET_Y - 42.0;
+        c.rect(x, y, 20.0, 28.0, 0xFFE6E1D4);
+        c.rect(x + 3.0, y + 4.0, 13.0, 1.0, 0xFF8A8790);
+        c.rect(x + 3.0, y + 8.0, 11.0, 1.0, 0xFF8A8790);
+        c.rect(x + 3.0, y + 12.0, 13.0, 1.0, 0xFF8A8790);
+        c.rect(x + 3.0, y + 16.0, 9.0, 1.0, 0xFF8A8790);
+        c.rect(x + 3.0, y + 21.0, 13.0, 1.0, 0xFF8A8790);
+        c.rect(x - 2.0, y + 22.0, 4.0, 3.0, 0xFFD97757);
+    }
+    if activity_malware {
+        // Keep the security window small, green, and grounded beside Claude.
+        let x = FEET_X + 46.0;
+        let y = FEET_Y - 28.0;
+        c.rect(x, y, 29.0, 24.0, 0xFF56A95B);
+        c.rect(x + 2.0, y + 2.0, 25.0, 20.0, 0xFF263C32);
+        c.rect(x + 4.0, y + 5.0, 3.0, 3.0, 0xFF80D577);
+        c.rect(x + 10.0, y + 5.0, 3.0, 3.0, 0xFF80D577);
+        c.rect(x + 16.0, y + 5.0, 3.0, 3.0, 0xFF80D577);
+        c.rect(x + 4.0, y + 12.0, 18.0, 1.0, 0xFF79B978);
+        c.rect(x + 4.0, y + 16.0, 13.0, 1.0, 0xFF79B978);
+    }
+    if activity_document {
+        // Thin frames follow the fixed eye grid; the eyes remain visible in
+        // the open center of each lens.
+        let y = FEET_Y + (top + 1.7) * 5.0;
+        for x in [FEET_X - 26.0, FEET_X + 9.0] {
+            c.rect(x, y, 17.0, 1.0, 0xFF77528E);
+            c.rect(x, y + 1.0, 1.0, 8.0, 0xFF77528E);
+            c.rect(x + 16.0, y + 1.0, 1.0, 8.0, 0xFF77528E);
+            c.rect(x + 1.0, y + 8.0, 15.0, 1.0, 0xFF77528E);
+        }
+        c.rect(FEET_X - 9.0, y + 3.0, 18.0, 1.0, 0xFF77528E);
+    }
 }
 
-/// Draw a compact laptop in front of Claude's lower torso. The lid's open
-/// amount maps to the bounded ten second laptop state: open, type, then close.
+/// Draw the rear of a compact laptop lid with its keyboard deck facing Claude.
+/// The open amount maps to the ten second sequence: open, type, then close.
 fn draw_laptop(c: &mut Canvas, phase: f64) {
     let open = if phase < 1.0 {
         phase
@@ -624,42 +879,39 @@ fn draw_laptop(c: &mut Canvas, phase: f64) {
     let screen_h = 2.0 + open * 14.0;
     let screen_top = base_y - screen_h;
 
-    // Hinge and screen frame, with a bright editor surface and animated code.
-    c.rect(center - 19.0, base_y - 1.0, 38.0, 2.0, 0xFF5D514E);
-    c.rect(center - 17.0, screen_top, 34.0, screen_h, 0xFF332D31);
+    // The matte rear lid faces the viewer. A restrained four-pixel mark keeps
+    // it from reading as a lit screen; no display content faces outward.
+    c.rect(center - 19.0, base_y - 1.0, 38.0, 2.0, 0xFF514947);
+    c.rect(center - 17.0, screen_top, 34.0, screen_h, 0xFF393638);
     c.rect(
         center - 15.0,
         screen_top + 1.0,
         30.0,
         (screen_h - 2.0).max(0.0),
-        0xFF9DC6C1,
+        0xFF5B5653,
     );
-    if (1.0..9.0).contains(&phase) {
-        let blink = ((phase * 2.0).floor() as usize).is_multiple_of(2);
-        for row in 0..3 {
-            let variation = ((phase * 3.0 + row as f64).floor() as i32).rem_euclid(4);
-            let line_w = 8.0 + variation as f64 * 3.0;
-            let line_color = if row == 1 { 0xFF516E76 } else { 0xFF466B5C };
-            c.rect(
-                center - 12.0,
-                screen_top + 3.0 + row as f64 * 3.0,
-                line_w,
-                1.0,
-                line_color,
-            );
-        }
-        if blink {
-            c.rect(center + 9.0, screen_top + 9.0, 1.0, 2.0, 0xFFF4F0D2);
-        }
+    if open > 0.2 {
+        c.rect(
+            center - 1.0,
+            screen_top + screen_h * 0.48,
+            2.0,
+            2.0,
+            0xFFB7A99A,
+        );
     }
 
-    // Wide keyboard deck rests over the belly. Keys and trackpad distinguish
-    // the base from the screen, and give the animated hands a clear target.
-    c.rect(center - 22.0, base_y, 44.0, 3.0, 0xFFD1C5B4);
-    c.rect(center - 21.0, base_y, 42.0, 1.0, 0xFFF1E8D9);
-    c.rect(center - 17.0, base_y + 1.0, 22.0, 1.0, 0xFF706763);
-    c.rect(center + 7.0, base_y + 1.0, 7.0, 1.0, 0xFF706763);
-    c.rect(center - 3.0, base_y + 1.0, 8.0, 1.0, 0xFFAA9E90);
+    // The thin deck is seen from behind the lid. Its keyboard and wrists sit
+    // on the Claude-facing side; small alternating key highlights imply taps.
+    c.rect(center - 22.0, base_y, 44.0, 3.0, 0xFFB9ADA0);
+    c.rect(center - 21.0, base_y, 42.0, 1.0, 0xFFE0D5C8);
+    let key_flash =
+        if (1.0..9.0).contains(&phase) && ((phase * 3.0).floor() as usize).is_multiple_of(2) {
+            0xFF736B66
+        } else {
+            0xFF625B57
+        };
+    c.rect(center - 17.0, base_y + 1.0, 34.0, 1.0, key_flash);
+    c.rect(center - 3.0, base_y + 1.0, 7.0, 1.0, 0xFF9C9188);
 }
 
 #[cfg(test)]
@@ -680,7 +932,7 @@ mod tests {
         let mut renderer = Renderer::new().unwrap();
         let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
         pet.state = State::Laptop;
-        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/claude-only-preview");
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/qa-0.5.0/previews");
         std::fs::create_dir_all(&preview_dir).unwrap();
         let frames = [0.0, 0.5, 1.5, 3.0, 9.5];
         let mut snapshots = Vec::new();
@@ -695,21 +947,29 @@ mod tests {
         assert_ne!(snapshots[0], snapshots[1], "lid should visibly open");
         assert_ne!(
             snapshots[1], snapshots[2],
-            "screen should change into typing"
+            "lid should finish opening before typing"
         );
         assert_ne!(snapshots[2], snapshots[3], "typing should animate");
         assert_ne!(snapshots[3], snapshots[4], "lid should visibly close");
         let closed_laptop = snapshots[0]
             .iter()
-            .filter(|pixel| **pixel == 0xFF332D31)
+            .filter(|pixel| **pixel == 0xFF393638)
             .count();
         let open_laptop = snapshots[2]
             .iter()
-            .filter(|pixel| **pixel == 0xFF332D31)
+            .filter(|pixel| **pixel == 0xFF393638)
             .count();
         assert!(
             open_laptop > closed_laptop,
-            "open screen should have more visible area"
+            "open rear lid should have more visible area"
+        );
+        assert!(
+            snapshots[2].contains(&0xFFB7A99A),
+            "rear mark should be visible"
+        );
+        assert!(
+            !snapshots[2].contains(&0xFF9DC6C1),
+            "display should face Claude"
         );
     }
     #[test]
@@ -732,6 +992,181 @@ mod tests {
             look_a, look_b,
             "look-around should shift the eyes over time"
         );
+    }
+    #[test]
+    fn cursor_gaze_moves_open_eyes_and_stays_clamped() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.time = 1.0;
+        let neutral = renderer.frame(&pet, false).pixels.clone();
+
+        pet.gaze = crate::Vec2::new(-1.0, -1.0);
+        let left_up = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(neutral, left_up, "open eyes should follow cursor direction");
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/qa-0.5.0/previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("gaze-left-up.png"))
+            .unwrap();
+
+        pet.gaze = crate::Vec2::new(1.0, 1.0);
+        let right_down = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(left_up, right_down, "eyes should move in both axes");
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("gaze-right-down.png"))
+            .unwrap();
+
+        pet.gaze = crate::Vec2::new(50.0, -50.0);
+        let extreme = renderer.frame(&pet, false).pixels.clone();
+        pet.gaze = crate::Vec2::new(1.0, -1.0);
+        let bounded = renderer.frame(&pet, false).pixels.clone();
+        assert_eq!(extreme, bounded, "gaze should clamp to normalized bounds");
+
+        for state in [State::Sleep, State::Happy] {
+            pet.state = state;
+            pet.gaze = crate::Vec2::default();
+            let closed_neutral = renderer.frame(&pet, false).pixels.clone();
+            pet.gaze = crate::Vec2::new(-1.0, 1.0);
+            assert_eq!(
+                closed_neutral,
+                renderer.frame(&pet, false).pixels,
+                "closed eyes in {state:?} should ignore gaze"
+            );
+        }
+        pet.state = State::Idle;
+        pet.time = 4.95;
+        pet.gaze = crate::Vec2::default();
+        let blink = renderer.frame(&pet, false).pixels.clone();
+        pet.gaze = crate::Vec2::new(-1.0, 1.0);
+        assert_eq!(
+            blink,
+            renderer.frame(&pet, false).pixels,
+            "blink should ignore gaze"
+        );
+    }
+    #[test]
+    fn social_interactions_have_distinct_rendered_poses() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.time = 1.0;
+        let idle = renderer.frame(&pet, false).pixels.clone();
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/qa-0.5.0/previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        let cases = [
+            (SocialKind::Greeting, SocialRole::Initiator, 0.2),
+            (SocialKind::HighFive, SocialRole::Initiator, 0.2),
+            (SocialKind::DanceTogether, SocialRole::Partner, 0.2),
+            (SocialKind::ShareLaptop, SocialRole::Partner, 0.2),
+            (SocialKind::Comfort, SocialRole::Partner, 0.2),
+        ];
+        for (kind, role, elapsed) in cases {
+            pet.state = State::Social;
+            pet.state_time = elapsed;
+            pet.social = Some(crate::social::SocialActivity {
+                kind,
+                role,
+                partner_id: 2,
+                elapsed,
+            });
+            let pose = renderer.frame(&pet, false).pixels.clone();
+            assert_ne!(idle, pose, "{kind:?} should have a distinct social pose");
+            renderer
+                .canvas
+                .save_png(&preview_dir.join(format!("social-{kind:?}.png").to_lowercase()))
+                .unwrap();
+            if matches!(
+                kind,
+                SocialKind::Greeting
+                    | SocialKind::HighFive
+                    | SocialKind::DanceTogether
+                    | SocialKind::Comfort
+            ) {
+                pet.state_time = 0.8;
+                pet.social.as_mut().unwrap().elapsed = 0.8;
+                let later = renderer.frame(&pet, false).pixels.clone();
+                assert_ne!(
+                    pose, later,
+                    "{kind:?} should animate through its interaction"
+                );
+            }
+        }
+    }
+    #[test]
+    fn high_five_reaches_toward_friend_when_facing_left_or_right() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.time = 1.0;
+        pet.state = State::Social;
+        pet.state_time = 0.25;
+        pet.social = Some(crate::social::SocialActivity {
+            kind: SocialKind::HighFive,
+            role: SocialRole::Initiator,
+            partner_id: 2,
+            elapsed: 0.25,
+        });
+        pet.facing = 1.0;
+        let right_facing = renderer.frame(&pet, false).pixels.clone();
+        pet.facing = -1.0;
+        let left_facing = renderer.frame(&pet, false).pixels.clone();
+        let hand_bounds = |pixels: &[u32]| {
+            let mut xs = (WIDTH, 0);
+            for y in 135..160 {
+                for x in 0..WIDTH {
+                    if pixels[y * WIDTH + x] == 0xFFE8957A {
+                        xs.0 = xs.0.min(x);
+                        xs.1 = xs.1.max(x);
+                    }
+                }
+            }
+            xs
+        };
+        let right = hand_bounds(&right_facing);
+        let left = hand_bounds(&left_facing);
+        assert!(
+            right.0 > FEET_X as usize,
+            "right-facing lead hand should reach right"
+        );
+        assert!(
+            left.1 < FEET_X as usize,
+            "left-facing lead hand should reach left"
+        );
+        let right_offset = (right.0 + right.1) as f64 * 0.5 - FEET_X;
+        let left_offset = FEET_X - (left.0 + left.1) as f64 * 0.5;
+        assert!((right_offset - 40.0).abs() <= 1.0);
+        assert!((left_offset - 40.0).abs() <= 1.0);
+    }
+    #[test]
+    fn activity_state_uses_pack_drawing_path() {
+        let mut renderer = Renderer::new().unwrap();
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        renderer.show_mood = false;
+        pet.state = State::Activity;
+        for (index, spec) in crate::activities::CATALOG.iter().enumerate() {
+            pet.activity = Some(crate::activities::ActivityId::new(index).unwrap());
+            pet.state_time = spec.duration * 0.5;
+            let activity = &renderer.frame(&pet, false).pixels;
+            assert_eq!(
+                activity[184 * WIDTH + 140],
+                0xFFD97757,
+                "{} torso",
+                spec.slug
+            );
+            for (eye_x, label) in [(120, "left"), (155, "right")] {
+                let eye_present = (170..184)
+                    .any(|y| (eye_x..eye_x + 12).any(|x| activity[y * WIDTH + x] == 0xFF1B1B1B));
+                assert!(eye_present, "{} canonical {label} eye", spec.slug);
+            }
+            assert_eq!(activity[0], 0, "{} transparent margin", spec.slug);
+        }
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/qa-0.5.0/previews");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("activity-sample.png"))
+            .unwrap();
     }
     #[test]
     fn climbing_frames_alternate_and_stay_inside_mascot_bounds() {

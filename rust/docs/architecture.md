@@ -1,4 +1,4 @@
-# Rust port architecture (0.4.0)
+# Rust port architecture (0.5.0)
 
 The Python application at the repository root is preserved. Rust is Windows-first
 and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0.
@@ -7,6 +7,8 @@ and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0
 | --- | --- |
 | lib.rs | Physical-pixel coordinates, rectangles, world/window snapshots |
 | engine.rs | Deterministic physics, support tracking, mood, commands and timed activities |
+| social.rs | Fixed-capacity pair coordinator, stable IDs, 10 Hz selection, smooth timelines and cancellation |
+| activities.rs | Props adapted from all 75 illustrations, Russian catalog, bounded decorative timelines and accents |
 | render.rs | Procedural Claude/laptop pixels, gestures, cached fonts, transparent BGRA and PNG previews |
 | platform.rs | Win32 windows, DPI, alpha hit testing, bounded message pump, capture, menus, tray |
 | main.rs | Fixed-step simulation, frame deadlines, input routing, visibility and lifecycle |
@@ -34,6 +36,24 @@ Airborne pose commands wait for landing. Drag, jump, replacement commands and
 missing support interrupt activities. Seeded idle choices require support and
 no active chase or drag. Bubbles are cosmetic and do not observe actual typing.
 
+Social pairs reserve at most two pets on the same physical support; independent
+pair slots and cooldowns prevent one pet from joining two scenes. The coordinator
+borrows pets through a fixed array of up to eight references. Active timers and
+cancellation advance each physics step; only new pair selection runs at 10 Hz.
+The host also validates ownership after input/removal without advancing time.
+Gaze is a bounded, smoothed world direction; the renderer mirrors it into local
+face coordinates. The laptop shows its rear lid to the viewer.
+
+Pack prop data is compiled from SVG rectangles by an offline importer.
+Imported character bodies/faces are removed. The renderer always draws the
+canonical Claude for every activity, sharing body proportions, palette, eye
+geometry and scale; only gestures, expression and accessories vary. This keeps
+artwork variations from changing the pet's style.
+The executable reads integer cell records directly, without parsing SVG or PNG
+on animation frames. Catalog activities use one Activity state plus an ID,
+so the state machine does not need 75 duplicate branches. Preset start scenes
+can be selected with --activity SLUG; --pets 1..8 starts additional Claudes.
+
 Legacy Tagilla settings resolve to Claude. The retired custom_atlas key is
 ignored on read and omitted on write. Unknown character names still fail.
 
@@ -46,6 +66,6 @@ Native tests cover menu commands, message budgeting, coalescing and handle clean
 PNG previews and bounded smoke traces complement these checks.
 
 Physical mixed-DPI testing, installed MSI lifecycle and a published updater
-cycle require separate acceptance. See [0.4.0 verification](verification-0.4.0.md)
+cycle require separate acceptance. See [0.5.0 verification](verification-0.5.0.md)
 and [remaining work](planning/PLAN-RU.md). Historical reports describe their
 named versions; removed features in those reports are not current capabilities.
