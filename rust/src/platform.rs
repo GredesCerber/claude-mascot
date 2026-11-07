@@ -55,6 +55,8 @@ pub struct MenuState {
     pub show_mood: bool,
     pub social_enabled: bool,
     pub auto_activities: bool,
+    pub auto_reactions: bool,
+    pub desktop_perches: bool,
     pub satisfaction: u8,
 }
 impl Default for MenuState {
@@ -72,6 +74,8 @@ impl Default for MenuState {
             show_mood: true,
             social_enabled: true,
             auto_activities: true,
+            auto_reactions: true,
+            desktop_perches: true,
             satisfaction: 75,
         }
     }
@@ -764,6 +768,8 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         (93, "Потанцевать вместе"),
         (94, "Посидеть за ноутбуком"),
         (95, "Подбодрить друга"),
+        (96, "Поиграть в догонялки"),
+        (97, "Построить башенку"),
     ] {
         if !append_item(together.raw(), id, label, 0) {
             return None;
@@ -790,6 +796,8 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         (43, "Показывать реплики", s.show_bubbles),
         (44, "Показывать настроение", s.show_mood),
         (46, "Случайные занятия", s.auto_activities),
+        (47, "Реагировать на пользователя", s.auto_reactions),
+        (48, "Прыгать на значки рабочего стола", s.desktop_perches),
     ] {
         if !append_item(settings.raw(), id, label, 0) {
             return None;
@@ -1117,6 +1125,7 @@ unsafe extern "system" fn enum_window(hwnd: HWND, data: LPARAM) -> BOOL {
     let mut class_buf = [0u16; 128];
     let class_len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
     let class = String::from_utf16_lossy(&class_buf[..class_len.max(0) as usize]);
+    let is_file_manager = matches!(class.as_str(), "CabinetWClass" | "ExploreWClass");
     if matches!(
         class.as_str(),
         "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
@@ -1191,6 +1200,8 @@ unsafe extern "system" fn enum_window(hwnd: HWND, data: LPARAM) -> BOOL {
         title,
         active,
         fullscreen,
+        is_file_manager,
+        is_desktop_icon: false,
     });
     1
 }
@@ -1370,7 +1381,7 @@ mod tests {
 
             for id in [
                 1, 2, 3, 4, 5, 20, 30, 31, 40, 41, 42, 43, 44, 50, 51, 52, 60, 61, 70, 71, 72, 73,
-                45, 46, 74, 75, 76, 80, 81, 82, 83, 84, 90, 91, 92, 93, 94, 95,
+                45, 46, 47, 48, 74, 75, 76, 80, 81, 82, 83, 84, 90, 91, 92, 93, 94, 95, 96, 97,
             ] {
                 let _ = command_state(menu.raw(), id);
             }
@@ -1388,6 +1399,8 @@ mod tests {
             assert_ne!(command_state(menu.raw(), 82) & MF_CHECKED, 0);
             assert_ne!(command_state(menu.raw(), 45) & MF_CHECKED, 0);
             assert_ne!(command_state(menu.raw(), 46) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 47) & MF_CHECKED, 0);
+            assert_ne!(command_state(menu.raw(), 48) & MF_CHECKED, 0);
             for scene in &crate::activities::CATALOG {
                 assert_eq!(
                     command_state(menu.raw(), 100 + scene.id.0 as u16) & MF_CHECKED,

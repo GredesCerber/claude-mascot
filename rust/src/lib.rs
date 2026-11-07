@@ -1,4 +1,6 @@
 pub mod activities;
+#[cfg(windows)]
+pub mod desktop;
 pub mod engine;
 #[cfg(windows)]
 pub mod media;
@@ -63,6 +65,10 @@ pub struct WindowInfo {
     pub title: String,
     pub active: bool,
     pub fullscreen: bool,
+    /// True only for a native file-manager window identified by its class.
+    pub is_file_manager: bool,
+    /// Desktop shortcut/icon geometry supplied by the platform snapshot.
+    pub is_desktop_icon: bool,
 }
 
 #[derive(Clone, Debug)]

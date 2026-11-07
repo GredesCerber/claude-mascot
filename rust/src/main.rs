@@ -55,6 +55,7 @@ struct Options {
     inspect: bool,
     preview: Option<PathBuf>,
     headless: bool,
+    desktop_probe: bool,
     seconds: Option<f64>,
     config: PathBuf,
     trace: Option<PathBuf>,
@@ -70,6 +71,7 @@ fn options() -> Result<Options, String> {
         inspect: false,
         preview: None,
         headless: false,
+        desktop_probe: false,
         seconds: None,
         config: config_path(),
         trace: None,
@@ -89,6 +91,7 @@ fn options() -> Result<Options, String> {
                 o.preview = Some(args.next().ok_or("--preview needs a directory")?.into())
             }
             "--headless" => o.headless = true,
+            "--desktop-probe" => o.desktop_probe = true,
             "--pets" => {
                 o.pets = args
                     .next()
@@ -212,6 +215,11 @@ fn run() -> Result<(), String> {
         }
     }
     let o = options()?;
+    #[cfg(windows)]
+    if o.desktop_probe {
+        platform_probe(&o)?;
+        return Ok(());
+    }
     if let Some(dir) = &o.preview {
         return preview(dir);
     }
@@ -282,6 +290,25 @@ fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
     }
     Err("Update check timed out".into())
 }
+#[cfg(windows)]
+fn platform_probe(o: &Options) -> Result<(), String> {
+    claude_mascot::platform::initialize()?;
+    let monitor = claude_mascot::desktop::DesktopMonitor::new();
+    std::thread::sleep(std::time::Duration::from_millis(1800));
+    let icons = monitor.snapshot();
+    let result = serde_json::json!({
+        "version":env!("CARGO_PKG_VERSION"),
+        "icon_count":icons.len(),
+        "rectangles":icons.iter().map(|icon|serde_json::json!({"x":icon.rect.x,"y":icon.rect.y,"w":icon.rect.w,"h":icon.rect.h})).collect::<Vec<_>>()
+    });
+    let bytes = serde_json::to_vec_pretty(&result).map_err(|e| e.to_string())?;
+    if let Some(path) = &o.trace {
+        std::fs::write(path, &bytes).map_err(|e| e.to_string())?;
+    }
+    println!("{}", String::from_utf8_lossy(&bytes));
+    Ok(())
+}
+
 fn preview(dir: &std::path::Path) -> Result<(), String> {
     use claude_mascot::engine::State;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -390,6 +417,7 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
                     role,
                     partner_id: 2 - index as u64,
                     elapsed: phase,
+                    partner_offset: Vec2::new(if index == 0 { 90.0 } else { -90.0 }, 0.0),
                 });
                 pet.facing = if index == 0 { 1.0 } else { -1.0 };
                 pet.time = phase;
@@ -407,8 +435,72 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
             pair.save_png(&dir.join(format!("Pair-{kind:?}-{phase:.1}.png")))?;
         }
     }
+    preview_social_play(dir)?;
     Ok(())
 }
+
+fn preview_social_play(dir: &std::path::Path) -> Result<(), String> {
+    use claude_mascot::{
+        engine::State,
+        social::{SocialCoordinator, SocialKind},
+        Rect,
+    };
+    let world = World {
+        work_areas: vec![Rect::new(0.0, 0.0, 1000.0, 700.0)],
+        ..World::default()
+    };
+    let mut renderer = Renderer::new()?;
+    for kind in [SocialKind::Tag, SocialKind::Tower] {
+        let mut pets: Vec<_> = [300.0, 380.0]
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let mut pet = Pet::new(i as u64 + 1, Skin::Claude, Vec2::new(x, 700.0));
+                pet.state = State::Idle;
+                pet.auto_activities = false;
+                pet.auto_reactions = false;
+                pet
+            })
+            .collect();
+        let mut social = SocialCoordinator::new();
+        social.request_for(1, Some(kind));
+        social.update(0.0, pets.iter_mut(), &world);
+        for step in 1..=1680 {
+            for pet in &mut pets {
+                pet.update(1.0 / 240.0, &world);
+            }
+            social.update(1.0 / 240.0, pets.iter_mut(), &world);
+            if ![24, 144, 288, 720, 1440, 1680].contains(&step) {
+                continue;
+            }
+            let mut scene = claude_mascot::render::Canvas::new(1100, 400);
+            scene.rect(0.0, 300.0, 1100.0, 1.0, 0xFF68706B);
+            for pet in &pets {
+                let frame = renderer.frame(pet, true);
+                let ox = (pet.pos.x + 50.0 - FEET_X).round() as i32;
+                let oy = (pet.pos.y - 400.0 - FEET_Y).round() as i32;
+                for y in 0..HEIGHT {
+                    for x in 0..WIDTH {
+                        let color = frame.pixels[y * WIDTH + x];
+                        let a = color >> 24;
+                        if a == 0 {
+                            continue;
+                        }
+                        let channel = |shift: u32| (((color >> shift) & 255u32) * 255 / a).min(255);
+                        scene.pixel(
+                            ox + x as i32,
+                            oy + y as i32,
+                            (a << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0),
+                        );
+                    }
+                }
+            }
+            scene.save_png(&dir.join(format!("Play-{kind:?}-{:04}.png", step)))?;
+        }
+    }
+    Ok(())
+}
+
 fn headless(o: &Options) -> Result<(), String> {
     let world = World::default();
     let mut pets: Vec<_> = (0..o.pets.max(2))
@@ -523,7 +615,10 @@ mod native {
             settings.skin = s;
         }
         let mut renderer = Renderer::new()?;
+        let desktop = claude_mascot::desktop::DesktopMonitor::new();
+        desktop.set_enabled(settings.desktop_perches);
         let mut world = platform::snapshot();
+        desktop.apply(&mut world);
         let area = world.area_at(world.cursor);
         let media = claude_mascot::media::MediaMonitor::new();
         let updates = UpdateService::new(
@@ -564,6 +659,8 @@ mod native {
         }
         for entry in &mut entries {
             entry.pet.auto_activities = settings.auto_activities;
+            entry.pet.auto_reactions = settings.auto_reactions;
+            entry.pet.display_scale = settings.scale;
             if let Some(activity) = o.activity {
                 entry.pet.command(Command::Activity(activity), &world);
             }
@@ -607,6 +704,7 @@ mod native {
             };
             if now.duration_since(world_at) >= interval {
                 world = platform::snapshot();
+                desktop.apply(&mut world);
                 media.apply(&mut world);
                 world_at = now;
                 snapshots += 1;
@@ -775,6 +873,18 @@ mod native {
                         settings.auto_activities = !settings.auto_activities;
                         save = true;
                     }
+                    47 => {
+                        settings.auto_reactions = !settings.auto_reactions;
+                        save = true;
+                    }
+                    48 => {
+                        settings.desktop_perches = !settings.desktop_perches;
+                        desktop.set_enabled(settings.desktop_perches);
+                        // Refresh immediately so removed icon supports disappear on the next step.
+                        world = platform::snapshot();
+                        desktop.apply(&mut world);
+                        save = true;
+                    }
                     70 => {
                         e.drag = None;
                         e.pet.dragging = false;
@@ -786,7 +896,7 @@ mod native {
                     74 => e.pet.command(Command::Laptop, &world),
                     75 => e.pet.command(Command::Stretch, &world),
                     76 => e.pet.command(Command::LookAround, &world),
-                    90..=95 => {
+                    90..=97 => {
                         use claude_mascot::social::SocialKind;
                         let kind = match c {
                             91 => Some(SocialKind::Greeting),
@@ -794,6 +904,8 @@ mod native {
                             93 => Some(SocialKind::DanceTogether),
                             94 => Some(SocialKind::ShareLaptop),
                             95 => Some(SocialKind::Comfort),
+                            96 => Some(SocialKind::Tag),
+                            97 => Some(SocialKind::Tower),
                             _ => None,
                         };
                         e.pet.command(Command::Wander, &world);
@@ -913,6 +1025,8 @@ mod native {
             social.enabled = settings.social_enabled;
             for entry in &mut entries {
                 entry.pet.auto_activities = settings.auto_activities;
+                entry.pet.auto_reactions = settings.auto_reactions;
+                entry.pet.display_scale = settings.scale;
             }
             social.update(0.0, entries.iter_mut().map(|entry| &mut entry.pet), &world);
             let hidden = settings.hide_fullscreen && world.fullscreen_active();
@@ -973,6 +1087,8 @@ mod native {
                     show_mood: settings.show_mood,
                     social_enabled: settings.social_enabled,
                     auto_activities: settings.auto_activities,
+                    auto_reactions: settings.auto_reactions,
+                    desktop_perches: settings.desktop_perches,
                     satisfaction: e.pet.satisfaction.clamp(0.0, 100.0).round() as u8,
                 });
                 e.host.set_visible(!hidden);
@@ -1024,6 +1140,9 @@ mod native {
                 "physics_steps": physics_steps,
                 "target_fps": settings.target_fps,
                 "world_snapshots": snapshots,
+                "desktop_icon_count": world.windows.iter().filter(|w| w.is_desktop_icon).count(),
+                "desktop_perches": settings.desktop_perches,
+                "auto_reactions": settings.auto_reactions,
                 "elapsed_seconds": start.elapsed().as_secs_f64(),
                 "pets": entries.len(),
                 "social_started": social.stats.started,

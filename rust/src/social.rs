@@ -1,7 +1,7 @@
 //! Deterministic, bounded coordinator for friendly interactions between pets.
 use crate::{
     engine::{Pet, Skin, State},
-    Vec2, World,
+    Rect, Vec2, World,
 };
 
 const CAP: usize = 8;
@@ -16,6 +16,17 @@ pub enum SocialKind {
     DanceTogether,
     ShareLaptop,
     Comfort,
+    Tag,
+    Tower,
+}
+
+/// Per-frame movement owned by the social coordinator. The normal pet physics
+/// still advances these motions; this is only an intent/landing contract.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SocialMotion {
+    Run { target_x: f64, speed: f64 },
+    Leap { target: Vec2, owner_id: u64 },
+    Perch { target: Vec2, owner_id: u64 },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocialRole {
@@ -28,6 +39,8 @@ pub struct SocialActivity {
     pub role: SocialRole,
     pub partner_id: u64,
     pub elapsed: f64,
+    /// Position relative to the partner for renderers that need a shared pose.
+    pub partner_offset: Vec2,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,6 +57,11 @@ struct Pair {
     kind: SocialKind,
     elapsed: f64,
     duration: f64,
+    phase: f64,
+    chaser: u64,
+    support: Rect,
+    upper: u64,
+    tower_anchor_dx: f64,
 }
 impl Default for Pair {
     fn default() -> Self {
@@ -53,6 +71,11 @@ impl Default for Pair {
             kind: SocialKind::Greeting,
             elapsed: 0.0,
             duration: 0.0,
+            phase: 0.0,
+            chaser: 0,
+            support: Rect::default(),
+            upper: 0,
+            tower_anchor_dx: 0.0,
         }
     }
 }
@@ -108,6 +131,18 @@ impl SocialCoordinator {
     /// Request a specific interaction with a selected pet and its nearest eligible friend.
     pub fn request_for(&mut self, pet_id: u64, kind: Option<SocialKind>) {
         self.request = Some((Some(pet_id), kind));
+        self.request_age = 0.0;
+    }
+
+    /// Convenience request used by the desktop menu.
+    pub fn request_tag(&mut self, pet_id: Option<u64>) {
+        self.request = Some((pet_id, Some(SocialKind::Tag)));
+        self.request_age = 0.0;
+    }
+
+    /// Convenience request used by the desktop menu.
+    pub fn request_tower(&mut self, pet_id: Option<u64>) {
+        self.request = Some((pet_id, Some(SocialKind::Tower)));
         self.request_age = 0.0;
     }
 
@@ -193,6 +228,92 @@ impl SocialCoordinator {
             };
             let ai = find(refs, n, pair.a);
             let bi = find(refs, n, pair.b);
+            if matches!(pair.kind, SocialKind::Tag | SocialKind::Tower) {
+                let valid = match (ai, bi) {
+                    (Some(a), Some(b)) => {
+                        let pa = refs[a].as_deref().unwrap();
+                        let pb = refs[b].as_deref().unwrap();
+                        let common = active_marker(pa, pair, pair.a, pair.b)
+                            && active_marker(pb, pair, pair.b, pair.a)
+                            && !pa.dragging
+                            && !pb.dragging
+                            && !pa.chase
+                            && !pb.chase;
+                        common
+                            && if pair.kind == SocialKind::Tower {
+                                pa.socially_supported(world)
+                                    && support_rect_matches(pa, pair.support, world)
+                                    && matches!(pb.state, State::Jump | State::Social | State::Fall)
+                            } else {
+                                pa.socially_supported(world)
+                                    && pb.socially_supported(world)
+                                    && pa.surface_id == pb.surface_id
+                                    && same_support(pa, pb, world)
+                                    && support_rect_matches(pa, pair.support, world)
+                                    && support_rect_matches(pb, pair.support, world)
+                            }
+                    }
+                    _ => false,
+                };
+                let landed = if pair.kind == SocialKind::Tower {
+                    find(refs, n, pair.upper).is_some_and(|i| {
+                        refs[i].as_deref().is_some_and(|p| {
+                            matches!(p.social_motion, Some(crate::social::SocialMotion::Perch { owner_id, .. }) if owner_id == if pair.upper == pair.a { pair.b } else { pair.a })
+                        })
+                    })
+                } else {
+                    false
+                };
+                if !valid {
+                    self.pairs[ix] = None;
+                    self.finish_pair(pair, refs, n, world, false);
+                    continue;
+                }
+                pair.elapsed += dt;
+                pair.phase = if pair.kind == SocialKind::Tower {
+                    if landed {
+                        pair.phase + dt
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (pair.phase - dt).max(0.0)
+                };
+                if pair.kind == SocialKind::Tag {
+                    let pa = refs[ai.unwrap()].as_deref().unwrap();
+                    let pb = refs[bi.unwrap()].as_deref().unwrap();
+                    if (pa.pos.x - pb.pos.x).abs() <= 64.0 && pair.phase <= 0.0 {
+                        pair.chaser = if pair.chaser == pair.a {
+                            pair.b
+                        } else {
+                            pair.a
+                        };
+                        pair.phase = 0.7;
+                    }
+                    self.set_tag_motion(pair, refs, n);
+                } else if landed {
+                    self.set_perch_anchor(pair, refs, n);
+                }
+                let finished = if pair.kind == SocialKind::Tag {
+                    pair.elapsed >= pair.duration
+                } else {
+                    pair.phase >= 2.5
+                };
+                for id in [pair.a, pair.b] {
+                    if let Some(i) = find(refs, n, id) {
+                        if let Some(s) = refs[i].as_deref_mut().and_then(|p| p.social.as_mut()) {
+                            s.elapsed = pair.elapsed;
+                        }
+                    }
+                }
+                if finished {
+                    self.pairs[ix] = None;
+                    self.finish_pair(pair, refs, n, world, true);
+                } else {
+                    self.pairs[ix] = Some(pair);
+                }
+                continue;
+            }
             let valid = match (ai, bi) {
                 (Some(a), Some(b)) => {
                     let pa = refs[a].as_deref().unwrap();
@@ -237,6 +358,68 @@ impl SocialCoordinator {
         }
     }
 
+    fn set_tag_motion(&self, pair: Pair, refs: &mut [Option<&mut Pet>; CAP], n: usize) {
+        let Some(ai) = find(refs, n, pair.a) else {
+            return;
+        };
+        let Some(bi) = find(refs, n, pair.b) else {
+            return;
+        };
+        let (a, b) = (
+            refs[ai].as_deref().unwrap().pos.x,
+            refs[bi].as_deref().unwrap().pos.x,
+        );
+        let bounds = (pair.support.x + 25.0, pair.support.right() - 25.0);
+        for (id, other_x) in [(pair.a, b), (pair.b, a)] {
+            let Some(i) = find(refs, n, id) else { continue };
+            let pet = refs[i].as_deref_mut().unwrap();
+            let chasing = id == pair.chaser;
+            let pausing = chasing && pair.phase > 0.0;
+            let target_x = if pausing {
+                pet.pos.x
+            } else if chasing {
+                other_x
+            } else if pet.pos.x < other_x {
+                bounds.0
+            } else {
+                bounds.1
+            };
+            pet.social_motion = Some(crate::social::SocialMotion::Run {
+                target_x,
+                speed: if pausing {
+                    0.0
+                } else if chasing {
+                    155.0
+                } else {
+                    190.0
+                },
+            });
+            pet.facing = if target_x < pet.pos.x { -1.0 } else { 1.0 };
+        }
+    }
+
+    fn set_perch_anchor(&self, pair: Pair, refs: &mut [Option<&mut Pet>; CAP], n: usize) {
+        let owner_id = if pair.upper == pair.a { pair.b } else { pair.a };
+        let Some(owner_i) = find(refs, n, owner_id) else {
+            return;
+        };
+        let Some(upper_i) = find(refs, n, pair.upper) else {
+            return;
+        };
+        let owner = refs[owner_i].as_deref().unwrap();
+        let scale = refs[upper_i]
+            .as_deref()
+            .unwrap()
+            .display_scale
+            .clamp(0.5, 2.5);
+        let target = Vec2::new(
+            owner.pos.x + pair.tower_anchor_dx,
+            owner.pos.y - 55.0 * scale,
+        );
+        refs[upper_i].as_deref_mut().unwrap().social_motion =
+            Some(crate::social::SocialMotion::Perch { target, owner_id });
+    }
+
     fn tick(&mut self, refs: &mut [Option<&mut Pet>; CAP], n: usize, world: &World) {
         if self.age < INITIAL_DELAY && self.request.is_none() {
             return;
@@ -264,7 +447,7 @@ impl SocialCoordinator {
                         continue;
                     }
                     let d = (a.pos.x - b.pos.x).hypot(a.pos.y - b.pos.y);
-                    if d > MAX_DISTANCE
+                    if !distance_allowed(requested_kind, d)
                         || (a.pos.y - b.pos.y).abs() > 20.0
                         || !same_support(a, b, world)
                     {
@@ -312,9 +495,10 @@ impl SocialCoordinator {
                 }
                 let a = refs[i].as_deref().unwrap();
                 let b = refs[j].as_deref().unwrap();
+                let requested = self.request.and_then(|(_, k)| k);
                 if !same_support(a, b, world)
                     || (a.pos.y - b.pos.y).abs() > 20.0
-                    || (a.pos.x - b.pos.x).abs() > MAX_DISTANCE
+                    || !distance_allowed(requested, (a.pos.x - b.pos.x).abs())
                 {
                     continue;
                 }
@@ -345,6 +529,14 @@ impl SocialCoordinator {
         refs: &mut [Option<&mut Pet>; CAP],
         world: &World,
     ) -> bool {
+        if !can_start_kind(
+            kind,
+            refs[i].as_deref().unwrap(),
+            refs[j].as_deref().unwrap(),
+            world,
+        ) {
+            return false;
+        }
         let slot = self.pairs.iter().position(Option::is_none);
         let Some(slot) = slot else { return false };
         let a_id = refs[i].as_deref().unwrap().id;
@@ -352,21 +544,51 @@ impl SocialCoordinator {
         let duration = duration(kind);
         let ax = refs[i].as_deref().unwrap().pos.x;
         let bx = refs[j].as_deref().unwrap().pos.x;
+        let initial_tag_separation = if kind == SocialKind::Tag && (ax - bx).abs() < 64.0 {
+            0.7
+        } else {
+            0.0
+        };
         for (idx, role, partner, other_x) in [
             (i, SocialRole::Initiator, b_id, bx),
             (j, SocialRole::Partner, a_id, ax),
         ] {
             let p = refs[idx].as_deref_mut().unwrap();
+            let offset = match kind {
+                SocialKind::ShareLaptop => Vec2::new(
+                    if role == SocialRole::Initiator {
+                        42.0
+                    } else {
+                        -42.0
+                    },
+                    0.0,
+                ),
+                SocialKind::HighFive => Vec2::new(
+                    if role == SocialRole::Initiator {
+                        30.0
+                    } else {
+                        -30.0
+                    },
+                    0.0,
+                ),
+                _ => Vec2::default(),
+            };
             p.social = Some(SocialActivity {
                 kind,
                 role,
                 partner_id: partner,
                 elapsed: 0.0,
+                partner_offset: offset,
             });
             p.vel = Vec2::default();
             p.facing = if p.pos.x < other_x { 1.0 } else { -1.0 };
             p.set_social_state(kind, role, duration, world);
-            p.say_social(kind, role);
+            if kind == SocialKind::Tower && role == SocialRole::Initiator {
+                p.bubble = None;
+                p.bubble_time = 0.0;
+            } else {
+                p.say_social(kind, role);
+            }
         }
         self.pairs[slot] = Some(Pair {
             a: a_id,
@@ -374,7 +596,28 @@ impl SocialCoordinator {
             kind,
             elapsed: 0.0,
             duration,
+            phase: initial_tag_separation,
+            chaser: a_id,
+            support: support_rect(refs[i].as_deref().unwrap(), world),
+            upper: if kind == SocialKind::Tower { b_id } else { 0 },
+            tower_anchor_dx: 0.0,
         });
+        let pair = self.pairs[slot].unwrap();
+        if kind == SocialKind::Tag {
+            self.set_tag_motion(pair, refs, CAP);
+        } else if kind == SocialKind::Tower {
+            let lower_id = a_id;
+            let upper_id = b_id;
+            let lower_pos = refs[i].as_deref().unwrap().pos;
+            if let Some(upper_i) = find(refs, CAP, upper_id) {
+                let upper = refs[upper_i].as_deref_mut().unwrap();
+                let scale = upper.display_scale.clamp(0.5, 2.5);
+                upper.social_motion = Some(crate::social::SocialMotion::Leap {
+                    target: Vec2::new(lower_pos.x, lower_pos.y - 55.0 * scale),
+                    owner_id: lower_id,
+                });
+            }
+        }
         cooldown(&mut self.cooldowns, a_id, 12.0 + (a_id % 19) as f64);
         cooldown(&mut self.cooldowns, b_id, 12.0 + (b_id % 19) as f64);
         self.stats.started += 1;
@@ -391,12 +634,34 @@ impl SocialCoordinator {
         for id in [p.a, p.b] {
             if let Some(i) = find(refs, n, id) {
                 if let Some(pet) = refs[i].as_deref_mut() {
+                    let was_perched = matches!(
+                        pet.social_motion,
+                        Some(crate::social::SocialMotion::Perch { .. })
+                    );
+                    if matches!(p.kind, SocialKind::Tag | SocialKind::Tower) {
+                        pet.social_motion = None;
+                        if p.kind == SocialKind::Tower && id == p.upper {
+                            if completed && was_perched {
+                                let room_left = pet.pos.x - (p.support.x + 25.0);
+                                let room_right = p.support.right() - 25.0 - pet.pos.x;
+                                let direction = if room_right >= room_left { 1.0 } else { -1.0 };
+                                let scale = pet.display_scale.clamp(0.5, 2.5);
+                                pet.vel = Vec2::new(direction * 230.0, -330.0 * scale);
+                                pet.state = State::Jump;
+                                pet.state_time = 0.0;
+                            } else {
+                                pet.vel.x = pet.vel.x.clamp(-45.0, 45.0);
+                                pet.vel.y = pet.vel.y.max(0.0);
+                            }
+                        }
+                    }
                     if pet
                         .social
                         .is_some_and(|s| s.partner_id == if id == p.a { p.b } else { p.a })
                     {
                         pet.social = None;
                         if pet.state == State::Social
+                            || (p.kind == SocialKind::Tag && pet.state == State::Run)
                             || (p.kind == SocialKind::ShareLaptop
                                 && id == p.a
                                 && pet.state == State::Laptop)
@@ -501,11 +766,13 @@ fn choose(a: &Pet, b: &Pet, age: f64) -> SocialKind {
     if a.satisfaction < 35.0 || b.satisfaction < 35.0 {
         SocialKind::Comfort
     } else {
-        match ((a.id ^ b.id).wrapping_add(age as u64)) % 5 {
-            0 => SocialKind::Greeting,
-            1 => SocialKind::HighFive,
-            2 => SocialKind::DanceTogether,
-            3 => SocialKind::ShareLaptop,
+        match ((a.id ^ b.id).wrapping_add(age as u64)) % 23 {
+            0 => SocialKind::Tag,
+            1 if a.satisfaction >= 65.0 && b.satisfaction >= 65.0 => SocialKind::Tower,
+            2 => SocialKind::Greeting,
+            3..=7 => SocialKind::HighFive,
+            8..=12 => SocialKind::DanceTogether,
+            13..=17 => SocialKind::ShareLaptop,
             _ => SocialKind::Comfort,
         }
     }
@@ -517,6 +784,8 @@ fn duration(k: SocialKind) -> f64 {
         SocialKind::DanceTogether => 4.0,
         SocialKind::ShareLaptop => 10.0,
         SocialKind::Comfort => 4.0,
+        SocialKind::Tag => 7.5,
+        SocialKind::Tower => 8.0,
     }
 }
 fn same_support(a: &Pet, b: &Pet, w: &World) -> bool {
@@ -529,6 +798,63 @@ fn same_support(a: &Pet, b: &Pet, w: &World) -> bool {
         }
         _ => false,
     }
+}
+
+fn distance_allowed(kind: Option<SocialKind>, distance: f64) -> bool {
+    match kind {
+        Some(SocialKind::Tag) => distance <= 240.0,
+        Some(SocialKind::Tower) => distance <= 175.0,
+        _ => distance <= MAX_DISTANCE,
+    }
+}
+
+fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
+    if !same_support(a, b, w) {
+        return false;
+    }
+    let support = support_rect(a, w);
+    match kind {
+        SocialKind::Tag => {
+            support.w >= 320.0
+                && a.pos.x >= support.x + 25.0
+                && a.pos.x <= support.right() - 25.0
+                && b.pos.x >= support.x + 25.0
+                && b.pos.x <= support.right() - 25.0
+        }
+        SocialKind::Tower => {
+            let work_area = w.area_at(Vec2::new(a.pos.x, support.y));
+            let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.5);
+            let headroom = support.y - work_area.y;
+            let dismount_room =
+                (a.pos.x - (support.x + 25.0)).max(support.right() - 25.0 - a.pos.x);
+            support.w >= 180.0
+                && headroom >= 110.0 * scale + 53.0
+                && dismount_room >= 75.0 * scale
+                && a.pos.x >= support.x + 35.0
+                && a.pos.x <= support.right() - 35.0
+                && b.pos.x >= support.x + 35.0
+                && b.pos.x <= support.right() - 35.0
+        }
+        _ => true,
+    }
+}
+
+fn support_rect(p: &Pet, w: &World) -> Rect {
+    if let Some(id) = p.surface_id {
+        if let Some(window) = w.windows.iter().find(|x| x.id == id && x.rect.is_valid()) {
+            return window.rect;
+        }
+    }
+    let area = w.area_at(p.pos);
+    Rect::new(area.x, area.bottom() - 1.0, area.w, 1.0)
+}
+
+fn support_rect_matches(p: &Pet, expected: Rect, w: &World) -> bool {
+    let actual = support_rect(p, w);
+    (actual.x - expected.x).abs() <= 1.0
+        && (actual.y - expected.y).abs() <= 1.0
+        && (actual.w - expected.w).abs() <= 1.0
+        && (actual.h - expected.h).abs() <= 1.0
 }
 impl Pet {
     fn set_social_state(&mut self, k: SocialKind, role: SocialRole, d: f64, _w: &World) {
@@ -571,6 +897,14 @@ impl Pet {
                     "всё хорошо?"
                 }
             }
+            SocialKind::Tag => {
+                if role == SocialRole::Initiator {
+                    "догоню!"
+                } else {
+                    "не поймаешь!"
+                }
+            }
+            SocialKind::Tower => "я сверху!",
         };
         self.bubble = Some(text.to_owned());
         self.bubble_time = 2.0;

@@ -18,6 +18,8 @@ fn window(id: usize, rect: Rect) -> WindowInfo {
         title: String::new(),
         active: false,
         fullscreen: false,
+        is_file_manager: false,
+        is_desktop_icon: false,
     }
 }
 

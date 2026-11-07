@@ -750,6 +750,7 @@ pub fn draw_activity(canvas: &mut Canvas, id: ActivityId, elapsed: f64, facing: 
     let suppress_source_props = matches!(
         id.spec().slug,
         "angry-powerful-lightning"
+            | "developer-pair-programming-scene"
             | "artboard-2cla3"
             | "malware-detection-window"
             | "reading-data-document"

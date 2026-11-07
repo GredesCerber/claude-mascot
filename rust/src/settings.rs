@@ -16,6 +16,8 @@ pub struct Settings {
     pub show_mood: bool,
     pub social_enabled: bool,
     pub auto_activities: bool,
+    pub auto_reactions: bool,
+    pub desktop_perches: bool,
     pub paused: bool,
     pub auto_updates: bool,
     pub update_repo: String,
@@ -32,6 +34,8 @@ impl Default for Settings {
             show_mood: true,
             social_enabled: true,
             auto_activities: true,
+            auto_reactions: true,
+            desktop_perches: true,
             paused: false,
             auto_updates: true,
             update_repo: option_env!("MASCOT_UPDATE_REPO")
@@ -298,6 +302,8 @@ mod tests {
         assert!(!s.paused);
         assert!(s.social_enabled);
         assert!(s.auto_activities);
+        assert!(s.auto_reactions);
+        assert!(s.desktop_perches);
     }
     #[test]
     fn autostart_match_requires_exact_quoted_executable_path() {
@@ -338,10 +344,14 @@ mod tests {
         assert_eq!(Settings::load(&p).unwrap().target_fps, 144);
         s.social_enabled = false;
         s.auto_activities = false;
+        s.auto_reactions = false;
+        s.desktop_perches = false;
         s.save(&p).unwrap();
         let toggled = Settings::load(&p).unwrap();
         assert!(!toggled.social_enabled);
         assert!(!toggled.auto_activities);
+        assert!(!toggled.auto_reactions);
+        assert!(!toggled.desktop_perches);
         std::fs::remove_file(p).unwrap();
     }
 

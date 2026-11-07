@@ -1,8 +1,10 @@
 # Claude Mascot Rust
 
-Windows-first native Rust port. Version 0.5.0 keeps **Claude only** and adds
-75 activities from the supplied pixel pack, five friendly pair interactions,
-nearby-cursor gaze, and a rear-facing laptop lid. The original Python/Linux
+Windows-first native Rust port. Version 0.6.0 keeps **Claude only** and adds
+desktop-icon perches, adaptive high jumps, brief reactions to Explorer activity,
+stronger cursor gaze, tag and occasional two-pet towers. It includes
+75 activities from the supplied pixel pack and seven friendly pair interactions.
+The original Python/Linux
 application at the repository root is maintained separately.
 
 Claude was already drawn in code. Its body, face, limbs and laptop are small
@@ -36,7 +38,7 @@ double-click to jump. Right-click the pet or its tray icon for the native menu.
 | Заняться → Все занятия (75) | All pack scenes grouped by mood, code, workshop, nature, food, celebration, adventure, reflection and sport |
 | Поведение | Wander, sit, sleep, climb, chase the cursor |
 | Друзья | Invite another Claude (up to eight), remove the selected pet |
-| Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend |
+| Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend, tag, tower |
 | Настройки | Scale, speech, mood meter, fullscreen hiding, startup, frame rate |
 
 Laptop opens for 1 second, types for 8 seconds and closes for 1 second.
@@ -48,6 +50,11 @@ or losing support interrupts the sequence and removes its prop.
 Chase includes running, hopping and hanging from the cursor. Shake the cursor,
 disable chase or choose Jump to release. The pet never moves the actual cursor.
 It rebounds from screen walls and occasionally hops onto reachable window tops.
+With user reactions enabled, nearby cursor movement can invite a short chase;
+this ends automatically and never attaches the pet to the cursor. Explorer focus
+or folder navigation can draw a brief glance and greeting. Desktop icon perches
+use cached public UI Automation geometry; labels and paths are not collected.
+Both features have separate menu switches. High jumps respect monitor headroom.
 Explicit Sit or Sleep suppresses autonomous exploration; choose Wander to resume.
 Rough throws reduce session-only satisfaction; petting helps it recover faster.
 
@@ -59,6 +66,10 @@ No full pet objects are cloned each step. Disable friend interactions under
 Friends, or disable random activities under Settings. Manual activities remain
 available when random activities are disabled. Nearby gaze relaxes to neutral
 when the cursor moves away, and does not override closed/blinking eyes.
+Tag uses a sufficiently wide shared runway. Towers contain two real pets:
+the upper one jumps, perches briefly, then hops aside and falls normally.
+Low ceilings and narrow supports prevent the tower from starting.
+See [social play](docs/social-play.md) and [desktop perches](docs/desktop-perches.md).
 
 The pack contained 75 static illustrations, not ready-made animation frames.
 Each is a timed cosmetic activity with an entry/exit and animated accents;
@@ -106,7 +117,7 @@ embed the icon and package a portable ZIP. Executable QA arguments:
 .\target\release\claude-mascot.exe --smoke-test 5 --trace .\smoke.json
 ```
 
-See [architecture](docs/architecture.md), [0.5.0 checks](docs/verification-0.5.0.md)
+See [architecture](docs/architecture.md), [0.6.0 checks](docs/verification-0.6.0.md)
 and the [remaining roadmap](docs/planning/PLAN-RU.md).
 The proposed phrase bank is planning data, not a runtime dialogue engine.
 

@@ -395,11 +395,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let phase = (p.time * 7.0) as usize % 2;
     let climbing = p.state == State::Climb && !p.dragging;
     let climb_phase = (p.state_time * 5.0).floor() as usize % 4;
-    let social = if p.state == State::Social && !p.dragging {
-        p.social.as_ref()
-    } else {
-        None
-    };
+    let social = if !p.dragging { p.social.as_ref() } else { None };
     let social_kind = social.map(|activity| activity.kind);
     let social_greeting = social_kind == Some(SocialKind::Greeting);
     let social_high_five = social_kind == Some(SocialKind::HighFive);
@@ -407,6 +403,14 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let social_comfort = social_kind == Some(SocialKind::Comfort);
     let social_watching_laptop = social_kind == Some(SocialKind::ShareLaptop)
         && social.is_some_and(|activity| activity.role == SocialRole::Partner);
+    let shared_laptop_owner = social_kind == Some(SocialKind::ShareLaptop)
+        && social.is_some_and(|activity| activity.role == SocialRole::Initiator);
+    let scene_scale = if p.display_scale.is_finite() {
+        p.display_scale.clamp(0.75, 1.5)
+    } else {
+        1.0
+    };
+    let peer_dx = social.map_or(0.0, |activity| activity.partner_offset.x / scene_scale);
     let activity = if p.state == State::Activity && !p.dragging {
         p.activity.map(|id| id.spec())
     } else {
@@ -549,7 +553,16 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     px(-5.0, top, 3.0, 1.0, 0xFFE8957A);
     drop(px);
     if laptop_front {
-        draw_laptop(c, laptop_phase);
+        draw_laptop(
+            c,
+            laptop_phase,
+            FEET_X
+                + if shared_laptop_owner {
+                    peer_dx.clamp(-110.0, 110.0) * 0.5
+                } else {
+                    0.0
+                },
+        );
     }
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
         let sx = 1.0 + p.squash.clamp(0.0, 1.0) * 0.16;
@@ -586,21 +599,57 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(trail_x, top + 2.0, 2.0, 2.0, 0xFFD97757);
     } else if social_high_five {
         // `px` already mirrors local coordinates for left-facing Claude.
+        let elapsed = social.map_or(p.state_time, |activity| activity.elapsed);
+        let rise = if elapsed < 0.55 {
+            let t = (elapsed / 0.55).clamp(0.0, 1.0);
+            1.0 - (1.0 - t).powi(3)
+        } else if elapsed < 0.9 {
+            1.0
+        } else {
+            (1.0 - (elapsed - 0.9) / 0.95).clamp(0.0, 1.0)
+        };
+        let recoil = if (0.7..0.95).contains(&elapsed) {
+            ((elapsed - 0.7) / 0.25 * std::f64::consts::PI).sin() * 0.3
+        } else {
+            0.0
+        };
         let lead_x = 6.0;
         let trailing_x = -8.0;
-        px(lead_x, top - 1.0, 2.0, 3.0, 0xFFD97757);
+        px(
+            lead_x,
+            top + 3.0 - rise * 4.0 + recoil,
+            2.0,
+            2.0 + rise,
+            0xFFD97757,
+        );
         px(trailing_x, top + 3.0, 2.0, 2.0, 0xFFD97757);
-        px(lead_x + 1.0, top - 3.0, 2.0, 2.0, 0xFFE8957A);
+        let contact_x = (peer_dx.abs() / 10.0 - 1.0).clamp(6.0, 8.6);
+        px(
+            lead_x + (contact_x - lead_x) * rise,
+            top + 3.0 - rise * 6.0 + recoil,
+            2.0,
+            2.0,
+            0xFFE8957A,
+        );
     } else if social_comfort {
         let open = (p.state_time * 2.0).sin().abs() * 0.35;
         px(-9.0, top + 1.5 + open, 3.0, 2.0, 0xFFD97757);
         px(-11.0, top + 0.5 + open, 2.0, 2.0, 0xFFE8957A);
         px(6.0, top + 1.5 - open, 3.0, 2.0, 0xFFD97757);
         px(9.0, top + 0.5 - open, 2.0, 2.0, 0xFFE8957A);
-    } else if social_watching_laptop {
-        // The watcher leans toward the shared laptop and keeps arms relaxed.
-        px(-7.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+    } else if social_watching_laptop || shared_laptop_owner {
+        // Both poses reach toward the same world-space laptop, not two
+        // unrelated centers. Only the owner draws the shared prop.
+        let target = (peer_dx.abs() / 10.0).clamp(6.0, 11.0);
+        let tap = if shared_laptop_owner {
+            (p.state_time * 12.0).sin() * 0.2
+        } else {
+            0.0
+        };
         px(5.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
+        px(6.0, -2.6, (target - 6.0).max(1.0), 1.0, 0xFFD97757);
+        px(target - 1.0, -2.8 + tap, 2.0, 1.4, 0xFFE8957A);
+        px(-8.0, top + 3.0, 2.0, 2.0, 0xFFD97757);
     } else if activity_strength {
         // Lift on the effort beat, lower into a short breathing pause.
         let beat = (p.state_time * 1.9).fract();
@@ -732,8 +781,10 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         (cursor_gaze_x + look_around_x + social_look).clamp(-1.0, 1.0)
     };
     let gaze_y = if eyes_closed { 0.0 } else { cursor_gaze_y };
-    let eye_offset_x = gaze_x * facing_sign * 0.16;
-    let eye_offset_y = gaze_y * 0.1;
+    // Keep a visible glance at 100% scale while staying within the face.
+    // The local pixel unit is 5 physical pixels.
+    let eye_offset_x = gaze_x * facing_sign * 0.5;
+    let eye_offset_y = gaze_y * 0.3;
     for eye in [-4.0, 3.0] {
         if p.state == State::Sleep || activity_closed_eyes || blink {
             px(eye - 0.3, top + 3.2, 1.6, 0.6, 0xFF1B1B1B);
@@ -777,10 +828,15 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         let pulse = (elapsed * 2.0).sin() * 1.5;
         heart(c, FEET_X + 17.0, FEET_Y - 102.0 - pulse, 0xBFFF9AAE);
     }
-    if social_high_five {
+    if social_high_five && social.is_some_and(|activity| (0.55..0.95).contains(&activity.elapsed)) {
         // A small contact sparkle marks the raised hand without adding another
         // character or desktop object to the renderer.
-        let x = FEET_X + p.facing.signum() * 39.0;
+        let x = FEET_X
+            + if peer_dx.abs() > 1.0 {
+                peer_dx * 0.5
+            } else {
+                p.facing.signum() * 40.0
+            };
         let y = FEET_Y - 73.0;
         c.rect(x - 1.0, y - 4.0, 2.0, 8.0, 0xFFD9C88C);
         c.rect(x - 4.0, y - 1.0, 8.0, 2.0, 0xFFD9C88C);
@@ -865,7 +921,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
 
 /// Draw the rear of a compact laptop lid with its keyboard deck facing Claude.
 /// The open amount maps to the ten second sequence: open, type, then close.
-fn draw_laptop(c: &mut Canvas, phase: f64) {
+fn draw_laptop(c: &mut Canvas, phase: f64, center: f64) {
     let open = if phase < 1.0 {
         phase
     } else if phase < 9.0 {
@@ -874,7 +930,6 @@ fn draw_laptop(c: &mut Canvas, phase: f64) {
         10.0 - phase
     }
     .clamp(0.0, 1.0);
-    let center = FEET_X;
     let base_y = FEET_Y - 11.0;
     let screen_h = 2.0 + open * 14.0;
     let screen_top = base_y - screen_h;
@@ -1046,6 +1101,46 @@ mod tests {
             "blink should ignore gaze"
         );
     }
+
+    #[test]
+    fn cursor_glance_visibly_tracks_world_direction_when_facing_either_way() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Idle;
+        pet.time = 1.0;
+        let centroid = |pixels: &[u32]| {
+            let mut x_sum = 0.0;
+            let mut y_sum = 0.0;
+            let mut count = 0.0;
+            for y in 165..188 {
+                for x in 105..176 {
+                    if pixels[y * WIDTH + x] == 0xFF1B1B1B {
+                        x_sum += x as f64;
+                        y_sum += y as f64;
+                        count += 1.0;
+                    }
+                }
+            }
+            assert!(count >= 80.0, "both canonical pupils must remain visible");
+            (x_sum / count, y_sum / count)
+        };
+        for facing in [-1.0, 1.0] {
+            pet.facing = facing;
+            pet.gaze = crate::Vec2::new(-1.0, -1.0);
+            let left_up = centroid(&renderer.frame(&pet, false).pixels);
+            pet.gaze = crate::Vec2::new(1.0, 1.0);
+            let right_down = centroid(&renderer.frame(&pet, false).pixels);
+            assert!(
+                right_down.0 - left_up.0 >= 4.0,
+                "nearby left/right gaze must visibly differ"
+            );
+            assert!(
+                right_down.1 - left_up.1 >= 2.0,
+                "nearby up/down gaze must visibly differ"
+            );
+        }
+    }
     #[test]
     fn social_interactions_have_distinct_rendered_poses() {
         let mut renderer = Renderer::new().unwrap();
@@ -1069,6 +1164,7 @@ mod tests {
                 role,
                 partner_id: 2,
                 elapsed,
+                partner_offset: crate::Vec2::new(80.0, 0.0),
             });
             let pose = renderer.frame(&pet, false).pixels.clone();
             assert_ne!(idle, pose, "{kind:?} should have a distinct social pose");
@@ -1100,12 +1196,13 @@ mod tests {
         let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
         pet.time = 1.0;
         pet.state = State::Social;
-        pet.state_time = 0.25;
+        pet.state_time = 0.65;
         pet.social = Some(crate::social::SocialActivity {
             kind: SocialKind::HighFive,
             role: SocialRole::Initiator,
             partner_id: 2,
-            elapsed: 0.25,
+            elapsed: 0.65,
+            partner_offset: crate::Vec2::new(80.0, 0.0),
         });
         pet.facing = 1.0;
         let right_facing = renderer.frame(&pet, false).pixels.clone();
@@ -1138,6 +1235,82 @@ mod tests {
         assert!((right_offset - 40.0).abs() <= 1.0);
         assert!((left_offset - 40.0).abs() <= 1.0);
     }
+
+    #[test]
+    fn high_five_lifts_and_returns_the_hand_instead_of_only_blinking_a_spark() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Social;
+        pet.time = 1.0;
+        let count_raised = |pixels: &[u32]| {
+            (135..160)
+                .flat_map(|y| (165..190).map(move |x| y * WIDTH + x))
+                .filter(|&i| pixels[i] == 0xFFE8957A)
+                .count()
+        };
+        let mut samples = Vec::new();
+        for elapsed in [0.05, 0.65, 1.95] {
+            pet.state_time = elapsed;
+            pet.social = Some(crate::social::SocialActivity {
+                kind: SocialKind::HighFive,
+                role: SocialRole::Initiator,
+                partner_id: 2,
+                elapsed,
+                partner_offset: crate::Vec2::new(80.0, 0.0),
+            });
+            samples.push(count_raised(&renderer.frame(&pet, false).pixels));
+        }
+        assert!(
+            samples[1] > samples[0] + 20,
+            "hand must visibly lift toward contact"
+        );
+        assert!(
+            samples[1] > samples[2] + 20,
+            "hand must return after contact"
+        );
+    }
+
+    #[test]
+    fn a_shared_laptop_has_one_owner_and_sits_between_the_two_pets() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Laptop;
+        pet.time = 1.0;
+        pet.state_time = 2.0;
+        pet.social = Some(crate::social::SocialActivity {
+            kind: SocialKind::ShareLaptop,
+            role: SocialRole::Initiator,
+            partner_id: 2,
+            elapsed: 2.0,
+            partner_offset: crate::Vec2::new(90.0, 0.0),
+        });
+        let frame = renderer.frame(&pet, false);
+        let xs: Vec<_> = frame
+            .pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == 0xFF5B5653)
+            .map(|(i, _)| (i % WIDTH) as f64)
+            .collect();
+        assert!(xs.len() > 50, "shared owner must draw the rear lid");
+        let center = (xs.iter().copied().fold(f64::INFINITY, f64::min)
+            + xs.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+            * 0.5;
+        assert!(
+            (center - (FEET_X + 45.0)).abs() < 3.0,
+            "shared prop must be halfway to the partner"
+        );
+        pet.state = State::Social;
+        pet.facing = -1.0;
+        pet.social.as_mut().unwrap().role = SocialRole::Partner;
+        pet.social.as_mut().unwrap().partner_offset.x = -90.0;
+        assert!(
+            !renderer.frame(&pet, false).pixels.contains(&0xFF5B5653),
+            "partner must not draw a duplicate laptop"
+        );
+    }
     #[test]
     fn activity_state_uses_pack_drawing_path() {
         let mut renderer = Renderer::new().unwrap();
@@ -1167,6 +1340,23 @@ mod tests {
             .canvas
             .save_png(&preview_dir.join("activity-sample.png"))
             .unwrap();
+    }
+
+    #[test]
+    fn pair_programming_activity_keeps_only_the_current_claude_and_its_laptop() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Activity;
+        pet.activity = Some(crate::activities::ActivityId::new(26).unwrap());
+        pet.state_time = 2.0;
+        pet.time = 1.0;
+        let frame = renderer.frame(&pet, false);
+        assert_eq!(frame.pixels[184 * WIDTH + 140], 0xFFD97757);
+        assert!(
+            (130..220).all(|y| (185..260).all(|x| frame.pixels[y * WIDTH + x] == 0)),
+            "the imported human beside Claude must not reappear"
+        );
     }
     #[test]
     fn climbing_frames_alternate_and_stay_inside_mascot_bounds() {

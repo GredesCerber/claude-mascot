@@ -9,6 +9,10 @@ keeps accessory rectangles such as screens, cups, tools, books, plants, signs,
 and scene decorations. A small glasses-like cluster in the reading scene is
 preserved as an accessory.
 
+The pair-programming source includes a human figure with a different palette.
+That scene suppresses imported props entirely and uses our procedural laptop;
+only actual Claude pets appear, including in the separate shared-laptop scene.
+
 The checked-in `assets/activity-scenes.bin` contains compact integer grid
 rectangles, colors, prop tags, and source body anchor coordinates. It is built
 into the executable. No source SVG/PNG parsing or external source-file lookup

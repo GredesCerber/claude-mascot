@@ -1,4 +1,4 @@
-# Rust port architecture (0.5.0)
+# Rust port architecture (0.6.0)
 
 The Python application at the repository root is preserved. Rust is Windows-first
 and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0.
@@ -11,6 +11,7 @@ and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0
 | activities.rs | Props adapted from all 75 illustrations, Russian catalog, bounded decorative timelines and accents |
 | render.rs | Procedural Claude/laptop pixels, gestures, cached fonts, transparent BGRA and PNG previews |
 | platform.rs | Win32 windows, DPI, alpha hit testing, bounded message pump, capture, menus, tray |
+| desktop.rs | Dedicated UIA worker, bounded cached desktop-icon geometry, stale-cache expiry |
 | main.rs | Fixed-step simulation, frame deadlines, input routing, visibility and lifecycle |
 | timing.rs | FPS pacing and rolling drag velocity |
 | settings.rs | Versioned JSON and legacy character migration |
@@ -44,6 +45,17 @@ The host also validates ownership after input/removal without advancing time.
 Gaze is a bounded, smoothed world direction; the renderer mirrors it into local
 face coordinates. The laptop shows its rear lid to the viewer.
 
+Tag and two-pet towers send bounded motion intents through normal physics.
+Tower capture requires a descending crossing of the partner's head; dismount
+uses a side hop. Manual commands clear the intent before new input takes effect.
+Responsive behavior compares bounded window metadata at 10 Hz, rebaselines
+while disabled, and gives manual commands priority. Nearby cursor interest is
+short-lived and independent of the user's persistent chase setting.
+Desktop UIA reads run off the presentation thread, cache at most 128 icons,
+expire after three seconds, and expose no names or paths. Icon surfaces are
+below real windows in the world snapshot. Leap strength adapts to the requested
+height while reserving headroom for the scaled body.
+
 Pack prop data is compiled from SVG rectangles by an offline importer.
 Imported character bodies/faces are removed. The renderer always draws the
 canonical Claude for every activity, sharing body proportions, palette, eye
@@ -66,6 +78,6 @@ Native tests cover menu commands, message budgeting, coalescing and handle clean
 PNG previews and bounded smoke traces complement these checks.
 
 Physical mixed-DPI testing, installed MSI lifecycle and a published updater
-cycle require separate acceptance. See [0.5.0 verification](verification-0.5.0.md)
+cycle require separate acceptance. See [0.6.0 verification](verification-0.6.0.md)
 and [remaining work](planning/PLAN-RU.md). Historical reports describe their
 named versions; removed features in those reports are not current capabilities.
