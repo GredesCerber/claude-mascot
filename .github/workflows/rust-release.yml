@@ -5,12 +5,20 @@ on:
     tags:
       - "rust-v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing rust-vX.Y.Z tag to build or recover an unpublished draft
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+
 concurrency:
-  group: rust-release-${{ github.ref }}
+  group: rust-release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
@@ -36,9 +45,9 @@ jobs:
           $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
           $package = $metadata.packages | Where-Object { $_.name -eq 'claude-mascot' } | Select-Object -First 1
           if ($null -eq $package) { throw 'claude-mascot package is missing from Cargo metadata' }
-          $expected = "refs/tags/rust-v$($package.version)"
-          if ($env:GITHUB_REF -ne $expected) {
-            throw "Ref '$env:GITHUB_REF' is not the version tag '$expected'."
+          $expected = "rust-v$($package.version)"
+          if ($env:RELEASE_TAG -ne $expected) {
+            throw "Release tag '$env:RELEASE_TAG' is not the version tag '$expected'."
           }
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -121,22 +130,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ($env:GITHUB_REF -notmatch '^refs/tags/rust-v[0-9]+\.[0-9]+\.[0-9]+$') {
-            throw "Ref '$env:GITHUB_REF' is not a semantic rust-v tag."
+          if ($env:RELEASE_TAG -notmatch '^rust-v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Release tag '$env:RELEASE_TAG' is not a semantic rust-v tag."
           }
-          gh release create $env:GITHUB_REF_NAME `
-            release-assets/claude-mascot-windows-x64.exe `
-            release-assets/claude-mascot-windows-x64.zip `
-            release-assets/*.msi `
-            release-assets/SHA256SUMS `
-            --draft `
-            --verify-tag `
-            --repo $env:GITHUB_REPOSITORY `
-            --title "Claude Mascot $($env:GITHUB_REF_NAME)" `
-            --notes-file release-assets/RELEASE-NOTES.md
-          if ($LASTEXITCODE) { throw 'Draft release creation failed.' }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
-          if ($LASTEXITCODE -or !$release.draft -or $release.prerelease) { throw 'Expected a stable draft release.' }
+          $existingJson = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json apiUrl,isDraft,isPrerelease,tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $existing = $existingJson | ConvertFrom-Json
+            if (!$existing.isDraft -or $existing.isPrerelease -or $existing.tagName -ne $env:RELEASE_TAG) {
+              throw 'Refusing to change an already published release or a different tag.'
+            }
+            gh release upload $env:RELEASE_TAG `
+              release-assets/claude-mascot-windows-x64.exe `
+              release-assets/claude-mascot-windows-x64.zip `
+              release-assets/*.msi `
+              release-assets/SHA256SUMS `
+              --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE) { throw 'Draft asset recovery failed.' }
+          } else {
+            gh release create $env:RELEASE_TAG `
+              release-assets/claude-mascot-windows-x64.exe `
+              release-assets/claude-mascot-windows-x64.zip `
+              release-assets/*.msi `
+              release-assets/SHA256SUMS `
+              --draft --verify-tag --repo $env:GITHUB_REPOSITORY `
+              --title "Claude Mascot $($env:RELEASE_TAG)" `
+              --notes-file release-assets/RELEASE-NOTES.md
+            if ($LASTEXITCODE) { throw 'Draft release creation failed.' }
+          }
+          $releaseApi = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json apiUrl --jq .apiUrl
+          if ($LASTEXITCODE) { throw 'Cannot locate the draft release API URL.' }
+          $release = gh api $releaseApi | ConvertFrom-Json
+          if ($LASTEXITCODE -or !$release.draft -or $release.prerelease -or $release.tag_name -ne $env:RELEASE_TAG) {
+            throw 'Expected a stable draft release matching the requested tag.'
+          }
           foreach ($line in Get-Content release-assets/SHA256SUMS) {
             if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw 'Invalid SHA256SUMS line.' }
             $digest = 'sha256:' + $Matches[1]
@@ -146,5 +172,5 @@ jobs:
               throw "GitHub asset digest mismatch: $name"
             }
           }
-          gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
           if ($LASTEXITCODE) { throw 'Release publication failed.' }
