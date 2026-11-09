@@ -157,7 +157,11 @@ fn tower_uses_a_real_jump_perch_hold_and_gravity_release() {
         Some(SocialMotion::Leap { owner_id: 1, .. })
     ));
     assert!(pets[0].bubble.is_none());
-    assert_eq!(pets[1].bubble.as_deref(), Some("я сверху!"));
+    assert!(pets[1].bubble.as_deref().is_some_and(|line| {
+        claude_mascot::dialogue::SpeechEvent::TowerTop
+            .lines()
+            .contains(&line)
+    }));
 
     let mut saw_perch = false;
     let mut saw_dismount_apex = false;

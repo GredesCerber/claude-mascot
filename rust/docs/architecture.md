@@ -13,6 +13,7 @@ and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0
 | palette.rs | User-selected body colors with consistent shading and readable eyes |
 | social.rs | Fixed-capacity pair coordinator, stable IDs, 10 Hz selection, smooth timelines and cancellation |
 | activities.rs | Props adapted from all 75 illustrations, Russian catalog, bounded decorative timelines and accents |
+| dialogue.rs / activity_dialogue.rs | Contextual phrase banks, independent speech RNG, recent-line history and chatter cooldowns |
 | render.rs | Procedural Claude/laptop pixels, gestures, cached fonts, transparent BGRA and PNG previews |
 | platform.rs | Win32 windows, DPI, alpha hit testing, bounded message pump, capture, menus, tray |
 | desktop.rs | Dedicated UIA worker, bounded cached desktop-icon geometry, stale-cache expiry |

@@ -19,6 +19,16 @@ pub(crate) fn pose_time(time: f64) -> f64 {
         0.0
     }
 }
+fn speech_visible(pet: &Pet) -> bool {
+    pet.social.is_none_or(|activity| {
+        activity.kind == SocialKind::Tower
+            || activity.partner_offset.x.abs() > 200.0 * pet.display_scale
+            || match activity.role {
+                SocialRole::Initiator => pet.bubble_time > 1.0,
+                SocialRole::Partner => pet.bubble_time <= 1.0,
+            }
+    })
+}
 
 pub struct Canvas {
     pub pixels: Vec<u32>,
@@ -234,7 +244,7 @@ impl Renderer {
                 );
             }
         }
-        if show_bubbles {
+        if show_bubbles && speech_visible(pet) {
             if let Some(text) = &pet.bubble {
                 if pet.bubble_time > 0.0 {
                     self.bubble(text, false);
@@ -256,7 +266,7 @@ impl Renderer {
         }
         self.frame(pet, false);
         self.scaled_canvas = self.canvas.scaled(scale);
-        if show_bubbles && pet.bubble_time > 0.0 {
+        if show_bubbles && pet.bubble_time > 0.0 && speech_visible(pet) {
             if let Some(text) = &pet.bubble {
                 let tall = false;
                 draw_bubble(
@@ -992,6 +1002,26 @@ fn draw_laptop(c: &mut Canvas, phase: f64, center: f64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nearby_social_speakers_take_turns() {
+        use super::*;
+        let mut pet = Pet::new(1, crate::engine::Skin::Claude, crate::Vec2::default());
+        pet.social = Some(crate::social::SocialActivity {
+            kind: SocialKind::Greeting,
+            role: SocialRole::Initiator,
+            partner_id: 2,
+            elapsed: 0.0,
+            partner_offset: crate::Vec2::new(120.0, 0.0),
+        });
+        pet.bubble_time = 2.0;
+        assert!(speech_visible(&pet));
+        pet.social.as_mut().unwrap().role = SocialRole::Partner;
+        assert!(!speech_visible(&pet));
+        pet.bubble_time = 0.5;
+        assert!(speech_visible(&pet));
+        pet.social.as_mut().unwrap().role = SocialRole::Initiator;
+        assert!(!speech_visible(&pet));
+    }
     #[test]
     fn pixel_poses_hold_between_common_animation_ticks() {
         use super::*;

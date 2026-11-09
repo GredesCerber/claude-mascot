@@ -330,10 +330,19 @@ fn platform_probe(o: &Options) -> Result<(), String> {
 fn preview(dir: &std::path::Path) -> Result<(), String> {
     use claude_mascot::engine::State;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let events: Vec<_> = claude_mascot::dialogue::ALL_EVENTS
+        .iter()
+        .map(|event| serde_json::json!({"event":format!("{event:?}"),"phrases":event.lines()}))
+        .collect();
+    std::fs::write(
+        dir.join("dialogue.json"),
+        serde_json::to_vec_pretty(&events).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let catalog: Vec<_> = claude_mascot::activities::CATALOG.iter().map(|scene|
         serde_json::json!({"id":scene.id.0,"source":format!("{}.svg",scene.slug),
             "title":scene.title_ru,"category":scene.group.label_ru(),
-            "duration_seconds":scene.duration,"phrase":scene.phrase,"menu_command":100+scene.id.0 as u16})
+            "duration_seconds":scene.duration,"phrase":scene.phrase,"phrases":claude_mascot::activity_dialogue::ACTIVITY_LINES[scene.id.index()],"menu_command":100+scene.id.0 as u16})
     ).collect();
     std::fs::write(
         dir.join("catalog.json"),
@@ -752,6 +761,13 @@ mod native {
         )
     }
     fn spawn(mut pet: Pet, settings: &Settings, tray: bool) -> Result<Entry, String> {
+        static SESSION_SPEECH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let speech_seed = SESSION_SPEECH.get_or_init(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_nanos() as u64)
+        });
+        pet.reseed_speech(*speech_seed ^ pet.id);
         pet.body_color = settings.body_color;
         pet.activity_intensity = settings.activity_intensity;
         Ok(Entry {
@@ -1194,6 +1210,8 @@ mod native {
                         e.pet.bubble = Some(prompt.into());
                         e.pet.bubble_time = 2.0;
                         if settings.social_enabled && friend_count > 1 {
+                            e.pet
+                                .speak(claude_mascot::dialogue::SpeechEvent::SocialInvite, 2.0);
                             social.request_for(e.pet.id, kind);
                         }
                     }

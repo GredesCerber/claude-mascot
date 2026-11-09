@@ -1,8 +1,10 @@
 pub mod activities;
+pub mod activity_dialogue;
 pub mod behavior;
 pub mod contacts;
 #[cfg(windows)]
 pub mod desktop;
+pub mod dialogue;
 pub mod engine;
 #[cfg(windows)]
 pub mod media;

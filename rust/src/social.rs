@@ -356,6 +356,10 @@ impl SocialCoordinator {
                                     s.partner_id = other;
                                     s.elapsed = pair.elapsed;
                                 }
+                                refs[i]
+                                    .as_deref_mut()
+                                    .unwrap()
+                                    .say_social(SocialKind::Leapfrog, role);
                             }
                         }
                         if let Some(i) = find(refs, n, next) {
@@ -441,6 +445,18 @@ impl SocialCoordinator {
                             pair.a
                         };
                         pair.phase = 0.7;
+                        for id in [pair.a, pair.b] {
+                            if let Some(i) = find(refs, n, id) {
+                                refs[i].as_deref_mut().unwrap().speak(
+                                    if id == pair.chaser {
+                                        crate::dialogue::SpeechEvent::TagChaser
+                                    } else {
+                                        crate::dialogue::SpeechEvent::TagRunner
+                                    },
+                                    2.0,
+                                );
+                            }
+                        }
                     }
                     self.set_tag_motion(pair, refs, n);
                 } else if landed {
@@ -619,8 +635,7 @@ impl SocialCoordinator {
             if support.y - area.y < height + 100.0 {
                 if let Some(i) = find(refs, n, target.unwrap_or(base_id)) {
                     let p = refs[i].as_deref_mut().unwrap();
-                    p.bubble = Some("слишком низкий потолок для башни".to_owned());
-                    p.bubble_time = 3.0;
+                    p.speak(crate::dialogue::SpeechEvent::TowerLowCeiling, 3.0);
                 }
             }
             return false;
@@ -651,8 +666,7 @@ impl SocialCoordinator {
         if !tower_path_fits(refs, n, &group) {
             if let Some(i) = find(refs, n, target.unwrap_or(chosen[0])) {
                 let p = refs[i].as_deref_mut().unwrap();
-                p.bubble = Some("не хватает места для башни".to_owned());
-                p.bubble_time = 2.5;
+                p.speak(crate::dialogue::SpeechEvent::TowerNoRoom, 2.5);
             }
             return false;
         }
@@ -679,8 +693,7 @@ impl SocialCoordinator {
                 p.bubble = None;
                 p.bubble_time = 0.0;
             } else {
-                p.bubble = Some("я сверху!".to_owned());
-                p.bubble_time = 2.0;
+                p.speak(crate::dialogue::SpeechEvent::TowerTop, 2.0);
             }
         }
         if let Some(i) = find(refs, n, chosen[1]) {
@@ -1661,55 +1674,56 @@ impl Pet {
         self.state_time = 0.0;
         self.state_duration = d;
     }
-    fn say_social(&mut self, k: SocialKind, role: SocialRole) {
-        let text = match k {
+    fn say_social(&mut self, kind: SocialKind, role: SocialRole) {
+        use crate::dialogue::SpeechEvent as E;
+        let initiator = role == SocialRole::Initiator;
+        let event = match kind {
             SocialKind::Greeting => {
-                if role == SocialRole::Initiator {
-                    "привет!"
+                if initiator {
+                    E::Greeting
                 } else {
-                    "привет :)"
+                    E::GreetingReply
                 }
             }
             SocialKind::HighFive => {
-                if role == SocialRole::Initiator {
-                    "дай пять!"
+                if initiator {
+                    E::HighFive
                 } else {
-                    "пять!"
+                    E::HighFiveReply
                 }
             }
-            SocialKind::DanceTogether => "танцуем?",
+            SocialKind::DanceTogether => E::DanceTogether,
             SocialKind::ShareLaptop => {
-                if role == SocialRole::Initiator {
-                    "смотри, что делаю"
+                if initiator {
+                    E::ShareLaptop
                 } else {
-                    "интересно!"
+                    E::WatchLaptop
                 }
             }
             SocialKind::Comfort => {
                 if self.satisfaction < 35.0 {
-                    "спасибо, полегче"
+                    E::ComfortReply
                 } else {
-                    "всё хорошо?"
+                    E::Comfort
                 }
             }
             SocialKind::Tag => {
-                if role == SocialRole::Initiator {
-                    "догоню!"
+                if initiator {
+                    E::TagChaser
                 } else {
-                    "не поймаешь!"
+                    E::TagRunner
                 }
             }
-            SocialKind::Tower => "я сверху!",
+            SocialKind::Tower => E::TowerTop,
             SocialKind::Leapfrog => {
-                if role == SocialRole::Initiator {
-                    "прыгаю!"
+                if initiator {
+                    E::LeapfrogJump
                 } else {
-                    "прыгай!"
+                    E::LeapfrogWait
                 }
             }
         };
-        self.bubble = Some(text.to_owned());
-        self.bubble_time = 2.0;
+        self.speak(event, 2.0);
     }
     fn set_social_end(&mut self, w: &World) {
         self.state = if self.socially_supported(w) {

@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 
 use serde::{de, Deserialize, Deserializer, Serialize};
 
+use crate::dialogue::{Dialogue, SpeechEvent};
 use crate::social::SocialMotion;
 use crate::{Rect, Vec2, WindowInfo, World};
 
@@ -98,6 +99,7 @@ pub struct Pet {
     pub surface: Option<usize>,
     pub bubble: Option<String>,
     pub bubble_time: f64,
+    pub(crate) dialogue: Dialogue,
     pub hearts: f64,
     pub dragging: bool,
     release_pending: bool,
@@ -181,6 +183,7 @@ impl Pet {
             surface: None,
             bubble: None,
             bubble_time: 0.0,
+            dialogue: Dialogue::new(id),
             hearts: 0.0,
             dragging: false,
             release_pending: false,
@@ -380,11 +383,11 @@ impl Pet {
             if self.forced_sleep_armed && world.idle_seconds < self.forced_sleep_max - 1.0 {
                 self.forced_sleep = false;
                 self.forced_sleep_armed = false;
-                self.say("доброе утро!", 2.0);
+                self.speak(SpeechEvent::Wake, 2.0);
                 self.set_state(State::Idle, 0.0);
             }
         } else if self.state == State::Sleep && world.idle_seconds < IDLE_SLEEP {
-            self.say("доброе утро!", 2.0);
+            self.speak(SpeechEvent::Wake, 2.0);
             self.set_state(State::Idle, 0.0);
         }
         if self.state == State::Sleep {
@@ -487,7 +490,7 @@ impl Pet {
                 } else {
                     self.set_state(State::Idle, 0.0);
                 }
-                self.say("пойду гулять", 1.6);
+                self.speak(SpeechEvent::Wander, 1.6);
             }
             Command::Sit => {
                 if !self.has_support(world) {
@@ -559,7 +562,7 @@ impl Pet {
                     self.vel = Vec2::default();
                     self.activity = Some(id);
                     self.set_state(State::Activity, id.spec().duration);
-                    self.say(id.spec().phrase, id.spec().duration.min(3.0));
+                    self.say_activity(id, id.spec().duration.min(3.0));
                 } else {
                     self.pending_activity = Some(id);
                     self.pending_ground = Some(State::Activity);
@@ -578,9 +581,15 @@ impl Pet {
             }
         }
         match command {
-            Command::Laptop => self.say("сейчас допечатаю", 2.0),
-            Command::Stretch => self.say("разомнусь немного", 2.0),
-            Command::LookAround => self.say("что тут интересного?", 2.0),
+            Command::Sit => self.speak(SpeechEvent::Rest, 2.0),
+            Command::Sleep => self.speak(SpeechEvent::Sleep, 2.0),
+            Command::Climb => self.speak(SpeechEvent::Climb, 2.0),
+            Command::Dance => self.speak(SpeechEvent::Dance, 2.0),
+            Command::Wave => self.speak(SpeechEvent::Wave, 2.0),
+            Command::Chase if self.chase => self.speak(SpeechEvent::Chase, 2.0),
+            Command::Laptop => self.speak(SpeechEvent::Laptop, 2.0),
+            Command::Stretch => self.speak(SpeechEvent::Stretch, 2.0),
+            Command::LookAround => self.speak(SpeechEvent::LookAround, 2.0),
             _ => {}
         }
     }
@@ -637,7 +646,7 @@ impl Pet {
             self.satisfaction =
                 (self.satisfaction - (speed / 2500.0 * 18.0).clamp(6.0, 18.0)).max(0.0);
             if self.satisfaction < 30.0 {
-                self.say("эй, аккуратнее!", 1.8);
+                self.speak(SpeechEvent::RoughThrow, 1.8);
             }
         }
         self.surface = None;
@@ -666,7 +675,7 @@ impl Pet {
         self.satisfaction = (self.satisfaction + 12.0).min(100.0);
         self.hearts = 1.5;
         self.squash = 0.35;
-        self.say("приятно :) ", 1.8);
+        self.speak(SpeechEvent::Petted, 1.8);
         if matches!(
             self.state,
             State::Idle | State::Walk | State::Sit | State::Social | State::Activity
@@ -721,6 +730,7 @@ impl Pet {
             self.vel.y = -720.0;
             self.vel.x = self.facing * 100.0;
             self.set_state(State::Jump, 0.0);
+            self.speak(SpeechEvent::Jump, 1.6);
         }
     }
 
@@ -771,7 +781,7 @@ impl Pet {
                 if next == State::Activity {
                     self.activity = self.pending_activity.take();
                     if let Some(id) = self.activity {
-                        self.say(id.spec().phrase, id.spec().duration.min(3.0));
+                        self.say_activity(id, id.spec().duration.min(3.0));
                     }
                     self.set_state(next, self.activity.map_or(0.0, |id| id.spec().duration));
                 } else {
@@ -976,8 +986,10 @@ impl Pet {
             let choice = self.random();
             if choice < 0.12 && self.satisfaction >= 30.0 && self.auto_activities {
                 self.set_state(State::Dance, 2.6);
+                self.speak(SpeechEvent::Dance, 2.0);
             } else if choice < 0.22 && self.satisfaction >= 30.0 && self.auto_activities {
                 self.set_state(State::Wave, 1.8);
+                self.speak(SpeechEvent::Wave, 2.0);
             } else if choice < 0.42 {
                 let sit_duration = 4.0 + self.random() * 5.0;
                 self.set_state(State::Sit, sit_duration);
@@ -1220,7 +1232,7 @@ impl Pet {
             self.vel = Vec2::new((cursor.x - self.pos.x) * 5.0, -350.0);
             self.grab_cooldown = 1.0;
             self.set_state(State::Thrown, 0.0);
-            self.say("аааа!", 1.5);
+            self.speak(SpeechEvent::Falling, 1.5);
         } else if dt > 0.0 {
             self.state = State::Hold;
         }
@@ -1265,7 +1277,7 @@ impl Pet {
                 self.activity = Some(spec.id);
                 self.auto_activity_cooldown = 20.0 + self.random() * 15.0;
                 self.set_state(State::Activity, spec.duration);
-                self.say(spec.phrase, spec.duration.min(3.0));
+                self.say_activity(spec.id, spec.duration.min(3.0));
                 return;
             }
         }
@@ -1275,15 +1287,15 @@ impl Pet {
         match (self.random() * 3.0) as u8 {
             0 => {
                 self.set_state(State::Laptop, 10.0);
-                self.say("сейчас допечатаю", 2.0);
+                self.speak(SpeechEvent::Laptop, 2.0);
             }
             1 => {
                 self.set_state(State::Stretch, 2.5);
-                self.say("разомнусь немного", 2.0);
+                self.speak(SpeechEvent::Stretch, 2.0);
             }
             _ => {
                 self.set_state(State::LookAround, 2.0);
-                self.say("что тут интересного?", 2.0);
+                self.speak(SpeechEvent::LookAround, 2.0);
             }
         }
     }
@@ -1644,12 +1656,26 @@ impl Pet {
                             self.attention_target =
                                 Some(Vec2::new(w.rect.x + w.rect.w * 0.5, w.rect.y + 30.0));
                             self.attention_time = 1.5;
-                            self.say("о, папка открылась", 2.0);
+                            let opened_or_navigated = self
+                                .prior_reaction_windows
+                                .iter()
+                                .find(|(id, _, _, _)| *id == w.id)
+                                .is_none_or(|(_, _, _, old_title)| {
+                                    *old_title != title_hash(&w.title)
+                                });
+                            self.speak(
+                                if opened_or_navigated {
+                                    SpeechEvent::FolderOpened
+                                } else {
+                                    SpeechEvent::FolderFocused
+                                },
+                                2.0,
+                            );
                             self.set_state(State::Wave, 1.0);
                             self.reaction_cooldown = 12.0;
                         }
                     } else if new_window && self.random_chance(0.35) {
-                        self.say("кто пришёл?", 1.5);
+                        self.speak(SpeechEvent::NewWindow, 1.5);
                         self.set_state(State::LookAround, 0.8);
                         self.reaction_cooldown = 12.0;
                     }
@@ -1996,7 +2022,7 @@ impl Pet {
             self.vel = Vec2::default();
             self.peek_goal = None;
             self.set_state(State::Peek, 8.0);
-            self.say("что смотрим?", 2.0);
+            self.speak(SpeechEvent::VideoPeek, 2.0);
             return;
         }
         if !self.is_airborne() && self.surface_id == Some(window_id) {
@@ -2024,9 +2050,24 @@ impl Pet {
         }
         self.state_duration = duration;
     }
-    fn say(&mut self, text: &str, duration: f64) {
-        self.bubble = Some(text.to_owned());
-        self.bubble_time = duration;
+    pub fn reseed_speech(&mut self, seed: u64) {
+        self.dialogue = Dialogue::new(seed);
+    }
+    pub fn speak(&mut self, event: SpeechEvent, duration: f64) {
+        if let Some(text) = self.dialogue.event(event, self.time) {
+            self.bubble = Some(text.to_owned());
+            self.bubble_time = if duration.is_finite() {
+                duration.clamp(0.6, 4.0)
+            } else {
+                2.0
+            };
+        }
+    }
+    fn say_activity(&mut self, id: crate::activities::ActivityId, duration: f64) {
+        if let Some(text) = self.dialogue.activity(id, self.time) {
+            self.bubble = Some(text.to_owned());
+            self.bubble_time = duration.clamp(0.6, 4.0);
+        }
     }
     fn speed(&self) -> f64 {
         if self.state == State::Run || self.state == State::Chase {
@@ -2152,7 +2193,7 @@ impl Pet {
         self.hold_offset = Vec2::new(0.0, CURSOR_HOLD_DY);
         self.pos = Vec2::new(world.cursor.x, world.cursor.y + CURSOR_HOLD_DY);
         self.set_state(State::Hold, 0.0);
-        self.say("вишу!", 1.5);
+        self.speak(SpeechEvent::CursorHold, 1.5);
         true
     }
 }

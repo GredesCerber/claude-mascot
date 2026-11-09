@@ -5,6 +5,13 @@ It does not send desktop context to an online model, read folder contents or
 observe keyboard input. Decisions have explicit reasons, priorities and
 cooldowns so a pet can keep its current intention instead of changing every frame.
 
+Dialogue uses 37 event/role banks and four scene-specific lines for each of the
+75 activities. It distinguishes opening/navigation in Explorer from merely
+refocusing an existing folder window. Recent lines are remembered, repeated
+same-event clicks are throttled and ambient speech waits after an action.
+Native sessions reseed only speech; deterministic physics randomness is untouched.
+Close social partners take turns showing bubbles.
+
 Manual input comes first. Dragging, explicit sleep/sit, a selected activity or
 an owned social scene prevents optional idle reactions from replacing it.
 Explorer activity, nearby friends, available support and mood can invite a

@@ -89,6 +89,12 @@ Each live pet can be recolored independently. Presets and a system color picker
 derive matching limb/shadow/highlight colors while preserving Claude's geometry.
 The last selected color is saved as the default for new pets and future sessions.
 
+Speech varies by event and activity: 300 scene lines (four per catalog entry)
+plus 186 options for 37 reactions and social roles. Recent choices are remembered
+to avoid immediate repeats; repeated clicks and ambient chatter have cooldowns.
+Speech randomness is separate from physics and is reseeded for each native session.
+Nearby friends take speaking turns so their bubbles do not overlap.
+
 The pack contained 75 static illustrations, not ready-made animation frames.
 Each is a timed cosmetic activity with an entry/exit and animated accents;
 selected props have additional motion. The SVGs were converted offline into
