@@ -1215,8 +1215,12 @@ impl Pet {
             self.surface = Some(i);
             self.set_state(State::Ledge, 0.45);
         }
-        if self.pos.y > w.rect.bottom() {
+        // Hands can grip a window whose bottom is slightly above the floor.
+        // Keep the feet at their physical height instead of snapping them up.
+        if self.pos.y > w.rect.bottom() + 40.0 * self.display_scale.clamp(0.5, 2.0) {
             self.surface = None;
+            self.surface_id = None;
+            self.surface_prev = None;
             self.set_state(State::Fall, 0.0);
         }
     }

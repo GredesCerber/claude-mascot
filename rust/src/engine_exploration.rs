@@ -234,7 +234,11 @@ impl Pet {
                         return false;
                     };
                     // Attach at the current feet height: no vertical or horizontal teleport.
-                    if self.pos.y > world.windows[i].rect.bottom() + 1.0 {
+                    if self.pos.y
+                        > world.windows[i].rect.bottom()
+                            + 40.0 * self.display_scale.clamp(0.5, 2.0)
+                            + 1e-6
+                    {
                         self.abort_exploration(world);
                         return false;
                     }
@@ -553,8 +557,16 @@ mod tests {
     }
     #[test]
     fn approach_climb_and_rollover_have_no_position_snap_at_any_scale() {
-        for scale in [0.75, 1.0, 1.5] {
-            let w = world();
+        for (scale, gap) in [
+            (0.75, 0.0),
+            (1.0, 0.0),
+            (1.5, 0.0),
+            (0.75, 30.0),
+            (1.0, 30.0),
+            (1.5, 30.0),
+        ] {
+            let mut w = world();
+            w.windows[0].rect.h -= gap * scale;
             let mut p = pet(Vec2::new(300.0, 1000.0));
             p.display_scale = scale;
             let plan = exploration_climb::plan_climb(&p, &w, 0.0).unwrap();
