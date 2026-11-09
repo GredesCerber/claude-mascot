@@ -20,6 +20,7 @@ jobs:
       contents: read
     env:
       MASCOT_UPDATE_REPO: ${{ github.repository }}
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
         with:
