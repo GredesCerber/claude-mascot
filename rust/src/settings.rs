@@ -4,6 +4,12 @@ use crate::timing::{valid_fps, DEFAULT_FPS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Release channel shared by native Windows builds and portable simulation.
+pub const DEFAULT_UPDATE_REPOSITORY: &str = match option_env!("MASCOT_UPDATE_REPO") {
+    Some(repository) => repository,
+    None => "GredesCerber/claude-mascot",
+};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -48,7 +54,7 @@ impl Default for Settings {
             activity_intensity: 50,
             paused: false,
             auto_updates: true,
-            update_repo: crate::update::DEFAULT_REPOSITORY.into(),
+            update_repo: DEFAULT_UPDATE_REPOSITORY.into(),
         }
     }
 }
@@ -91,7 +97,7 @@ impl Settings {
             .update_repo
             .eq_ignore_ascii_case("kerimovernes/claude-mascot")
         {
-            value.update_repo = crate::update::DEFAULT_REPOSITORY.into();
+            value.update_repo = DEFAULT_UPDATE_REPOSITORY.into();
         }
         Ok(value)
     }
@@ -335,7 +341,7 @@ mod tests {
         assert!(s.auto_reactions);
         assert!(s.desktop_perches);
         assert_eq!((s.personal_space_min, s.personal_space_max), (24.0, 96.0));
-        assert_eq!(s.update_repo, crate::update::DEFAULT_REPOSITORY);
+        assert_eq!(s.update_repo, DEFAULT_UPDATE_REPOSITORY);
     }
     #[test]
     fn legacy_update_channel_migrates_without_resetting_preferences() {
@@ -349,7 +355,7 @@ mod tests {
         )
         .unwrap();
         let migrated = Settings::load(&path).unwrap();
-        assert_eq!(migrated.update_repo, crate::update::DEFAULT_REPOSITORY);
+        assert_eq!(migrated.update_repo, DEFAULT_UPDATE_REPOSITORY);
         assert!(!migrated.auto_updates);
         assert_eq!(migrated.target_fps, 120);
         assert_eq!(migrated.body_color, 0x112233);

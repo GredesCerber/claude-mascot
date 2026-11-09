@@ -14,10 +14,7 @@ use std::time::{Duration, Instant};
 #[path = "update_http.rs"]
 mod update_http;
 
-pub const DEFAULT_REPOSITORY: &str = match option_env!("MASCOT_UPDATE_REPO") {
-    Some(repository) => repository,
-    None => "GredesCerber/claude-mascot",
-};
+pub use crate::settings::DEFAULT_UPDATE_REPOSITORY as DEFAULT_REPOSITORY;
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub(crate) const MAX_EXECUTABLE_SIZE: u64 = 64 * 1024 * 1024;
