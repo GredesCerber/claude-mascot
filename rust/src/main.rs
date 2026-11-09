@@ -12,7 +12,81 @@ use std::path::PathBuf;
 const MSI_INSTALL_MARKER: &str = "install-mode-msi.marker";
 #[cfg(windows)]
 const MSI_UPDATE_MESSAGE: &str =
-    "Эта версия установлена через MSI. Обновите установочным пакетом из Releases.";
+    "Это MSI-установка. Обновляйте её новым установочным пакетом через Windows Installer.";
+
+#[cfg(windows)]
+enum UpdateChoice {
+    DownloadExe,
+    OpenMsiRelease(String),
+}
+
+#[cfg(windows)]
+fn update_choice(
+    msi_mode: bool,
+    repository: &str,
+    release: &claude_mascot::update::ReleaseInfo,
+) -> Result<UpdateChoice, String> {
+    if !msi_mode {
+        return Ok(UpdateChoice::DownloadExe);
+    }
+    let mut parts = repository.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err("Repository must be an owner/name pair".into());
+    };
+    let valid_component = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && !part.starts_with('.')
+            && !part.ends_with('.')
+            && !part.contains("..")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if !valid_component(owner) || !valid_component(name) {
+        return Err("Repository contains invalid owner or name characters".into());
+    }
+    let version = semver::Version::parse(&release.version)
+        .map_err(|_| "Release version is invalid".to_string())?;
+    if release.tag != format!("v{version}") && release.tag != format!("rust-v{version}") {
+        return Err("Release tag does not match its parsed version".into());
+    }
+    Ok(UpdateChoice::OpenMsiRelease(format!(
+        "https://github.com/{repository}/releases/tag/{}",
+        release.tag
+    )))
+}
+
+#[cfg(windows)]
+fn open_release_page(url: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let operation = "open".encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let url = std::ffi::OsStr::new(url)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both NUL-terminated buffers live through this synchronous call.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows could not open the release page (code {})",
+            result as isize
+        ))
+    }
+}
 
 #[cfg(any(windows, test))]
 fn has_msi_marker(executable: &std::path::Path) -> bool {
@@ -26,28 +100,6 @@ fn running_from_msi() -> bool {
     std::env::current_exe()
         .ok()
         .is_some_and(|executable| has_msi_marker(&executable))
-}
-
-#[cfg(windows)]
-fn show_msi_update_message() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-    let message = MSI_UPDATE_MESSAGE
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let title = "Claude Mascot Rust"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both nul-terminated buffers live for this synchronous call.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            message.as_ptr(),
-            title.as_ptr(),
-            MB_OK | MB_ICONINFORMATION,
-        );
-    }
 }
 
 struct Options {
@@ -280,10 +332,6 @@ mod msi_marker_tests {
 #[cfg(windows)]
 fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
     use claude_mascot::update::{UpdateEvent, UpdateService};
-    if msi_mode {
-        show_msi_update_message();
-        return Ok(());
-    }
     let s = Settings::load(&o.config)?;
     let service = UpdateService::new(s.update_repo.clone(), false);
     service.request_check();
@@ -292,7 +340,7 @@ fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
         for event in service.poll() {
             match event {
                 UpdateEvent::Checked { release, .. } => {
-                    let result = serde_json::json!({"current":env!("CARGO_PKG_VERSION"),"repository":s.update_repo,"available":release.map(|r|r.version)});
+                    let result = serde_json::json!({"current":env!("CARGO_PKG_VERSION"),"repository":s.update_repo,"available":release.map(|r|r.version),"install_mode":if msi_mode {"msi"} else {"portable"}});
                     println!("{result}");
                     if let Some(p) = &o.trace {
                         std::fs::write(p, serde_json::to_vec_pretty(&result).unwrap())
@@ -354,6 +402,8 @@ fn preview(dir: &std::path::Path) -> Result<(), String> {
         State::Idle,
         State::Walk,
         State::Run,
+        State::Approach,
+        State::Crouch,
         State::Chase,
         State::Sit,
         State::Sleep,
@@ -808,7 +858,7 @@ mod native {
         let media = claude_mascot::media::MediaMonitor::new();
         let updates = UpdateService::new(
             settings.update_repo.clone(),
-            settings.auto_updates && !msi_mode && !o.skip_update_check && o.seconds.is_none(),
+            settings.auto_updates && !o.skip_update_check && o.seconds.is_none(),
         );
         let mut update_in_progress = false;
         let mut declined_update: Option<String> = None;
@@ -912,17 +962,34 @@ mod native {
                         if !update_in_progress
                             && (manual || declined_update.as_deref() != Some(&release.version))
                         {
-                            if update_dialog(&format!("Доступна версия {}. Сейчас установлена {}.\n\nСкачать и перезапустить приложение? Настройки сохранятся.",release.version,env!("CARGO_PKG_VERSION")),true){update_in_progress=true;updates.request_download(release);}else{declined_update=Some(release.version);}
+                            match update_choice(msi_mode, &settings.update_repo, &release) {
+                                Ok(UpdateChoice::OpenMsiRelease(url)) => {
+                                    if update_dialog(
+                                        &format!("Доступна версия {}. Сейчас установлена {}.\n\n{}", release.version, env!("CARGO_PKG_VERSION"), "Для обновления MSI нужен новый установочный пакет. Открыть страницу найденного релиза?"),
+                                        true,
+                                    ) {
+                                        if let Err(error) = open_release_page(&url) {
+                                            update_dialog(&error, false);
+                                        }
+                                    } else {
+                                        declined_update = Some(release.version);
+                                    }
+                                }
+                                Ok(UpdateChoice::DownloadExe) => {
+                                    if update_dialog(&format!("Доступна версия {}. Сейчас установлена {}.\n\nСкачать и перезапустить приложение? Настройки сохранятся.",release.version,env!("CARGO_PKG_VERSION")),true){update_in_progress=true;updates.request_download(release);}else{declined_update=Some(release.version);}
+                                }
+                                Err(error) => {
+                                    update_dialog(&error, false);
+                                }
+                            }
                         }
                     }
                     UpdateEvent::Checked {
                         release: None,
                         manual: true,
                     } => {
-                        update_dialog(
-                            "Более новой версии с готовым Windows EXE не найдено.",
-                            false,
-                        );
+                        let status = format!("Установлена версия {}. Более новой опубликованной Windows-версии не найдено. Режим установки: {}.", env!("CARGO_PKG_VERSION"), if msi_mode { "MSI" } else { "portable" });
+                        update_dialog(&status, false);
                     }
                     UpdateEvent::Downloaded(staged) => {
                         if msi_mode {
@@ -1243,20 +1310,13 @@ mod native {
                         save = true;
                     }
                     60 => {
-                        if msi_mode {
-                            update_dialog(MSI_UPDATE_MESSAGE, false);
-                        } else if !update_in_progress {
+                        if !update_in_progress {
                             updates.request_check();
                         }
                     }
                     61 => {
-                        if msi_mode {
-                            update_dialog(MSI_UPDATE_MESSAGE, false);
-                            continue;
-                        }
                         settings.auto_updates = !settings.auto_updates;
-                        updates
-                            .set_enabled(settings.auto_updates && !msi_mode && o.seconds.is_none());
+                        updates.set_enabled(settings.auto_updates && o.seconds.is_none());
                         save = true;
                     }
                     _ => {}
@@ -1391,7 +1451,7 @@ mod native {
             }
             for e in &mut entries {
                 e.host.set_menu_state(MenuState {
-                    auto_updates: settings.auto_updates && !msi_mode,
+                    auto_updates: settings.auto_updates,
                     selected_action: match e.pet.state {
                         claude_mascot::engine::State::Sit => 2,
                         claude_mascot::engine::State::Sleep => 3,
@@ -1495,5 +1555,39 @@ mod native {
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod update_choice_tests {
+    use super::{update_choice, UpdateChoice};
+    use claude_mascot::update::ReleaseInfo;
+
+    fn release(tag: &str) -> ReleaseInfo {
+        ReleaseInfo {
+            version: "1.2.3".into(),
+            tag: tag.into(),
+            url: "https://github.com/example/mascot/releases/download/v1.2.3/app.exe".into(),
+            sha256: "0".repeat(64),
+            size: 1,
+        }
+    }
+
+    #[test]
+    fn msi_offers_release_page_and_portable_keeps_exe_update_path() {
+        assert!(matches!(
+            update_choice(true, "example/mascot", &release("v1.2.3")),
+            Ok(UpdateChoice::OpenMsiRelease(url)) if url == "https://github.com/example/mascot/releases/tag/v1.2.3"
+        ));
+        assert!(matches!(
+            update_choice(false, "example/mascot", &release("v1.2.3")),
+            Ok(UpdateChoice::DownloadExe)
+        ));
+    }
+
+    #[test]
+    fn msi_release_link_rejects_untrusted_repository_or_tag() {
+        assert!(update_choice(true, "example/mascot/attacker", &release("v1.2.3")).is_err());
+        assert!(update_choice(true, "example/mascot", &release("v1.2.3/other")).is_err());
     }
 }

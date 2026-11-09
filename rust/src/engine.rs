@@ -6,6 +6,10 @@
 
 use std::collections::VecDeque;
 
+#[path = "engine_exploration.rs"]
+mod exploration_runtime;
+use exploration_runtime::ExploreRoute;
+
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::dialogue::{Dialogue, SpeechEvent};
@@ -47,6 +51,8 @@ impl<'de> Deserialize<'de> for Skin {
 pub enum State {
     Idle,
     Walk,
+    Approach,
+    Crouch,
     Run,
     Sit,
     Sleep,
@@ -160,6 +166,7 @@ pub struct Pet {
     pub(crate) behavior_velocity: Option<f64>,
     pub(crate) behavior_velocity_ttl: f64,
     pub(crate) behavior_manual_lock: f64,
+    exploration_route: Option<ExploreRoute>,
 }
 
 impl Pet {
@@ -237,6 +244,7 @@ impl Pet {
             behavior_velocity: None,
             behavior_velocity_ttl: 0.0,
             behavior_manual_lock: 0.0,
+            exploration_route: None,
         }
     }
 
@@ -286,6 +294,12 @@ impl Pet {
         }
         self.prune_shake();
 
+        if (self.social.is_some() || self.social_motion.is_some())
+            && self.exploration_route.is_some()
+        {
+            self.exploration_route = None;
+            self.target = None;
+        }
         if self.update_social_motion(dt, world) {
             self.snapshot_windows(world);
             self.last_cursor = world.cursor;
@@ -375,6 +389,11 @@ impl Pet {
                 }
             }
         }
+        if self.advance_exploration(dt, world) {
+            self.snapshot_windows(world);
+            self.last_cursor = world.cursor;
+            return;
+        }
         if self.state == State::Sleep && self.forced_sleep {
             if world.idle_seconds > self.forced_sleep_max + 1.0 {
                 self.forced_sleep_armed = true;
@@ -449,6 +468,7 @@ impl Pet {
     }
 
     pub fn command(&mut self, command: Command, world: &World) {
+        self.clear_exploration();
         self.behavior_manual_lock = 3.0;
         self.behavior_velocity = None;
         self.behavior_velocity_ttl = 0.0;
@@ -600,6 +620,7 @@ impl Pet {
     }
 
     pub fn drag_to(&mut self, pos: Vec2) {
+        self.clear_exploration();
         if !valid_vec(pos) {
             return;
         }
@@ -624,6 +645,7 @@ impl Pet {
     }
 
     pub fn release(&mut self, velocity: Vec2) {
+        self.clear_exploration();
         self.cancel_auto_pursuit();
         self.attention_target = None;
         self.attention_time = 0.0;
@@ -663,6 +685,7 @@ impl Pet {
     }
 
     pub fn pet(&mut self) {
+        self.clear_exploration();
         self.cancel_auto_pursuit();
         self.attention_target = None;
         self.attention_time = 0.0;
@@ -685,6 +708,7 @@ impl Pet {
     }
 
     pub fn jump(&mut self) {
+        self.clear_exploration();
         self.cancel_auto_pursuit();
         self.attention_target = None;
         self.attention_time = 0.0;
@@ -700,6 +724,8 @@ impl Pet {
                 self.state,
                 State::Idle
                     | State::Walk
+                    | State::Approach
+                    | State::Crouch
                     | State::Run
                     | State::Sit
                     | State::Sleep
@@ -1015,7 +1041,7 @@ impl Pet {
             }
             let decision_due = scheduled_decision
                 || self.random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0);
-            if decision_due && !self.try_explore_jump(world) {
+            if decision_due && !self.try_start_exploration(world) {
                 if scheduled_decision {
                     self.facing = if self.random() < 0.5 { -1.0 } else { 1.0 };
                 }
@@ -1088,26 +1114,26 @@ impl Pet {
     }
 
     fn overlaps_x(&self, r: Rect) -> bool {
-        self.pos.x + BODY_HALF_WIDTH > r.x && self.pos.x - BODY_HALF_WIDTH < r.right()
+        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+        self.pos.x + half > r.x && self.pos.x - half < r.right()
     }
 
     fn platform_under(&self, x: f64, world: &World) -> bool {
+        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
         if let Some(i) = self.current_surface_index(world) {
             return world.windows.get(i).is_some_and(|w| {
-                valid_rect(w.rect)
-                    && x + BODY_HALF_WIDTH > w.rect.x
-                    && x - BODY_HALF_WIDTH < w.rect.right()
+                valid_rect(w.rect) && x + half > w.rect.x && x - half < w.rect.right()
             });
         }
-        x >= world.area_at(self.pos).x - BODY_HALF_WIDTH
-            && x <= world.area_at(self.pos).right() + BODY_HALF_WIDTH
+        x >= world.area_at(self.pos).x - half && x <= world.area_at(self.pos).right() + half
     }
 
     fn follow_surface(&mut self, index: usize, world: &World) {
+        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
         if let Some(w) = world.windows.get(index) {
             if valid_rect(w.rect)
-                && self.pos.x >= w.rect.x - BODY_HALF_WIDTH
-                && self.pos.x <= w.rect.right() + BODY_HALF_WIDTH
+                && self.pos.x >= w.rect.x - half
+                && self.pos.x <= w.rect.right() + half
             {
                 self.pos.y = w.rect.y;
                 self.surface_prev = Some(w.rect);
@@ -1182,7 +1208,7 @@ impl Pet {
         } else {
             w.rect.right()
         };
-        self.pos.x = side + self.facing * BODY_HALF_WIDTH;
+        self.pos.x = side + self.facing * BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
         self.pos.y -= 65.0 * dt;
         if self.pos.y <= w.rect.y {
             self.pos.y = w.rect.y;
@@ -1917,68 +1943,6 @@ impl Pet {
         true
     }
 
-    /// Occasionally take a reachable window-top jump while idle. Candidate
-    /// reachability uses a fixed ballistic arc so it stays deterministic.
-    fn try_explore_jump(&mut self, world: &World) -> bool {
-        if self.explore_cooldown > 0.0 || self.state != State::Idle || !self.has_support(world) {
-            return false;
-        }
-        let mut best: Option<(f64, f64, f64, usize)> = None;
-        for (i, w) in world.windows.iter().enumerate() {
-            let icon = w.is_desktop_icon && w.rect.w >= 16.0 && w.rect.h >= 16.0;
-            if !valid_rect(w.rect) || (!icon && w.rect.w < 80.0) || w.rect.y >= self.pos.y - 60.0 {
-                continue;
-            }
-            let target_x = if icon && w.rect.w < BODY_HALF_WIDTH * 2.0 {
-                w.rect.x + w.rect.w * 0.5
-            } else {
-                self.pos
-                    .x
-                    .clamp(w.rect.x + BODY_HALF_WIDTH, w.rect.right() - BODY_HALF_WIDTH)
-            };
-            let area = world.area_at(Vec2::new(target_x, w.rect.y));
-            let head_clearance = self.head_clearance();
-            let rise = self.pos.y - w.rect.y + head_clearance;
-            let available_rise = (self.pos.y - area.y - head_clearance).clamp(0.0, 900.0);
-            if !area.contains(Vec2::new(target_x, w.rect.y)) || rise > available_rise {
-                continue;
-            }
-            let launch = (2.0 * GRAVITY * rise).sqrt().min(2_050.0);
-            let dy = w.rect.y - self.pos.y;
-            let disc = launch * launch + 2.0 * GRAVITY * dy;
-            if disc < 0.0 {
-                continue;
-            }
-            let t = (launch + disc.sqrt()) / GRAVITY;
-            let dx = target_x - self.pos.x;
-            let vx = dx / t;
-            if t <= 0.0
-                || vx.abs() > 360.0
-                || covered(world, Vec2::new(target_x, w.rect.y - 1.0), i)
-            {
-                continue;
-            }
-            let score = dx.abs() + dy.abs() * 0.7;
-            if best.is_none_or(|b| score < b.0) {
-                best = Some((score, vx, target_x, i));
-            }
-        }
-        let Some((_, vx, target_x, index)) = best else {
-            return false;
-        };
-        self.facing = if target_x < self.pos.x { -1.0 } else { 1.0 };
-        let rise = self.pos.y - world.windows[index].rect.y + self.head_clearance();
-        let launch = (2.0 * GRAVITY * rise).sqrt().min(2_050.0);
-        self.vel = Vec2::new(vx, -launch);
-        self.surface = None;
-        self.surface_id = None;
-        self.surface_prev = None;
-        self.set_state(State::Jump, 0.0);
-        self.target = Some(world.windows[index].id as u64);
-        self.explore_cooldown = 8.0 + self.random() * 10.0;
-        true
-    }
-
     fn start_peek_route(&mut self, video_id: usize, world: &World) {
         let Some((index, window)) = world
             .windows
@@ -2284,7 +2248,7 @@ fn title_hash(title: &str) -> u64 {
     title.hash(&mut hasher);
     hasher.finish()
 }
-fn covered(world: &World, p: Vec2, index: usize) -> bool {
+pub(crate) fn covered(world: &World, p: Vec2, index: usize) -> bool {
     world
         .windows
         .iter()
@@ -2334,12 +2298,16 @@ mod responsive_engine_tests {
         pet.state = State::Idle;
         pet.display_scale = 1.5;
         let high = support_world(Rect::new(0.0, 0.0, 1000.0, 1100.0), 300.0);
-        assert!(pet.try_explore_jump(&high));
-        assert!(pet.vel.y < -1_800.0);
+        assert!(pet.try_start_window_jump(&high));
+        assert_eq!(pet.state, State::Crouch);
+        for _ in 0..6 {
+            pet.update(0.05, &high);
+        }
+        assert!(pet.vel.y < -1_650.0);
 
         let mut pet = Pet::new(10, Skin::Claude, Vec2::new(400.0, 1100.0));
         pet.state = State::Idle;
         let constrained = support_world(Rect::new(0.0, 700.0, 1000.0, 400.0), 720.0);
-        assert!(!pet.try_explore_jump(&constrained));
+        assert!(!pet.try_start_window_jump(&constrained));
     }
 }

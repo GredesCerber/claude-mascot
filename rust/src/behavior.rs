@@ -197,7 +197,7 @@ impl BehaviorCoordinator {
                 || p.behavior_manual_lock > 0.0
                 || p.pending_ground.is_some()
                 || !matches!(p.state, State::Idle | State::Walk);
-            let active = p.state == State::Walk;
+            let active = matches!(p.state, State::Walk | State::Approach);
             self.entries[i] = Some(Entry {
                 id: p.id,
                 x: p.pos.x,

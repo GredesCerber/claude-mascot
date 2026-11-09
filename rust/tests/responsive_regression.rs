@@ -60,6 +60,8 @@ fn active_file_manager_navigation_title_change_is_not_missed() {
 #[test]
 fn startup_windows_and_reordering_do_not_trigger_reactions() {
     let mut pet = Pet::new(82, Skin::Claude, Vec2::new(400.0, 100.0));
+    // Isolate focus/reordering from optional exploration and voluntary descent.
+    pet.activity_intensity = 0;
     let mut w = world();
     w.windows = vec![window(1, false, true, 50.0), window(2, true, false, 400.0)];
     step(&mut pet, &w, 190);

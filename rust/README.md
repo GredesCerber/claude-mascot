@@ -1,10 +1,12 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
-Version 0.7.1 keeps **Claude only** and includes
+Version 0.8.0 keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
-It includes desktop-icon perches, adaptive jumps, cursor/Explorer reactions,
+It includes varied window/landing selection, deliberate approaches to window edges,
+a 0.22-second pixel crouch before exploration jumps, voluntary ledge descent,
+desktop-icon perches, adaptive jumps, cursor/Explorer reactions,
 75 activities from the supplied pixel pack and eight friendly social activities.
 Version 0.7.1 establishes this fork's own release/update channel and migrates
 the old upstream update setting while keeping other preferences.
@@ -21,7 +23,8 @@ Rendering rate is independent of the 240 Hz physics loop.
 Windows 10/11 x64. No Python or Rust runtime is required.
 Use the per-user MSI for shortcuts, upgrades and removal through Windows
 Settings or the Start Menu uninstall shortcut. See [MSI packaging](docs/msi.md).
-MSI installs update through a newer MSI.
+MSI installs can check for updates and show the installed version. A newer release
+can open its download page after confirmation; installation still uses a newer MSI.
 
 Alternatively, extract the portable ZIP and run `claude-mascot.exe`.
 `Install.ps1` copies the portable application to
@@ -144,7 +147,7 @@ embed the icon and package a portable ZIP. Executable QA arguments:
 .\target\release\claude-mascot.exe --smoke-test 5 --trace .\smoke.json
 ```
 
-See [architecture](docs/architecture.md), [0.7.1 checks](docs/verification-0.7.1.md)
+See [architecture](docs/architecture.md), [0.8.0 checks](docs/verification-0.8.0.md)
 and the [remaining roadmap](docs/planning/PLAN-RU.md).
 The proposed phrase bank is planning data, not a runtime dialogue engine.
 

@@ -6,6 +6,9 @@ pub mod contacts;
 pub mod desktop;
 pub mod dialogue;
 pub mod engine;
+pub(crate) mod exploration;
+pub(crate) mod exploration_climb;
+pub(crate) mod exploration_descent;
 #[cfg(windows)]
 pub mod media;
 pub mod palette;

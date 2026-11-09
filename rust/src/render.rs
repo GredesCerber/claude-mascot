@@ -419,7 +419,11 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             && p.state == State::Social
             && p.social
                 .is_some_and(|s| s.kind == SocialKind::Leapfrog && s.role == SocialRole::Partner));
-    let moving = matches!(p.state, State::Walk | State::Run | State::Chase);
+    let moving = matches!(
+        p.state,
+        State::Walk | State::Run | State::Chase | State::Approach
+    );
+    let crouching = p.state == State::Crouch && !p.dragging;
     let air = matches!(p.state, State::Fall | State::Jump | State::Thrown);
     let phase = (animation_time * 7.0) as usize % 2;
     let climbing = p.state == State::Climb && !p.dragging;
@@ -501,7 +505,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         0.0
     };
-    let top = if sitting || typing || social_watching_laptop {
+    let top = if crouching || sitting || typing || social_watching_laptop {
         -8.0
     } else {
         -11.0
@@ -531,6 +535,8 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
                 if lifted { 2.4 } else { 3.2 },
                 palette.shadow,
             );
+        } else if crouching {
+            px(*lx, -2.0, 1.0, 2.0, palette.shadow);
         } else if typing_pose {
             px(*lx, -3.0, 1.0, 3.0, palette.shadow);
         } else if stretching {
@@ -577,8 +583,20 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         0.0
     };
-    px(-6.0 + torso_shift, top, 12.0, 8.0, palette.body);
-    px(-6.0, top + 7.0, 12.0, 1.0, palette.shadow);
+    px(
+        -6.0 + torso_shift,
+        top,
+        12.0,
+        if crouching { 7.0 } else { 8.0 },
+        palette.body,
+    );
+    px(
+        -6.0,
+        top + if crouching { 6.0 } else { 7.0 },
+        12.0,
+        1.0,
+        palette.shadow,
+    );
     px(-5.0, top, 3.0, 1.0, palette.highlight);
     drop(px);
     if laptop_front {
@@ -613,7 +631,14 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             p.state,
             State::Happy | State::Jump | State::Thrown | State::Hold | State::Climb
         );
-    let arm = top + if up { 0.0 } else { 3.0 };
+    let arm = top
+        + if up {
+            0.0
+        } else if crouching {
+            2.0
+        } else {
+            3.0
+        };
     if climbing {
         // Reach alternates sides; mirroring is handled by px(), so the leading
         // hand stays in front of the direction Claude is climbing.
@@ -716,6 +741,12 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(-11.0, top + lift - 1.0, 2.0, 2.0, palette.highlight);
         px(7.0, top + lift, 2.0, 3.0, palette.body);
         px(9.0, top + lift - 1.0, 2.0, 2.0, palette.highlight);
+    } else if crouching {
+        // Fixed compact pose for the brief pre-jump crouch.
+        px(-8.0, top + 2.0, 3.0, 2.0, palette.body);
+        px(-6.0, top + 3.0, 2.0, 2.0, palette.highlight);
+        px(5.0, top + 2.0, 3.0, 2.0, palette.body);
+        px(4.0, top + 3.0, 2.0, 2.0, palette.highlight);
     } else if typing_pose {
         // Arms angle inward from Claude's shoulders to the laptop keyboard.
         let tapping = ((laptop_phase * 3.0).floor() as usize).is_multiple_of(2);
@@ -1500,6 +1531,42 @@ mod tests {
                 .unwrap();
         }
     }
+
+    #[test]
+    fn approach_walks_and_crouch_is_a_stable_compact_pose() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Idle;
+        pet.time = 0.0;
+        let idle = renderer.frame(&pet, false).pixels.clone();
+        pet.state = State::Approach;
+        pet.time = 0.2;
+        let approach = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(idle, approach, "approach should use a walk-like gait");
+
+        pet.state = State::Crouch;
+        pet.state_time = 0.01;
+        pet.time = 0.3;
+        let crouch = renderer.frame(&pet, false).pixels.clone();
+        assert_ne!(idle, crouch, "crouch should visibly tuck the body");
+        pet.state_time = 0.19;
+        pet.time = 4.7;
+        assert_eq!(
+            crouch,
+            renderer.frame(&pet, false).pixels,
+            "the crouch stays fixed for the full prep timer"
+        );
+        assert!(
+            crouch.contains(&0xFF1B1B1B),
+            "canonical eyes remain visible"
+        );
+        assert!(
+            crouch.contains(&0xFFD97757),
+            "canonical body palette remains visible"
+        );
+    }
+
     #[test]
     fn dance_wave_and_velocity_streaks_animate_only_in_their_states() {
         let mut renderer = Renderer::new().unwrap();

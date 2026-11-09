@@ -39,8 +39,9 @@ upgrade. Do not reuse a release version for distinct MSI builds.
 
 The MSI installs `install-mode-msi.marker` alongside the executable. The
 application uses this marker to recognize an MSI-managed installation and
-route updates to the release page so an in-app updater cannot replace files
-owned by Windows Installer. The mascot icon is embedded in the MSI and used
+check release metadata and offer the matching release page when a newer version
+exists. It reports the current version when no newer release is found. The
+in-app EXE updater cannot replace files owned by Windows Installer. The mascot icon is embedded in the MSI and used
 for its Apps & Features entry and both shortcuts. Keep the marker name and
 location aligned with the application's updater check.
 
