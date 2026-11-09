@@ -48,9 +48,7 @@ impl Default for Settings {
             activity_intensity: 50,
             paused: false,
             auto_updates: true,
-            update_repo: option_env!("MASCOT_UPDATE_REPO")
-                .unwrap_or("kerimovernes/claude-mascot")
-                .into(),
+            update_repo: crate::update::DEFAULT_REPOSITORY.into(),
         }
     }
 }
@@ -69,7 +67,7 @@ impl Settings {
         if s.len() > 65536 {
             return Err("Settings file exceeds 64 KiB".into());
         }
-        let value: Self = serde_json::from_str(&s)
+        let mut value: Self = serde_json::from_str(&s)
             .map_err(|e| format!("Invalid settings in {}: {e}", path.display()))?;
         if value.version != 1 {
             return Err(format!("Unsupported settings version {}", value.version));
@@ -85,6 +83,15 @@ impl Settings {
         }
         if value.body_color > 0xFFFFFF || value.activity_intensity > 100 {
             return Err("Color must be a 24-bit RGB value; intensity must be 0..100".into());
+        }
+        // Pre-0.7.1 builds saved the upstream channel even in our Windows port.
+        // Move that known legacy default to this build's channel, preserving
+        // explicitly configured third-party channels and the opt-out setting.
+        if value
+            .update_repo
+            .eq_ignore_ascii_case("kerimovernes/claude-mascot")
+        {
+            value.update_repo = crate::update::DEFAULT_REPOSITORY.into();
         }
         Ok(value)
     }
@@ -328,6 +335,35 @@ mod tests {
         assert!(s.auto_reactions);
         assert!(s.desktop_perches);
         assert_eq!((s.personal_space_min, s.personal_space_max), (24.0, 96.0));
+        assert_eq!(s.update_repo, crate::update::DEFAULT_REPOSITORY);
+    }
+    #[test]
+    fn legacy_update_channel_migrates_without_resetting_preferences() {
+        let path = std::env::temp_dir().join(format!(
+            "mascot-channel-migration-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"update_repo":"kerimovernes/claude-mascot","auto_updates":false,"target_fps":120,"body_color":1122867}"#,
+        )
+        .unwrap();
+        let migrated = Settings::load(&path).unwrap();
+        assert_eq!(migrated.update_repo, crate::update::DEFAULT_REPOSITORY);
+        assert!(!migrated.auto_updates);
+        assert_eq!(migrated.target_fps, 120);
+        assert_eq!(migrated.body_color, 0x112233);
+        migrated.save(&path).unwrap();
+        assert_eq!(
+            Settings::load(&path).unwrap().update_repo,
+            migrated.update_repo
+        );
+        std::fs::write(&path, r#"{"update_repo":"someone/custom-mascot"}"#).unwrap();
+        assert_eq!(
+            Settings::load(&path).unwrap().update_repo,
+            "someone/custom-mascot"
+        );
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn spacing_range_rejects_nonfinite_reversed_and_unbounded_values() {

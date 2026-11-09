@@ -285,14 +285,14 @@ fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
         return Ok(());
     }
     let s = Settings::load(&o.config)?;
-    let service = UpdateService::new(s.update_repo, false);
+    let service = UpdateService::new(s.update_repo.clone(), false);
     service.request_check();
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_secs(45) {
         for event in service.poll() {
             match event {
                 UpdateEvent::Checked { release, .. } => {
-                    let result = serde_json::json!({"current":env!("CARGO_PKG_VERSION"),"available":release.map(|r|r.version)});
+                    let result = serde_json::json!({"current":env!("CARGO_PKG_VERSION"),"repository":s.update_repo,"available":release.map(|r|r.version)});
                     println!("{result}");
                     if let Some(p) = &o.trace {
                         std::fs::write(p, serde_json::to_vec_pretty(&result).unwrap())

@@ -1,9 +1,9 @@
 name: Rust mascot
 on:
   push:
-    paths: ['rust/**', 'assets/**', '.github/workflows/rust.yml']
+    paths: ['rust/**', 'assets/**', '.github/workflows/rust.yml', '.github/workflows/rust-release.yml']
   pull_request:
-    paths: ['rust/**', 'assets/**', '.github/workflows/rust.yml']
+    paths: ['rust/**', 'assets/**', '.github/workflows/rust.yml', '.github/workflows/rust-release.yml']
 permissions:
   contents: read
 jobs:

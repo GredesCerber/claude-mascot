@@ -16,7 +16,7 @@ mod update_http;
 
 pub const DEFAULT_REPOSITORY: &str = match option_env!("MASCOT_UPDATE_REPO") {
     Some(repository) => repository,
-    None => "kerimovernes/claude-mascot",
+    None => "GredesCerber/claude-mascot",
 };
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);

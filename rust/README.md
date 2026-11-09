@@ -1,12 +1,15 @@
 # Claude Mascot Rust
 
-Windows-first native Rust port. Version 0.7.0 keeps **Claude only** and adds
+Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
+Version 0.7.1 keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
 It includes desktop-icon perches, adaptive jumps, cursor/Explorer reactions,
 75 activities from the supplied pixel pack and eight friendly social activities.
-The original Python/Linux
-application at the repository root is maintained separately.
+Version 0.7.1 establishes this fork's own release/update channel and migrates
+the old upstream update setting while keeping other preferences.
+The original [Python/Linux application](https://github.com/kerimovernes/claude-mascot)
+is preserved at the repository root. See [attribution](../ATTRIBUTION.md).
 
 Claude was already drawn in code. Its body, face, limbs and laptop are small
 pixel rectangles in a premultiplied BGRA buffer presented by Win32 layered
@@ -141,7 +144,7 @@ embed the icon and package a portable ZIP. Executable QA arguments:
 .\target\release\claude-mascot.exe --smoke-test 5 --trace .\smoke.json
 ```
 
-See [architecture](docs/architecture.md), [0.7.0 checks](docs/verification-0.7.0.md)
+See [architecture](docs/architecture.md), [0.7.1 checks](docs/verification-0.7.1.md)
 and the [remaining roadmap](docs/planning/PLAN-RU.md).
 The proposed phrase bank is planning data, not a runtime dialogue engine.
 

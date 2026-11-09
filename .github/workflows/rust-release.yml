@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: rust-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
@@ -54,6 +58,12 @@ jobs:
           dotnet tool install --global wix --version 6.0.2
           if ($LASTEXITCODE) { throw 'WiX installation failed' }
           ./rust/Build-Msi.ps1 -ExecutablePath "$env:GITHUB_WORKSPACE/rust/target/x86_64-pc-windows-msvc/release/claude-mascot.exe" -OutputDirectory "$env:RUNNER_TEMP/mascot-release"
+      - name: Validate MSI database
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "$env:RUNNER_TEMP/mascot-release" -Filter *.msi | Select-Object -First 1
+          wix msi validate $msi.FullName
+          if ($LASTEXITCODE) { throw "MSI validation failed" }
       - name: Package executable and SHA-256 manifest
         shell: pwsh
         run: |
@@ -73,6 +83,8 @@ jobs:
           Get-ChildItem 'rust/docs' | Copy-Item -Destination $docs -Recurse
           $zip = Join-Path $dist 'claude-mascot-windows-x64.zip'
           Compress-Archive -Path (Join-Path $portable '*') -DestinationPath $zip
+          $version = (Get-Content rust/Cargo.toml | Select-String '^version = "(.+)"$').Matches.Groups[1].Value
+          Copy-Item "rust/docs/releases/$version.md" (Join-Path $dist 'RELEASE-NOTES.md')
           $lines = @(
             "$( (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant() )  $(Split-Path -Leaf $exe)",
             "$( (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant() )  $(Split-Path -Leaf $zip)"
@@ -84,7 +96,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: rust-windows-x64-release
-          path: ${{ runner.temp }}/mascot-release/*
+          path: |
+            ${{ runner.temp }}/mascot-release/*.exe
+            ${{ runner.temp }}/mascot-release/*.zip
+            ${{ runner.temp }}/mascot-release/*.msi
+            ${{ runner.temp }}/mascot-release/SHA256SUMS
+            ${{ runner.temp }}/mascot-release/RELEASE-NOTES.md
           if-no-files-found: error
           retention-days: 7
 
@@ -98,7 +115,7 @@ jobs:
         with:
           name: rust-windows-x64-release
           path: release-assets
-      - name: Revalidate tag and publish release assets
+      - name: Publish verified release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -111,7 +128,22 @@ jobs:
             release-assets/claude-mascot-windows-x64.zip `
             release-assets/*.msi `
             release-assets/SHA256SUMS `
+            --draft `
             --verify-tag `
             --repo $env:GITHUB_REPOSITORY `
             --title "Claude Mascot $($env:GITHUB_REF_NAME)" `
-            --notes "Windows x64 release. SHA-256 digests for the executable and ZIP are in SHA256SUMS."
+            --notes-file release-assets/RELEASE-NOTES.md
+          if ($LASTEXITCODE) { throw 'Draft release creation failed.' }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
+          if ($LASTEXITCODE -or !$release.draft -or $release.prerelease) { throw 'Expected a stable draft release.' }
+          foreach ($line in Get-Content release-assets/SHA256SUMS) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw 'Invalid SHA256SUMS line.' }
+            $digest = 'sha256:' + $Matches[1]
+            $name = $Matches[2]
+            $assets = @($release.assets | Where-Object name -eq $name)
+            if ($assets.Count -ne 1 -or $assets[0].digest -ne $digest) {
+              throw "GitHub asset digest mismatch: $name"
+            }
+          }
+          gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE) { throw 'Release publication failed.' }

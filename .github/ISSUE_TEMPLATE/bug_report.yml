@@ -1,0 +1,22 @@
+name: Ошибка
+description: Опиши ошибку и шаги воспроизведения
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Версия приложения
+      placeholder: 0.7.1, MSI или portable
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Что произошло и как повторить
+      description: Ожидаемое поведение, фактическое поведение и шаги.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Окружение
+      description: Windows, масштаб экрана, FPS, количество петов. Без личных путей и содержимого папок.

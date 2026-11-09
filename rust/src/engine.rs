@@ -825,6 +825,21 @@ impl Pet {
             return;
         }
 
+        // Autonomous walking and running happen in short, bounded bouts.
+        // Keep duration-zero movement available to explicit routes and social
+        // motion, which own their own completion conditions.
+        if matches!(self.state, State::Walk | State::Run)
+            && self.state_duration > 0.0
+            && self.state_time >= self.state_duration
+            && self.social_motion.is_none()
+            && self.behavior_velocity_ttl <= 0.0
+        {
+            let frequency = self.activity_intensity.clamp(10, 100) as f64 / 50.0;
+            let pause = (1.5 + self.random() * 2.5) / frequency;
+            self.set_state(State::Idle, pause);
+            return;
+        }
+
         if self.state == State::Chase || (self.chase && !self.is_airborne()) {
             self.update_chase(dt, world);
             return;
@@ -975,40 +990,60 @@ impl Pet {
                 self.set_state(State::Fall, 0.0);
             } else {
                 self.vel.x = 0.0;
-                if self.social_motion.is_none() && self.random_chance(dt * 0.12) {
+                if self.social_motion.is_none()
+                    && self.state_duration <= 0.0
+                    && self.random_chance(dt * 0.12)
+                {
                     self.set_state(State::Idle, 0.0);
                 }
             }
-        } else if self.state == State::Idle
-            && self.random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0)
-            && !self.try_explore_jump(world)
-        {
-            let choice = self.random();
-            if choice < 0.12 && self.satisfaction >= 30.0 && self.auto_activities {
-                self.set_state(State::Dance, 2.6);
-                self.speak(SpeechEvent::Dance, 2.0);
-            } else if choice < 0.22 && self.satisfaction >= 30.0 && self.auto_activities {
-                self.set_state(State::Wave, 1.8);
-                self.speak(SpeechEvent::Wave, 2.0);
-            } else if choice < 0.42 {
-                let sit_duration = 4.0 + self.random() * 5.0;
-                self.set_state(State::Sit, sit_duration);
-            } else {
-                self.facing *= -1.0;
-                if choice > 0.86 {
-                    self.vel = Vec2::new(self.facing * 90.0, -620.0);
-                    self.squash = 0.25;
-                    self.set_state(State::Jump, 0.0);
-                    return;
+        } else if self.state == State::Idle {
+            if self.behavior_manual_lock > 0.0
+                || self.behavior_velocity_ttl > 0.0
+                || self.social_motion.is_some()
+            {
+                self.clamp_to_area(world);
+                return;
+            }
+            let scheduled_decision = self.state_duration > 0.0
+                && self.activity_intensity > 0
+                && self.social_motion.is_none()
+                && self.behavior_velocity_ttl <= 0.0;
+            if scheduled_decision && self.state_time < self.state_duration {
+                self.clamp_to_area(world);
+                return;
+            }
+            let decision_due = scheduled_decision
+                || self.random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0);
+            if decision_due && !self.try_explore_jump(world) {
+                if scheduled_decision {
+                    self.facing = if self.random() < 0.5 { -1.0 } else { 1.0 };
                 }
-                self.set_state(
-                    if choice > 0.67 {
-                        State::Run
+                let choice = self.random();
+                if choice < 0.12 && self.satisfaction >= 30.0 && self.auto_activities {
+                    self.set_state(State::Dance, 2.6);
+                    self.speak(SpeechEvent::Dance, 2.0);
+                } else if choice < 0.22 && self.satisfaction >= 30.0 && self.auto_activities {
+                    self.set_state(State::Wave, 1.8);
+                    self.speak(SpeechEvent::Wave, 2.0);
+                } else if choice < 0.42 {
+                    let sit_duration = 4.0 + self.random() * 5.0;
+                    self.set_state(State::Sit, sit_duration);
+                } else {
+                    self.facing *= -1.0;
+                    if choice > 0.86 {
+                        self.vel = Vec2::new(self.facing * 90.0, -620.0);
+                        self.squash = 0.25;
+                        self.set_state(State::Jump, 0.0);
+                        return;
+                    }
+                    let (state, duration) = if choice > 0.67 {
+                        (State::Run, 1.0 + self.random() * 1.5)
                     } else {
-                        State::Walk
-                    },
-                    0.0,
-                );
+                        (State::Walk, 3.0 + self.random() * 5.0)
+                    };
+                    self.set_state(state, duration);
+                }
             }
         }
         self.clamp_to_area(world);

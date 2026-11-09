@@ -1,9 +1,10 @@
 [package]
 name = "claude-mascot"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Native Windows desktop mascot with a platform-independent Rust simulation"
 publish = false
+repository = "https://github.com/GredesCerber/claude-mascot"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
