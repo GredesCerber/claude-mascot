@@ -287,17 +287,41 @@ impl Pet {
 
     /// Keep a tumbling body below the top of its work area so it never spins
     /// out of view; a ceiling hit returns a fraction of the vertical speed.
-    pub(super) fn tumble_ceiling(&mut self, world: &World) {
-        let area = world.area_at(self.pos);
+    pub(super) fn screen_ceiling(&mut self, old: Vec2, world: &World) {
+        let area = world.area_at(Vec2::new(self.pos.x, old.y));
         if !valid_rect(area) {
             return;
         }
         // The rotated sprite is taller than its ordinary upright contact box.
-        let clearance = super::TUMBLE_HEADROOM * self.display_scale.clamp(0.5, 2.0);
+        let scale = self.display_scale.clamp(0.5, 2.0);
+        let clearance = if self.spin != 0.0 || self.dizzy_next {
+            super::TUMBLE_HEADROOM * scale
+        } else {
+            self.head_clearance()
+        };
         let top = area.y + clearance.min(area.h);
+        // An adjoining upper display is an open passage, not a ceiling.
+        // The whole body must fit horizontally through that passage.
+        let half = super::BODY_HALF_WIDTH * scale;
+        if world.work_areas.iter().any(|other| {
+            valid_rect(*other)
+                && other.y < area.y
+                && other.bottom() >= area.y - 1.0
+                && self.pos.x - half >= other.x
+                && self.pos.x + half <= other.right()
+                && self.pos.y - clearance >= other.y
+        }) {
+            return;
+        }
         if self.pos.y < top && self.vel.y < 0.0 {
+            let impact = -self.vel.y;
             self.pos.y = top;
-            self.vel.y = -self.vel.y * 0.4;
+            self.vel.y = impact * 0.4;
+            self.squash = self.squash.max(0.45);
+            if self.state == State::Thrown && impact >= 500.0 && self.impact_cooldown <= 0.0 {
+                self.speak(SpeechEvent::Knocked, 1.4);
+                self.impact_cooldown = IMPACT_COOLDOWN;
+            }
         }
     }
 }

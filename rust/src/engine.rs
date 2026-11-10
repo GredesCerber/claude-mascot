@@ -963,9 +963,7 @@ impl Pet {
             } else {
                 self.clamp_to_area(world);
             }
-            if self.spin != 0.0 || self.dizzy_next {
-                self.tumble_ceiling(world);
-            }
+            self.screen_ceiling(old, world);
             if let Some(SocialMotion::Leap { target, owner_id }) = self.social_motion {
                 if self.vel.y >= 0.0
                     && old.y <= target.y
