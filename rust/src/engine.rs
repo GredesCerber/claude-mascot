@@ -139,6 +139,7 @@ pub struct Pet {
     pub(crate) reaction_scan: f64,
     pub(crate) reaction_cooldown: f64,
     pub(crate) cursor_dwell: f64,
+    pub(crate) cursor_play_cooldown: f64,
     pub(crate) cursor_interest: bool,
     pub(crate) cursor_motion_recent: f64,
     pub(crate) auto_pursuit_time: f64,
@@ -228,6 +229,7 @@ impl Pet {
             reaction_scan: 0.0,
             reaction_cooldown: 0.0,
             cursor_dwell: 0.0,
+            cursor_play_cooldown: 90.0 + (id.wrapping_mul(37) % 61) as f64,
             cursor_interest: false,
             cursor_motion_recent: 0.0,
             auto_pursuit_time: 0.0,
@@ -298,6 +300,7 @@ impl Pet {
         self.auto_activity_cooldown = (self.auto_activity_cooldown - dt).max(0.0);
         self.reaction_scan = (self.reaction_scan - dt).max(0.0);
         self.reaction_cooldown = (self.reaction_cooldown - dt).max(0.0);
+        self.cursor_play_cooldown = (self.cursor_play_cooldown - dt).max(0.0);
         self.attention_time = (self.attention_time - dt).max(0.0);
         if self.attention_time == 0.0 {
             self.attention_target = None;
@@ -1394,6 +1397,11 @@ impl Pet {
                 return;
             }
             self.facing = if dx < 0.0 { -1.0 } else { 1.0 };
+            if !self.platform_under(self.pos.x + self.facing * RUN_SPEED * dt, world) {
+                self.cancel_auto_pursuit();
+                self.set_state(State::Idle, 0.0);
+                return;
+            }
             self.pos.x = (self.pos.x + self.facing * RUN_SPEED * dt)
                 .clamp(area.x + BODY_HALF_WIDTH, area.right() - BODY_HALF_WIDTH);
             self.set_state(State::Chase, 0.0);
@@ -1920,10 +1928,22 @@ impl Pet {
             self.cursor_dwell = 0.0;
             self.cursor_interest = false;
         }
-        if self.cursor_dwell >= 0.7 && self.reaction_cooldown <= 0.0 && eligible {
+        // Cursor play is an occasional whim, not a guaranteed response to
+        // every nearby movement. Cooldown is separate from window reactions.
+        if self.cursor_dwell >= 0.7
+            && self.reaction_cooldown <= 0.0
+            && eligible
+            && self.cursor_play_cooldown <= 0.0
+            && self.activity_intensity > 0
+            && self.behavior_manual_lock <= 0.0
+            && self.social_motion.is_none()
+            && !world.fullscreen_active()
+            && self.random_chance(dt / 90.0 * (self.activity_intensity.min(100) as f64 / 50.0))
+        {
             self.auto_pursuit = true;
             self.pursuit_stationary = 0.0;
             self.auto_pursuit_time = 3.5;
+            self.cursor_play_cooldown = 180.0 + self.random() * 180.0;
             self.reaction_cooldown = 20.0;
             self.cursor_dwell = 0.0;
             self.set_state(State::Chase, 0.0);

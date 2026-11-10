@@ -32,6 +32,54 @@ fn settled() -> Pet {
     pet
 }
 
+fn await_cursor_play(pet: &mut Pet, w: &mut World) {
+    pet.auto_activities = false;
+    for frame in 0..72_000 {
+        w.cursor = Vec2::new(
+            pet.pos.x + 120.0 + (frame % 6) as f64 * 3.0,
+            pet.pos.y - 25.0,
+        );
+        pet.update(1.0 / 60.0, w);
+        if pet.state == State::Chase {
+            return;
+        }
+    }
+    panic!("rare autonomous cursor play never started");
+}
+
+#[test]
+fn cursor_play_is_not_an_immediate_or_repeated_nearby_trigger() {
+    let mut pet = settled();
+    pet.auto_activities = false;
+    let mut w = world();
+    for frame in 0..3600 {
+        w.cursor = Vec2::new(
+            pet.pos.x + 120.0 + (frame % 6) as f64 * 3.0,
+            pet.pos.y - 25.0,
+        );
+        pet.update(1.0 / 60.0, &w);
+        assert_ne!(
+            pet.state,
+            State::Chase,
+            "no pursuit during startup quiet period"
+        );
+    }
+    await_cursor_play(&mut pet, &mut w);
+    pet.pet();
+    for frame in 0..(120 * 60) {
+        w.cursor = Vec2::new(
+            pet.pos.x + 120.0 + (frame % 6) as f64 * 3.0,
+            pet.pos.y - 25.0,
+        );
+        pet.update(1.0 / 60.0, &w);
+        assert_ne!(
+            pet.state,
+            State::Chase,
+            "must not restart soon after petting"
+        );
+    }
+}
+
 #[test]
 fn newly_active_file_manager_gets_a_brief_notice_and_attention_point() {
     let mut pet = settled();
@@ -78,12 +126,7 @@ fn startup_windows_and_reordering_do_not_trigger_reactions() {
 fn cursor_play_is_bounded_and_does_not_change_persistent_manual_chase() {
     let mut pet = settled();
     let mut w = world();
-    w.cursor = Vec2::new(500.0, 680.0);
-    step(&mut pet, &w, 5);
-    for i in 0..55 {
-        w.cursor.x = 505.0 + (i % 8) as f64 * 3.0;
-        pet.update(1.0 / 60.0, &w);
-    }
+    await_cursor_play(&mut pet, &mut w);
     assert_eq!(pet.state, State::Chase);
     assert!(!pet.chase);
     step(&mut pet, &w, 100);
@@ -104,10 +147,14 @@ fn cursor_dwell_survives_30hz_world_updates_with_240hz_physics() {
     let mut pet = settled();
     let mut w = world();
     let mut saw_auto_chase = false;
-    for frame in 0..45 {
+    pet.auto_activities = false;
+    for frame in 0..36_000 {
         w.cursor = Vec2::new(565.0 + (frame % 6) as f64 * 3.0, 680.0);
         step(&mut pet, &w, 8);
         saw_auto_chase |= pet.state == State::Chase;
+        if saw_auto_chase {
+            break;
+        }
     }
     assert!(saw_auto_chase);
     assert!(!pet.chase);
@@ -161,17 +208,8 @@ fn disabled_reactions_rebaseline_windows_without_replaying_them() {
 fn petting_cancels_short_autonomous_cursor_play() {
     let mut pet = settled();
     let mut w = world();
-    let mut began = false;
-    for i in 0..55 {
-        w.cursor = Vec2::new(505.0 + (i % 8) as f64 * 3.0, 680.0);
-        pet.update(1.0 / 60.0, &w);
-        if pet.state == State::Chase {
-            began = true;
-            pet.pet();
-            break;
-        }
-    }
-    assert!(began);
+    await_cursor_play(&mut pet, &mut w);
+    pet.pet();
     assert_eq!(pet.state, State::Happy);
     assert!(!pet.chase);
 }
