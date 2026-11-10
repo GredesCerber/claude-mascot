@@ -45,6 +45,7 @@ const ID_AUTO_INSTALL: i32 = 118;
 const ID_CHOOSE_COLOR: i32 = 120;
 const ID_COLOR_BUTTON: i32 = 140;
 const ID_RESET_COLOR: i32 = 121;
+const ID_DISTINCT_COLORS: i32 = 122;
 const ID_ACTIVITY: i32 = 130;
 const ID_RUN_ACTIVITY: i32 = 131;
 const ID_ACTIVITY_SEARCH: i32 = 132;
@@ -670,6 +671,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     for item in ["75%", "100%", "150%"] {
         combo_item(s.scale_combo, item);
     }
+    button(s, "Всем разные цвета", ID_DISTINCT_COLORS, 20, 234, 260)?;
     s.build_page = 1;
     y = 150;
     heading(s, "Поведение", 20, 112, 400)?;
@@ -1352,6 +1354,7 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
             s.data.scale = scale;
             s.events.push(PreferencesEvent::SetScale(scale));
         }
+        (ID_DISTINCT_COLORS, BN_CLICKED) => s.events.push(PreferencesEvent::RunAction(189)),
         (ID_COLOR_BUTTON, BN_CLICKED) => s.events.push(PreferencesEvent::ChooseColor),
         (ID_RESET_COLOR, BN_CLICKED) => s.events.push(PreferencesEvent::ResetColor),
         (ID_RUN_ACTIVITY, BN_CLICKED) => {
@@ -1639,6 +1642,29 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn distinct_colors_button_dispatches_only_on_click() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            let control = GetDlgItem(panel.hwnd, ID_DISTINCT_COLORS);
+            assert!(!control.is_null());
+            handle_command(
+                &mut panel.state,
+                ID_DISTINCT_COLORS as usize | ((BN_SETFOCUS as usize) << 16),
+                control as isize,
+            );
+            assert!(panel.state.events.is_empty());
+            handle_command(
+                &mut panel.state,
+                ID_DISTINCT_COLORS as usize,
+                control as isize,
+            );
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::RunAction(189))
+            );
+        }
+    }
     #[test]
     fn tab_focus_scrolls_commands_into_view_without_running_them() {
         let mut panel = PreferencesWindow::new().unwrap();

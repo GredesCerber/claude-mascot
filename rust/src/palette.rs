@@ -11,6 +11,10 @@ pub const PRESETS: &[(u16, &str, u32)] = &[
     (187, "Графитовый", 0x565D69),
 ];
 
+pub fn distinct_color(index: usize) -> u32 {
+    PRESETS[index % PRESETS.len()].2
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub body: u32,

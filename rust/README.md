@@ -1,7 +1,7 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
-Version 0.12.3 keeps **Claude only** and includes
+Version 0.12.4 keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
 It includes varied window/landing selection, deliberate approaches to window edges,

@@ -90,6 +90,7 @@ struct Options {
     fps: Option<u32>,
     spacing: Option<(f64, f64)>,
     pets: usize,
+    pets_explicit: bool,
     activity: Option<claude_mascot::activities::ActivityId>,
     open_settings: bool,
 }
@@ -108,6 +109,7 @@ fn options() -> Result<Options, String> {
         fps: None,
         spacing: None,
         pets: 1,
+        pets_explicit: false,
         activity: None,
         open_settings: false,
     };
@@ -125,6 +127,7 @@ fn options() -> Result<Options, String> {
             "--desktop-probe" => o.desktop_probe = true,
             "--settings" => o.open_settings = true,
             "--pets" => {
+                o.pets_explicit = true;
                 o.pets = args
                     .next()
                     .ok_or("--pets needs a number")?
@@ -807,7 +810,11 @@ mod native {
                 .map_or(1, |d| d.as_nanos() as u64)
         });
         pet.reseed_speech(*speech_seed ^ pet.id);
-        pet.body_color = settings.body_color;
+        pet.body_color = settings
+            .pet_appearances
+            .iter()
+            .find(|p| p.id == pet.id)
+            .map_or(settings.body_color, |p| p.color);
         pet.activity_intensity = settings.activity_intensity;
         Ok(Entry {
             pet,
@@ -859,22 +866,12 @@ mod native {
         let mut update_was_automatic = false;
         let mut pending_update = None;
         let mut declined_update: Option<String> = None;
-        let mut entries = vec![spawn(
-            Pet::new(
-                1,
-                settings.skin,
-                Vec2::new(area.x + area.w / 2.0, area.y + 60.0),
-            ),
-            &settings,
-            true,
-        )?];
-        if o.inspect {
-            entries[0].host.expose_for_inspection()?;
-        }
-        for index in 1..o.pets {
-            entries.push(spawn(
+        let roster = settings.startup_pets(o.pets_explicit.then_some(o.pets));
+        let mut entries = Vec::with_capacity(roster.len());
+        for (index, saved) in roster.iter().enumerate() {
+            let mut entry = spawn(
                 Pet::new(
-                    index as u64 + 1,
+                    saved.id,
                     Skin::Claude,
                     Vec2::new(
                         (area.x + area.w / 2.0 + index as f64 * 72.0)
@@ -883,11 +880,17 @@ mod native {
                     ),
                 ),
                 &settings,
-                false,
-            )?);
+                index == 0,
+            )?;
+            entry.pet.body_color = saved.color;
             if o.inspect {
-                entries.last().unwrap().host.expose_for_inspection()?;
+                entry.host.expose_for_inspection()?;
             }
+            entries.push(entry);
+        }
+        settings.remember_pets(entries.iter().map(|e| (e.pet.id, e.pet.body_color)));
+        if o.seconds.is_none() {
+            settings.save(&o.config)?;
         }
         for entry in &mut entries {
             entry.pet.auto_activities = settings.auto_activities;
@@ -905,7 +908,7 @@ mod native {
         ));
         let mut preferences: Option<claude_mascot::preferences::PreferencesWindow> = None;
         let mut contacts = claude_mascot::contacts::ContactCoordinator::new();
-        let mut selected_pet_id = 1;
+        let mut selected_pet_id = entries[0].pet.id;
         if msi_mode && o.skip_update_check {
             if let Some(result) = claude_mascot::update_apply::last_msi_result() {
                 entries[0].pet.bubble = Some(if result["ok"].as_bool() == Some(true) {
@@ -920,7 +923,7 @@ mod native {
             }
         }
         let mut open_preferences = o.open_settings;
-        let mut next_id = o.pets as u64 + 1;
+        let mut next_id = entries.iter().map(|e| e.pet.id).max().unwrap_or(0) + 1;
         let start = Instant::now();
         let mut preferences_at = start;
         let mut previous = start;
@@ -1072,6 +1075,7 @@ mod native {
             let mut spawn_skins = Vec::new();
             let mut rebuild = false;
             let mut save = false;
+            let mut distinct_colors = false;
             if let Some(panel) = preferences.as_mut() {
                 use claude_mascot::preferences::PreferencesEvent::*;
                 for event in panel.poll() {
@@ -1158,6 +1162,10 @@ mod native {
                         selected_pet_id = e.pet.id;
                         open_preferences = true;
                     }
+                    189 => {
+                        distinct_colors = true;
+                        save = true;
+                    }
                     180..=188 => {
                         let color = if c == 188 {
                             e.host.choose_body_color(e.pet.body_color)
@@ -1183,8 +1191,14 @@ mod native {
                         };
                         e.pet.command(command, &world);
                     }
-                    20 => spawn_skins.push(Skin::Claude),
-                    30 => remove.push(i),
+                    20 => {
+                        spawn_skins.push(Skin::Claude);
+                        save = true;
+                    }
+                    30 => {
+                        remove.push(i);
+                        save = true;
+                    }
                     31 => running = false,
                     40 => {
                         settings.paused = !settings.paused;
@@ -1385,7 +1399,13 @@ mod native {
                     }
                 }
             }
+            if distinct_colors {
+                for (index, entry) in entries.iter_mut().enumerate() {
+                    entry.pet.body_color = claude_mascot::palette::distinct_color(index);
+                }
+            }
             if save {
+                settings.remember_pets(entries.iter().map(|e| (e.pet.id, e.pet.body_color)));
                 settings.save(&o.config)?;
             }
             if open_preferences {
@@ -1419,6 +1439,7 @@ mod native {
                     && !world.fullscreen_active()
                     && preferences.as_ref().is_none_or(|panel| !panel.is_visible())
             }) {
+                settings.remember_pets(entries.iter().map(|e| (e.pet.id, e.pet.body_color)));
                 settings.save(&o.config)?;
                 let config = std::fs::canonicalize(&o.config).map_err(|e| e.to_string())?;
                 let args = vec![

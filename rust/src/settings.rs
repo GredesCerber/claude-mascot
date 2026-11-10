@@ -4,6 +4,12 @@ use crate::timing::{valid_fps, DEFAULT_FPS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PetAppearance {
+    pub id: u64,
+    pub color: u32,
+}
+
 /// Release channel shared by native Windows builds and portable simulation.
 pub const DEFAULT_UPDATE_REPOSITORY: &str = match option_env!("MASCOT_UPDATE_REPO") {
     Some(repository) => repository,
@@ -28,6 +34,7 @@ pub struct Settings {
     pub personal_space_min: f64,
     pub personal_space_max: f64,
     pub body_color: u32,
+    pub pet_appearances: Vec<PetAppearance>,
     /// Frequency of optional activities, from quiet (0) to lively (100).
     pub activity_intensity: u8,
     pub paused: bool,
@@ -54,6 +61,7 @@ impl Default for Settings {
             personal_space_min: 24.0,
             personal_space_max: 96.0,
             body_color: crate::palette::DEFAULT_BODY_COLOR,
+            pet_appearances: Vec::new(),
             activity_intensity: 50,
             paused: false,
             auto_updates: true,
@@ -63,6 +71,41 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn startup_pets(&self, count_override: Option<usize>) -> Vec<PetAppearance> {
+        let mut pets = self.pet_appearances.clone();
+        if pets.is_empty() {
+            pets.push(PetAppearance {
+                id: 1,
+                color: self.body_color,
+            });
+        }
+        if let Some(count) = count_override {
+            let count = count.clamp(1, 8);
+            pets.truncate(count);
+            let mut next = pets
+                .iter()
+                .map(|p| p.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            while pets.len() < count {
+                pets.push(PetAppearance {
+                    id: next,
+                    color: self.body_color,
+                });
+                next += 1;
+            }
+        }
+        pets
+    }
+    pub fn remember_pets(&mut self, pets: impl IntoIterator<Item = (u64, u32)>) {
+        self.pet_appearances = pets
+            .into_iter()
+            .take(8)
+            .map(|(id, color)| PetAppearance { id, color })
+            .collect();
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
@@ -93,6 +136,17 @@ impl Settings {
         }
         if value.body_color > 0xFFFFFF || value.activity_intensity > 100 {
             return Err("Color must be a 24-bit RGB value; intensity must be 0..100".into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        if value.pet_appearances.len() > 8
+            || value.pet_appearances.iter().any(|p| {
+                p.id == 0 || p.id >= u64::MAX - 8 || p.color > 0xFFFFFF || !ids.insert(p.id)
+            })
+        {
+            return Err(
+                "Saved pets must have unique positive ids and valid RGB colors (up to eight pets)"
+                    .into(),
+            );
         }
         // Pre-0.7.1 builds saved the upstream channel even in our Windows port.
         // Move that known legacy default to this build's channel, preserving
@@ -481,5 +535,62 @@ mod tests {
         assert!(!saved.contains("Tagilla"));
         assert!(!saved.contains("custom_atlas"));
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pet_appearance_tests {
+    use super::*;
+    #[test]
+    fn rejects_invalid_or_duplicate_saved_pets() {
+        let path =
+            std::env::temp_dir().join(format!("mascot-roster-invalid-{}.json", std::process::id()));
+        for pets in [
+            vec![(1, 0x123456), (1, 0xABCDEF)],
+            vec![(0, 0)],
+            vec![(1, 0x1000000)],
+            (1..=9).map(|id| (id, 0x123456)).collect(),
+        ] {
+            let settings = Settings {
+                pet_appearances: pets
+                    .into_iter()
+                    .map(|(id, color)| PetAppearance { id, color })
+                    .collect(),
+                ..Settings::default()
+            };
+            settings.save(&path).unwrap();
+            assert!(Settings::load(&path).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn roster_preserves_identity_color_and_count_through_save_reload() {
+        let path = std::env::temp_dir().join(format!("mascot-roster-{}.json", std::process::id()));
+        let mut settings = Settings::default();
+        settings.remember_pets([(1, 0x123456), (3, 0x654321), (7, 0xABCDEF), (12, 0xD97757)]);
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path).unwrap();
+        assert_eq!(loaded.startup_pets(None), settings.pet_appearances);
+        assert_eq!(loaded.startup_pets(Some(2)).len(), 2);
+        assert_eq!(loaded.startup_pets(Some(6))[3].id, 12);
+        assert_eq!(loaded.startup_pets(Some(6))[4].id, 13);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn old_settings_use_legacy_color_and_new_pets_use_distinct_presets() {
+        let settings = Settings {
+            body_color: 0x123456,
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.startup_pets(None),
+            vec![PetAppearance {
+                id: 1,
+                color: 0x123456
+            }]
+        );
+        let colors: std::collections::BTreeSet<_> =
+            (0..8).map(crate::palette::distinct_color).collect();
+        assert_eq!(colors.len(), 8);
     }
 }
