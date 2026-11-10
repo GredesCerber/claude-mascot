@@ -26,9 +26,37 @@ pub(crate) struct ClimbPlan {
     /// -1 means the left edge; +1 means the right edge.
     pub side: f64,
     pub approach_x: f64,
+    /// Interior fraction for climbing the window face; None hugs a side edge.
+    pub face_fraction: Option<f64>,
     /// Standing hop (feet rise in px) needed before the hands reach the side
     /// edge of a floating window. Zero when the window reaches the floor.
     pub hop: f64,
+}
+impl ClimbPlan {
+    pub(crate) fn attachment_x(self, rect: Rect, scale: f64) -> f64 {
+        self.face_fraction.map_or_else(
+            || {
+                if self.side < 0.0 {
+                    rect.x - BODY_HALF * scale
+                } else {
+                    rect.right() + BODY_HALF * scale
+                }
+            },
+            |f| rect.x + rect.w * f,
+        )
+    }
+    pub(crate) fn grip_x(self, rect: Rect, scale: f64) -> f64 {
+        self.face_fraction.map_or_else(
+            || {
+                if self.side < 0.0 {
+                    rect.x - 3.0 * scale
+                } else {
+                    rect.right() + 3.0 * scale
+                }
+            },
+            |f| rect.x + rect.w * f,
+        )
+    }
 }
 
 /// Feet rise needed to grab the side of `w` from `floor`, or `None` when the
@@ -61,21 +89,34 @@ pub(crate) fn plan_climb(pet: &Pet, world: &World, roll: f64) -> Option<ClimbPla
         };
         for side in [-1.0, 1.0] {
             if let Some(x) = approach_x(pet, world, w, side) {
-                candidates.push((w.id, side, x, (x - pet.pos.x).abs(), hop));
+                candidates.push(ClimbPlan {
+                    window_id: w.id,
+                    side,
+                    approach_x: x,
+                    hop,
+                    face_fraction: None,
+                });
+            }
+        }
+        // A broad face can be reached from below without pretending it is a side.
+        // Floating windows retain the physical edge-grab hop route.
+        if hop == 0.0 {
+            for fraction in [0.3, 0.7] {
+                if let Some(x) = face_approach_x(pet, world, w, fraction) {
+                    candidates.push(ClimbPlan {
+                        window_id: w.id,
+                        side: 1.0,
+                        approach_x: x,
+                        hop,
+                        face_fraction: Some(fraction),
+                    });
+                }
             }
         }
     }
-    candidates.sort_by(|a, b| a.3.total_cmp(&b.3));
     let pick = ((roll.clamp(0.0, 1.0) * candidates.len() as f64) as usize)
         .min(candidates.len().saturating_sub(1));
-    candidates
-        .get(pick)
-        .map(|(window_id, side, approach_x, _, hop)| ClimbPlan {
-            window_id: *window_id,
-            side: *side,
-            approach_x: *approach_x,
-            hop: *hop,
-        })
+    candidates.get(pick).copied()
 }
 
 pub(crate) fn refresh_climb(pet: &Pet, world: &World, plan: ClimbPlan) -> Option<ClimbPlan> {
@@ -89,7 +130,14 @@ pub(crate) fn refresh_climb(pet: &Pet, world: &World, plan: ClimbPlan) -> Option
         return None;
     }
     let hop = grab_hop(floor, w, scale)?;
-    let approach_x = approach_x(pet, world, w, plan.side)?;
+    let approach_x = if let Some(fraction) = plan.face_fraction {
+        if hop != 0.0 {
+            return None;
+        }
+        face_approach_x(pet, world, w, fraction)?
+    } else {
+        approach_x(pet, world, w, plan.side)?
+    };
     Some(ClimbPlan {
         approach_x,
         hop,
@@ -105,19 +153,52 @@ pub(crate) fn can_attach(pet: &Pet, world: &World, plan: ClimbPlan) -> bool {
     let floor = world.area_at(pet.pos).bottom();
     (pet.pos.x - plan.approach_x).abs() <= 3.0
         && (pet.pos.y - floor).abs() <= 3.0
-        && (pet.pos.x
-            - (if plan.side < 0.0 {
-                w.rect.x - BODY_HALF * pet_scale(pet)
-            } else {
-                w.rect.right() + BODY_HALF * pet_scale(pet)
-            }))
-        .abs()
-            <= 3.0
+        && (pet.pos.x - plan.attachment_x(w.rect, pet_scale(pet))).abs() <= 3.0
         && !covered(
             world,
-            Vec2::new(pet.pos.x, floor - 40.0 * pet_scale(pet)),
+            Vec2::new(
+                plan.grip_x(w.rect, pet_scale(pet)),
+                floor - 40.0 * pet_scale(pet),
+            ),
             w,
         )
+}
+
+fn face_approach_x(pet: &Pet, world: &World, w: &WindowInfo, fraction: f64) -> Option<f64> {
+    let scale = pet_scale(pet);
+    let area = floor_area(pet, world)?;
+    let x = w.rect.x + w.rect.w * fraction;
+    let half = BODY_HALF * scale;
+    if w.rect.w < 160.0 * scale
+        || (x - pet.pos.x).abs() > MAX_APPROACH * scale
+        || x - half < w.rect.x
+        || x + half > w.rect.right()
+        || pet.pos.x.min(x) - half < area.x
+        || pet.pos.x.max(x) + half > area.right()
+        || w.rect.y < area.y + 63.0 * scale
+    {
+        return None;
+    }
+    let target = world.windows.iter().position(|other| other.id == w.id)?;
+    let lo = pet.pos.x.min(x) - half;
+    let hi = pet.pos.x.max(x) + half;
+    if world.windows.iter().skip(target + 1).any(|other| {
+        valid(other.rect)
+            && (
+                // Keep the whole ascent and the walking approach clear of occluders.
+                (other.rect.x < x + half
+                    && other.rect.right() > x - half
+                    && other.rect.y < area.bottom()
+                    && other.rect.bottom() > w.rect.y)
+                    || (other.rect.x < hi
+                        && other.rect.right() > lo
+                        && other.rect.y < area.bottom()
+                        && other.rect.bottom() > area.bottom() - 48.0 * scale)
+            )
+    }) {
+        return None;
+    }
+    Some(x)
 }
 
 fn eligible(w: &WindowInfo) -> bool {

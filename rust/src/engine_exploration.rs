@@ -181,15 +181,10 @@ impl Pet {
         let rect = world.windows[index].rect;
         let area = world.area_at(self.pos);
         let scale = self.display_scale.clamp(0.5, 2.0);
-        let edge_x = if plan.side < 0.0 {
-            rect.x
-        } else {
-            rect.right()
-        };
         if rect.y < area.y + self.head_clearance()
             || (0..=32).any(|step| {
                 let y = rect.y + 1.0 + (self.pos.y - rect.y - 36.0 * scale) * step as f64 / 32.0;
-                covered(world, Vec2::new(edge_x + plan.side * 3.0 * scale, y), index)
+                covered(world, Vec2::new(plan.grip_x(rect, scale), y), index)
             })
         {
             return false;
@@ -280,6 +275,8 @@ impl Pet {
                     self.surface_id = Some(plan.window_id);
                     self.surface_prev = Some(world.windows[i].rect);
                     self.facing = plan.side;
+                    self.climb_front = plan.face_fraction.is_some();
+                    self.climb_face_fraction = plan.face_fraction.unwrap_or(0.5);
                     self.set_state(State::Climb, 0.0);
                     route.phase = Phase::Climbing(plan);
                 } else {
@@ -407,6 +404,8 @@ impl Pet {
                     self.surface_prev = Some(rect);
                     self.vel = Vec2::default();
                     self.facing = plan.side;
+                    self.climb_front = plan.face_fraction.is_some();
+                    self.climb_face_fraction = plan.face_fraction.unwrap_or(0.5);
                     self.set_state(State::Climb, 0.0);
                     route.phase = Phase::Climbing(plan);
                     self.exploration_route = Some(route);
@@ -441,13 +440,8 @@ impl Pet {
                 };
                 let rect = world.windows[i].rect;
                 let scale = self.display_scale.clamp(0.5, 2.0);
-                let edge = if plan.side < 0.0 {
-                    rect.x
-                } else {
-                    rect.right()
-                };
                 let edge_point = Vec2::new(
-                    edge + plan.side * 3.0 * scale,
+                    plan.grip_x(rect, scale),
                     (self.pos.y - 35.0 * scale).max(rect.y + 1.0),
                 );
                 let area = world.area_at(self.pos);
@@ -470,7 +464,9 @@ impl Pet {
                     self.abort_exploration(world);
                     return false;
                 }
-                let x = if plan.side < 0.0 {
+                let x = if let Some(fraction) = plan.face_fraction {
+                    rect.x + rect.w * fraction
+                } else if plan.side < 0.0 {
                     rect.x + BODY_HALF_WIDTH * scale + 1.0
                 } else {
                     rect.right() - BODY_HALF_WIDTH * scale - 1.0
@@ -569,6 +565,42 @@ mod tests {
         p.auto_reactions = false;
         p.auto_activity_cooldown = 1e6;
         p
+    }
+    #[test]
+    fn face_route_climbs_inside_window_and_arrives_without_side_snap() {
+        let mut w = world();
+        let mut p = pet(Vec2::new(300.0, 1000.0));
+        let plan = exploration_climb::plan_climb(&p, &w, 0.99).unwrap();
+        assert!(plan.face_fraction.is_some());
+        assert!(p.begin_climb_route(plan, &w));
+        let mut saw_climb = false;
+        let mut reached = false;
+        for _ in 0..6000 {
+            let before = p.pos;
+            p.update(DT, &w);
+            assert!((p.pos.x - before.x).abs() < 2.0);
+            if p.state == State::Climb {
+                saw_climb = true;
+                assert!(p.climb_front);
+                assert!(p.pos.x > w.windows[0].rect.x + 24.0);
+                assert!(p.pos.x < w.windows[0].rect.right() - 24.0);
+            }
+            if saw_climb && p.state == State::Ledge && p.exploration_route.is_none() {
+                reached = true;
+                break;
+            }
+        }
+        assert!(saw_climb && reached);
+        assert!((p.pos.y - w.windows[0].rect.y).abs() < 0.1);
+        // An opaque front window invalidates the face route before reserving it.
+        let p = pet(Vec2::new(300.0, 1000.0));
+        w.windows
+            .push(window(88, Rect::new(500.0, 350.0, 400.0, 650.0)));
+        for roll in [0.0, 0.25, 0.5, 0.99] {
+            if let Some(plan) = exploration_climb::plan_climb(&p, &w, roll) {
+                assert_ne!(plan.window_id, 77);
+            }
+        }
     }
     #[test]
     fn prepared_jump_holds_pose_then_reaches_actual_window() {

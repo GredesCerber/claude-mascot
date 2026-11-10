@@ -203,3 +203,48 @@ fn too_short_ceiling_rejects_the_whole_requested_group() {
         .iter()
         .all(|p| p.social.is_none() && p.social_motion.is_none()));
 }
+
+#[test]
+fn two_through_five_mixed_resting_friends_build_complete_towers() {
+    for count in 2..=5 {
+        let w = world(1040.0);
+        let mut ps = pets(count, 1040.0, 1.0);
+        for (i, p) in ps.iter_mut().enumerate() {
+            p.state = [
+                State::Idle,
+                State::Sit,
+                State::LookAround,
+                State::Stretch,
+                State::Run,
+            ][i];
+        }
+        let mut coordinator = SocialCoordinator::new();
+        coordinator.request_tower(Some(1));
+        coordinator.update(0.0, ps.iter_mut(), &w);
+        assert_eq!(ps.iter().filter(|p| p.social.is_some()).count(), count);
+        let mut max_perched = 0;
+        for _ in 0..7200 {
+            coordinator.update(1.0 / 240.0, ps.iter_mut(), &w);
+            for p in &mut ps {
+                p.update(1.0 / 240.0, &w);
+            }
+            max_perched = max_perched.max(
+                ps.iter()
+                    .filter(|p| matches!(p.social_motion, Some(SocialMotion::Perch { .. })))
+                    .count(),
+            );
+            if coordinator.stats.completed > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            max_perched,
+            count - 1,
+            "tower with {count} friends did not fully form"
+        );
+        assert_eq!(
+            coordinator.stats.completed, 1,
+            "tower with {count} friends did not dismount"
+        );
+    }
+}

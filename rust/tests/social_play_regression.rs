@@ -355,3 +355,60 @@ fn tag_respects_an_offset_window_runway_and_tower_rejects_low_ceiling() {
     );
     assert!(elevated.iter().all(|p| p.social.is_none()));
 }
+
+#[test]
+fn leapfrog_completes_two_to_ten_bouncy_jumps_and_can_turn_at_a_ledge() {
+    for (second_id, expected_jumps) in [(8, 2), (9, 10)] {
+        for narrow in [false, true] {
+            let mut w = world();
+            let mut pets = pair();
+            pets[1].id = second_id;
+            if narrow {
+                w.work_areas[0].w = 450.0;
+                pets[0].pos.x = 150.0;
+                pets[1].pos.x = 250.0;
+            }
+            let mut coordinator = SocialCoordinator::new();
+            coordinator.request_for(1, Some(SocialKind::Leapfrog));
+            coordinator.update(0.0, pets.iter_mut(), &w);
+            let mut launches = 0;
+            let mut jumping = [false; 2];
+            assert!(pets[0]
+                .social
+                .is_some_and(|s| s.kind == SocialKind::Leapfrog));
+            for _ in 0..7200 {
+                for (i, p) in pets.iter_mut().enumerate() {
+                    p.update(1.0 / 240.0, &w);
+                    let now = p.state == State::Jump;
+                    if now && !jumping[i] {
+                        launches += 1;
+                    }
+                    jumping[i] = now;
+                    assert!(p.pos.x >= 24.0 && p.pos.x <= w.work_areas[0].right() - 24.0);
+                }
+                if (pets[0].pos.x - pets[1].pos.x).abs() < 35.0 {
+                    assert!(
+                        (pets[0].pos.y - pets[1].pos.y).abs() > 40.0,
+                        "jump must clear the crouching friend"
+                    );
+                }
+                coordinator.update(1.0 / 240.0, pets.iter_mut(), &w);
+                if coordinator.stats.completed > 0 {
+                    break;
+                }
+            }
+            assert_eq!(
+                launches,
+                expected_jumps,
+                "narrow={narrow} stats={:?} pets={:?}",
+                coordinator.stats,
+                pets.iter()
+                    .map(|p| (p.id, p.state, p.pos, p.social, p.social_motion))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(coordinator.stats.completed, 1);
+            assert_eq!(coordinator.stats.cancelled, 0);
+            assert!(pets.iter().all(|p| p.social.is_none()));
+        }
+    }
+}

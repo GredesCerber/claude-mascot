@@ -556,6 +556,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let phase = (animation_time * 7.0) as usize % 2;
     let climbing = p.state == State::Climb && !p.dragging;
     let climb_phase = (state_time * 5.0).floor() as usize % 4;
+    let edge_climbing = climbing && !p.climb_front;
     let social = if !p.dragging { p.social.as_ref() } else { None };
     let social_kind = social.map(|activity| activity.kind);
     let social_greeting = social_kind == Some(SocialKind::Greeting);
@@ -714,20 +715,26 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         0.0
     };
     px(
-        -6.0 + torso_shift,
+        (if edge_climbing { -4.0 } else { -6.0 }) + torso_shift,
         top,
-        12.0,
+        if edge_climbing { 9.0 } else { 12.0 },
         if crouching { 7.0 } else { 8.0 },
         palette.body,
     );
     px(
-        -6.0,
+        if edge_climbing { -4.0 } else { -6.0 },
         top + if crouching { 6.0 } else { 7.0 },
-        12.0,
+        if edge_climbing { 9.0 } else { 12.0 },
         1.0,
         palette.shadow,
     );
-    px(-5.0, top, 3.0, 1.0, palette.highlight);
+    px(
+        if edge_climbing { -3.0 } else { -5.0 },
+        top,
+        3.0,
+        1.0,
+        palette.highlight,
+    );
     drop(px);
     if laptop_front {
         draw_laptop(
@@ -769,7 +776,16 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         } else {
             3.0
         };
-    if climbing {
+    if edge_climbing {
+        // Facing points away from the window: both hands must stay on the
+        // inward edge (negative local x), mirrored together at the other side.
+        let reach = if climb_phase < 2 { -2.0 } else { 1.0 };
+        px(-6.0, top + reach, 2.0, 3.0, palette.body);
+        px(-6.0, top + 4.0 - reach, 2.0, 2.0, palette.body);
+        px(-6.0, top + reach, 1.0, 1.0, palette.highlight);
+        px(-5.0, -3.0, 3.0, 1.0, palette.shadow);
+        px(-5.0, -3.0, 1.0, 2.0, palette.shadow);
+    } else if climbing {
         // Reach alternates sides; mirroring is handled by px(), so the leading
         // hand stays in front of the direction Claude is climbing.
         let reach = if climb_phase < 2 { 1.0 } else { -1.0 };
@@ -983,9 +999,15 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let gaze_y = if eyes_closed { 0.0 } else { cursor_gaze_y };
     // Keep a visible glance at 100% scale while staying within the face.
     // The local pixel unit is 5 physical pixels.
-    let eye_offset_x = gaze_x * facing_sign * 0.5;
+    let eye_offset_x = gaze_x * facing_sign * 0.5 + if edge_climbing { 1.0 } else { 0.0 };
     let eye_offset_y = gaze_y * 0.3;
     for eye in [-4.0, 3.0] {
+        if climbing && p.climb_front {
+            continue;
+        } // Back view against the glass.
+        if edge_climbing && eye > 0.0 {
+            continue;
+        } // Profile toward the rim.
         if p.state == State::Sleep || activity_closed_eyes || blink {
             px(eye - 0.3, top + 3.2, 1.6, 0.6, palette.eyes);
         } else if p.state == State::Happy {
@@ -1017,7 +1039,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             );
         }
     }
-    if angry && !matches!(p.state, State::Happy | State::Sleep) {
+    if angry && !(climbing && p.climb_front) && !matches!(p.state, State::Happy | State::Sleep) {
         px(-4.5, top + 1.2, 2.0, 0.6, 0xFF6E3029);
         px(2.5, top + 1.2, 2.0, 0.6, 0xFF6E3029);
     }
@@ -1643,6 +1665,33 @@ mod tests {
             (130..220).all(|y| (185..260).all(|x| frame.pixels[y * WIDTH + x] == 0)),
             "the imported human beside Claude must not reappear"
         );
+    }
+    #[test]
+    fn face_and_edge_climbing_have_distinct_crisp_poses() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Climb;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/climb-modes-preview");
+        std::fs::create_dir_all(&dir).unwrap();
+        for phase in [0.05, 0.25, 0.45, 0.65] {
+            pet.state_time = phase;
+            pet.climb_front = false;
+            let side = renderer.frame(&pet, false).pixels.clone();
+            renderer
+                .canvas
+                .save_png(&dir.join(format!("edge-{phase}.png")))
+                .unwrap();
+            pet.climb_front = true;
+            let front = renderer.frame(&pet, false).pixels.clone();
+            renderer
+                .canvas
+                .save_png(&dir.join(format!("face-{phase}.png")))
+                .unwrap();
+            assert_ne!(side, front);
+            pet.state_time += 0.001;
+            assert_eq!(front, renderer.frame(&pet, false).pixels);
+        }
     }
     #[test]
     fn climbing_frames_alternate_and_stay_inside_mascot_bounds() {

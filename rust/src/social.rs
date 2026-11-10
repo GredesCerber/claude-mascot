@@ -71,6 +71,7 @@ struct Pair {
     support: Rect,
     upper: u64,
     tower_anchor_dx: f64,
+    leapfrog_jumps: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -111,6 +112,7 @@ impl Default for Pair {
             support: Rect::default(),
             upper: 0,
             tower_anchor_dx: 0.0,
+            leapfrog_jumps: 4,
         }
     }
 }
@@ -136,6 +138,7 @@ pub struct SocialCoordinator {
     age: f64,
     pairs: [Option<Pair>; 4],
     tower: Option<TowerGroup>,
+    tower_invitation_at: f64,
     cooldowns: [Cooldown; CAP],
     request: Option<(Option<u64>, Option<SocialKind>)>,
     request_age: f64,
@@ -155,6 +158,7 @@ impl SocialCoordinator {
             age: 0.0,
             pairs: [None; 4],
             tower: None,
+            tower_invitation_at: 20.0,
             cooldowns: [Cooldown::default(); CAP],
             request: None,
             request_age: 0.0,
@@ -307,7 +311,7 @@ impl SocialCoordinator {
                         p.state_time = 0.0;
                     }
                     pair.chaser = pair.chaser.saturating_add(1);
-                    if pair.chaser >= 4 {
+                    if pair.chaser >= pair.leapfrog_jumps as u64 {
                         self.pairs[ix] = None;
                         self.finish_pair(pair, refs, n, world, true);
                         continue;
@@ -316,23 +320,22 @@ impl SocialCoordinator {
                 } else if pair.phase > 0.0 {
                     pair.phase = (pair.phase - dt).max(0.0);
                     if pair.phase == 0.0 {
-                        let next = croucher_id;
-                        let Some(ji) = find(refs, n, next) else {
-                            self.pairs[ix] = None;
-                            self.finish_pair(pair, refs, n, world, false);
-                            continue;
+                        let target_for = |id: u64| {
+                            let other = if id == pair.a { pair.b } else { pair.a };
+                            let ji = find(refs, n, id)?;
+                            let ci = find(refs, n, other)?;
+                            leapfrog_target(
+                                refs[ji].as_deref().unwrap(),
+                                refs[ci].as_deref().unwrap(),
+                                pair.support,
+                            )
+                            .map(|target| (id, other, target))
                         };
-                        let Some(ci) = find(refs, n, jumper_id) else {
-                            self.pairs[ix] = None;
-                            self.finish_pair(pair, refs, n, world, false);
-                            continue;
-                        };
-                        let target = leapfrog_target(
-                            refs[ji].as_deref().unwrap(),
-                            refs[ci].as_deref().unwrap(),
-                            pair.support,
-                        );
-                        let Some(target) = target else {
+                        // At a ledge, hop back over the crouching friend instead
+                        // of abandoning the game after just one or two jumps.
+                        let Some((next, other_id, target)) =
+                            target_for(croucher_id).or_else(|| target_for(jumper_id))
+                        else {
                             self.pairs[ix] = None;
                             self.finish_pair(pair, refs, n, world, false);
                             continue;
@@ -371,11 +374,13 @@ impl SocialCoordinator {
                             }
                         }
                         if let Some(i) = find(refs, n, next) {
-                            refs[i].as_deref_mut().unwrap().social_motion =
-                                Some(SocialMotion::Leap {
-                                    target,
-                                    owner_id: jumper_id,
-                                });
+                            let jumper = refs[i].as_deref_mut().unwrap();
+                            jumper.state = State::Crouch;
+                            jumper.state_time = 0.0;
+                            jumper.social_motion = Some(SocialMotion::Leap {
+                                target,
+                                owner_id: other_id,
+                            });
                         }
                     }
                 }
@@ -640,11 +645,11 @@ impl SocialCoordinator {
         }
         let base_i = target
             .and_then(|id| {
-                find(refs, n, id).filter(|&i| free_eligible(refs, i, world, self, manual))
+                find(refs, n, id).filter(|&i| tower_eligible(refs, i, world, self, manual))
             })
             .or_else(|| {
                 (0..n)
-                    .filter(|&i| free_eligible(refs, i, world, self, manual))
+                    .filter(|&i| tower_eligible(refs, i, world, self, manual))
                     .min_by_key(|&i| refs[i].as_deref().unwrap().id)
             });
         let Some(mut base_i) = base_i else {
@@ -656,7 +661,7 @@ impl SocialCoordinator {
         let mut candidates: Vec<(u64, usize)> = (0..n)
             .filter_map(|i| {
                 let p = refs[i].as_deref()?;
-                (free_eligible(refs, i, world, self, manual) && same_support(base, p, world))
+                (tower_eligible(refs, i, world, self, manual) && same_support(base, p, world))
                     .then_some((p.id, i))
             })
             .collect();
@@ -705,6 +710,11 @@ impl SocialCoordinator {
                     .total_cmp(&(bx - center).abs())
                     .then_with(|| a.cmp(b))
             });
+        }
+        if !manual && len > 2 {
+            // Vary autonomous tower size instead of requiring every free pet.
+            let seed = (self.age * 10.0) as u64 ^ self.stats.started.wrapping_mul(37);
+            len = 2 + (seed % (len - 1) as u64) as usize;
         }
         let base_pos = refs[base_i].as_deref().unwrap().pos;
         // Tower height is checked for the complete requested group before any reservation.
@@ -1118,6 +1128,18 @@ impl SocialCoordinator {
         if self.age < INITIAL_DELAY && self.request.is_none() {
             return;
         }
+        // A group invitation must not depend on the generic pair gate finding
+        // two walkers first. Resting friends can join without being paired off.
+        if self.request.is_none() && self.age >= self.tower_invitation_at {
+            self.tower_invitation_at =
+                self.age + 35.0 + (self.stats.started.wrapping_mul(17) % 46) as f64;
+            let available = (0..n)
+                .filter(|&i| tower_eligible(refs, i, world, self, false))
+                .count();
+            if available >= 3 && self.start_tower(None, refs, n, world, false) {
+                return;
+            }
+        }
         let mut ids = [(u64::MAX, 0usize); CAP];
         for i in 0..n {
             if let Some(p) = refs[i].as_deref() {
@@ -1257,7 +1279,12 @@ impl SocialCoordinator {
         let Some(slot) = slot else { return false };
         let a_id = refs[i].as_deref().unwrap().id;
         let b_id = refs[j].as_deref().unwrap().id;
-        let duration = duration(kind);
+        let leapfrog_jumps = 2 + ((a_id ^ b_id ^ self.age as u64) % 9) as u8;
+        let duration = if kind == SocialKind::Leapfrog {
+            leapfrog_jumps as f64 * 1.8 + 3.0
+        } else {
+            duration(kind)
+        };
         let ax = refs[i].as_deref().unwrap().pos.x;
         let bx = refs[j].as_deref().unwrap().pos.x;
         let initial_tag_separation = if kind == SocialKind::Tag && (ax - bx).abs() < 64.0 {
@@ -1331,6 +1358,7 @@ impl SocialCoordinator {
                 0
             },
             tower_anchor_dx: 0.0,
+            leapfrog_jumps,
         });
         let pair = self.pairs[slot].unwrap();
         if kind == SocialKind::Tag {
@@ -1352,11 +1380,13 @@ impl SocialCoordinator {
             let croucher = refs[j].as_deref().unwrap();
             if let Some(target) = leapfrog_target(jumper, croucher, pair.support) {
                 if let Some(jumper_i) = find(refs, CAP, a_id) {
-                    refs[jumper_i].as_deref_mut().unwrap().social_motion =
-                        Some(SocialMotion::Leap {
-                            target,
-                            owner_id: b_id,
-                        });
+                    let jumper = refs[jumper_i].as_deref_mut().unwrap();
+                    jumper.state = State::Crouch;
+                    jumper.state_time = 0.0;
+                    jumper.social_motion = Some(SocialMotion::Leap {
+                        target,
+                        owner_id: b_id,
+                    });
                 }
             }
         }
@@ -1507,6 +1537,46 @@ fn cooldown(c: &mut [Cooldown; CAP], id: u64, seconds: f64) {
 fn cooling(c: &[Cooldown; CAP], id: u64) -> bool {
     c.iter().any(|x| x.id == id && x.remaining > 0.0)
 }
+fn tower_eligible(
+    refs: &[Option<&mut Pet>; CAP],
+    i: usize,
+    w: &World,
+    s: &SocialCoordinator,
+    manual: bool,
+) -> bool {
+    let p = refs[i].as_deref().unwrap();
+    // The generic pair gate only admits Idle/Walk/Happy. That accidentally
+    // excludes most friends when they are resting or looking around.
+    p.skin == Skin::Claude
+        && !p.dragging
+        && !p.chase
+        && p.social.is_none()
+        && p.activity.is_none()
+        && p.socially_supported(w)
+        && (manual || (p.activity_intensity > 0 && p.behavior_manual_lock <= 0.0))
+        && matches!(
+            p.state,
+            State::Idle
+                | State::Walk
+                | State::Run
+                | State::Happy
+                | State::Sit
+                | State::LookAround
+                | State::Wave
+                | State::Stretch
+                | State::Dance
+        )
+        && !s
+            .pairs
+            .iter()
+            .flatten()
+            .any(|pair| pair.a == p.id || pair.b == p.id)
+        && !s
+            .tower
+            .is_some_and(|group| group.ids[..group.len].contains(&p.id))
+        && (manual || !cooling(&s.cooldowns, p.id))
+}
+
 fn free_eligible(
     refs: &[Option<&mut Pet>; CAP],
     i: usize,
@@ -1670,7 +1740,9 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
                 && b.pos.x <= support.right() - 35.0
         }
         SocialKind::Leapfrog => {
-            support.w >= 320.0
+            support.y - w.area_at(a.pos).y
+                >= 180.0 * a.display_scale.max(b.display_scale).clamp(0.5, 2.0)
+                && support.w >= 320.0
                 && leapfrog_target(a, b, support).is_some()
                 && leapfrog_target(b, a, support).is_some()
         }
@@ -1894,5 +1966,67 @@ impl Pet {
         };
         self.state_time = 0.0;
         self.state_duration = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tower_selection_tests {
+    use super::*;
+    #[test]
+    fn group_invitation_does_not_need_two_idle_walkers() {
+        let world = World::default();
+        let mut pets: Vec<_> = (0..5)
+            .map(|i| {
+                let mut p = Pet::new(
+                    i + 1,
+                    Skin::Claude,
+                    Vec2::new(700.0 + i as f64 * 82.0, 1040.0),
+                );
+                p.state = if i == 0 { State::Idle } else { State::Sit };
+                p
+            })
+            .collect();
+        let mut refs: [Option<&mut Pet>; CAP] = std::array::from_fn(|_| None);
+        for (slot, pet) in refs.iter_mut().zip(pets.iter_mut()) {
+            *slot = Some(pet);
+        }
+        let mut coordinator = SocialCoordinator::new();
+        coordinator.age = 20.2;
+        coordinator.tick(&mut refs, 5, &world);
+        assert!(coordinator.tower.is_some());
+        assert!(coordinator.tower_invitation_at > coordinator.age);
+    }
+    #[test]
+    fn autonomous_towers_can_choose_two_three_four_and_five_relaxed_friends() {
+        let world = World::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..12 {
+            let mut pets: Vec<_> = (0..5)
+                .map(|i| {
+                    let mut p = Pet::new(
+                        i + 1,
+                        Skin::Claude,
+                        Vec2::new(700.0 + i as f64 * 82.0, 1040.0),
+                    );
+                    p.state = [
+                        State::Idle,
+                        State::Sit,
+                        State::LookAround,
+                        State::Stretch,
+                        State::Run,
+                    ][i as usize];
+                    p
+                })
+                .collect();
+            let mut refs: [Option<&mut Pet>; CAP] = std::array::from_fn(|_| None);
+            for (slot, pet) in refs.iter_mut().zip(pets.iter_mut()) {
+                *slot = Some(pet);
+            }
+            let mut coordinator = SocialCoordinator::new();
+            coordinator.age = seed as f64 / 10.0;
+            assert!(coordinator.start_tower(Some(1), &mut refs, 5, &world, false));
+            seen.insert(coordinator.tower.unwrap().len);
+        }
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), vec![2, 3, 4, 5]);
     }
 }

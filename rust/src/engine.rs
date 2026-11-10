@@ -129,6 +129,9 @@ pub struct Pet {
     pub display_scale: f64,
     /// Normalized gaze direction in world axes, smoothed toward the cursor.
     pub gaze: Vec2,
+    /// Front-surface climbing uses a back view; edge climbing hugs the rim.
+    pub climb_front: bool,
+    pub(crate) climb_face_fraction: f64,
     /// Short lived point of interest for the renderer (for example, a newly opened file manager).
     pub attention_target: Option<Vec2>,
     /// Enables gentle reactions to visible desktop activity.
@@ -266,6 +269,8 @@ impl Pet {
             social_motion: None,
             display_scale: 1.0,
             gaze: Vec2::default(),
+            climb_front: false,
+            climb_face_fraction: 0.5,
             attention_target: None,
             auto_reactions: true,
             activity: None,
@@ -630,6 +635,7 @@ impl Pet {
                 }
             }
             Command::Climb => {
+                self.climb_front = false;
                 if let Some((i, w, dir)) = self.nearest_edge(world) {
                     if w.is_desktop_icon {
                         let edge_x = if dir < 0.0 { w.rect.x } else { w.rect.right() };
@@ -1401,7 +1407,11 @@ impl Pet {
         } else {
             w.rect.right()
         };
-        self.pos.x = side + self.facing * BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+        self.pos.x = if self.climb_front {
+            w.rect.x + w.rect.w * self.climb_face_fraction
+        } else {
+            side + self.facing * BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
+        };
         self.pos.y -= 65.0 * dt;
         if self.pos.y <= w.rect.y {
             self.pos.y = w.rect.y;
@@ -2072,7 +2082,19 @@ impl Pet {
                     return false;
                 }
                 if self.state != State::Jump && !self.is_airborne() {
-                    let rise = (self.pos.y - target.y + self.head_clearance()).clamp(80.0, 900.0);
+                    let leapfrog = self
+                        .social
+                        .is_some_and(|s| s.kind == crate::social::SocialKind::Leapfrog);
+                    if leapfrog && self.state == State::Crouch && self.state_time < 0.16 {
+                        return true;
+                    }
+                    let minimum_rise = if leapfrog {
+                        120.0 * self.display_scale.clamp(0.5, 2.0)
+                    } else {
+                        80.0
+                    };
+                    let rise =
+                        (self.pos.y - target.y + self.head_clearance()).clamp(minimum_rise, 900.0);
                     let area = world.area_at(self.pos);
                     let available_rise = (self.pos.y - area.y - self.head_clearance()).max(0.0);
                     if rise > available_rise {
