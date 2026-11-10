@@ -281,22 +281,28 @@ fn repeated_rough_throws_make_pet_unhappy_and_petting_calms_it_faster() {
 }
 
 #[test]
-fn grounded_pet_tracks_taskbar_work_area_changes_without_falling() {
+fn grounded_pet_bounces_on_raised_taskbar_and_settles_on_new_floor() {
     let mut w = world();
     let mut p = Pet::new(101, Skin::Claude, Vec2::new(200.0, 700.0));
     p.state = State::Idle;
+    p.auto_activities = false;
+    p.auto_reactions = false;
+    p.activity_intensity = 0;
     p.update(1.0 / 60.0, &w);
 
-    // Taskbar shown: the usable desktop becomes shorter.
     w.work_areas[0].h = 660.0;
     p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Jump);
+    assert!(p.pos.y < 660.0 && p.vel.y < 0.0);
+    step(&mut p, &w, 120);
     assert_eq!(p.state, State::Idle);
     assert!((p.pos.y - 660.0).abs() < 0.1);
 
-    // Taskbar hidden: usable desktop expands. The floor follows the pet in
-    // the same update, rather than leaving it airborne until a later crossing.
     w.work_areas[0].h = 700.0;
     p.update(1.0 / 60.0, &w);
+    assert_eq!(p.state, State::Fall);
+    assert!(p.pos.y > 660.0 && p.pos.y < 700.0);
+    step(&mut p, &w, 120);
     assert_eq!(p.state, State::Idle);
     assert!((p.pos.y - 700.0).abs() < 0.1);
 }
