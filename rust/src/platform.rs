@@ -602,6 +602,15 @@ fn wait_millis_ceil(duration: std::time::Duration) -> u32 {
 
 #[cfg(windows)]
 unsafe fn tray_icon_from_ico(ico: &[u8]) -> HICON {
+    icon_from_ico(ico, 32)
+}
+
+/// Returns an owned icon; the caller must destroy it after its window closes.
+pub(crate) unsafe fn application_icon(size: i32) -> HICON {
+    icon_from_ico(TRAY_ICON, size)
+}
+
+unsafe fn icon_from_ico(ico: &[u8], requested: i32) -> HICON {
     // ICO directory entries point at RT_ICON-compatible payloads. The checked-in
     // icon includes PNG-compressed frames, supported by Windows Vista and newer.
     if ico.len() < 6 || ico[0..4] != [0, 0, 1, 0] {
@@ -643,8 +652,8 @@ unsafe fn tray_icon_from_ico(ico: &[u8]) -> HICON {
         size as u32,
         1,
         0x0003_0000,
-        32,
-        32,
+        requested,
+        requested,
         LR_DEFAULTCOLOR,
     )
 }

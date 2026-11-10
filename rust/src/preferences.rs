@@ -146,6 +146,8 @@ struct WindowState {
     accent_brush: HBRUSH,
     section_headers: Vec<HWND>,
     color_brush: HBRUSH,
+    small_icon: HICON,
+    big_icon: HICON,
     color_value: u32,
     dpi: f64,
     scroll: i32,
@@ -179,6 +181,8 @@ impl WindowState {
             accent_brush: null_mut(),
             section_headers: Vec::new(),
             color_brush: null_mut(),
+            small_icon: null_mut(),
+            big_icon: null_mut(),
             color_value: u32::MAX,
             dpi: 1.0,
             scroll: 0,
@@ -243,6 +247,31 @@ impl PreferencesWindow {
                 release_gdi_resources(&state);
             }
             return Err(last_error("CreateFontW/CreateSolidBrush preferences"));
+        }
+        unsafe {
+            state.small_icon = crate::platform::application_icon(scale(16, state.dpi));
+            state.big_icon = crate::platform::application_icon(scale(32, state.dpi));
+        }
+        if state.small_icon.is_null() || state.big_icon.is_null() {
+            unsafe {
+                DestroyWindow(hwnd);
+                release_gdi_resources(&state);
+            }
+            return Err("Cannot load embedded Claude window icons".into());
+        }
+        unsafe {
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                ICON_SMALL as usize,
+                state.small_icon as LPARAM,
+            );
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                ICON_BIG as usize,
+                state.big_icon as LPARAM,
+            );
         }
         if let Err(error) = unsafe { build_controls(&mut state) } {
             unsafe {
@@ -398,6 +427,11 @@ fn last_error(api: &str) -> String {
     format!("{api} failed ({})", unsafe { GetLastError() })
 }
 unsafe fn release_gdi_resources(s: &WindowState) {
+    for icon in [s.small_icon, s.big_icon] {
+        if !icon.is_null() {
+            DestroyIcon(icon);
+        }
+    }
     for object in [
         s.font as HGDIOBJ,
         s.bold_font as HGDIOBJ,
@@ -588,7 +622,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
             ID_NAV_BASE + index as i32,
             14,
             108 + index as i32 * 42,
-            160,
+            174,
         )?;
     }
     s.build_page = 0;
@@ -1204,12 +1238,52 @@ unsafe fn draw_button(s: &WindowState, item: &DRAWITEMSTRUCT) {
     let pad = scale(5, s.dpi);
     rect.left += pad;
     rect.right -= pad;
+    let nav = GetDlgCtrlID(item.hwndItem) - ID_NAV_BASE;
+    if (0..7).contains(&nav) {
+        // Tiny pixel glyphs use GDI rectangles: no emoji font or runtime SVG.
+        let pieces: &[(i32, i32, i32, i32)] = match nav {
+            0 => &[(1, 1, 6, 6), (9, 1, 6, 6), (1, 9, 6, 6), (9, 9, 6, 6)],
+            1 => &[(2, 1, 5, 7), (9, 8, 5, 7)],
+            2 => &[(0, 4, 16, 3), (3, 11, 13, 3)],
+            3 => &[(1, 1, 5, 5), (10, 1, 5, 5), (0, 8, 7, 7), (9, 8, 7, 7)],
+            4 => &[(1, 10, 3, 6), (6, 6, 3, 10), (11, 1, 3, 15)],
+            5 => &[(3, 1, 3, 14), (6, 3, 3, 10), (9, 5, 3, 6), (12, 7, 3, 2)],
+            _ => &[
+                (6, 0, 4, 9),
+                (2, 6, 4, 3),
+                (10, 6, 4, 3),
+                (4, 9, 8, 3),
+                (0, 14, 16, 2),
+            ],
+        };
+        for &(x, y, w, h) in pieces {
+            let left = item.rcItem.left + scale(8 + x, s.dpi);
+            let top = item.rcItem.top + scale(7 + y, s.dpi);
+            FillRect(
+                item.hDC,
+                &RECT {
+                    left,
+                    top,
+                    right: left + scale(w, s.dpi),
+                    bottom: top + scale(h, s.dpi),
+                },
+                GetStockObject(WHITE_BRUSH) as HBRUSH,
+            );
+        }
+        rect.left += scale(27, s.dpi);
+    }
     DrawTextW(
         item.hDC,
         text.as_ptr(),
         len,
         &mut rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        (if (0..7).contains(&nav) {
+            DT_LEFT
+        } else {
+            DT_CENTER
+        }) | DT_VCENTER
+            | DT_SINGLELINE
+            | DT_END_ELLIPSIS,
     );
 }
 unsafe fn parse_edit(hwnd: HWND, fallback: f64) -> f64 {
@@ -1306,6 +1380,22 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preferences_has_embedded_small_and_big_window_icons() {
+        let panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            assert!(!panel.state.small_icon.is_null());
+            assert!(!panel.state.big_icon.is_null());
+            assert_eq!(
+                SendMessageW(panel.hwnd, WM_GETICON, ICON_SMALL as usize, 0),
+                panel.state.small_icon as isize
+            );
+            assert_eq!(
+                SendMessageW(panel.hwnd, WM_GETICON, ICON_BIG as usize, 0),
+                panel.state.big_icon as isize
+            );
+        }
+    }
     #[test]
     fn pages_hide_other_controls_keep_header_fixed_and_preserve_values() {
         let mut panel = PreferencesWindow::new().unwrap();
