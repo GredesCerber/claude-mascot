@@ -1,6 +1,6 @@
 [package]
 name = "claude-mascot"
-version = "0.10.3"
+version = "0.11.0"
 edition = "2021"
 description = "Native Windows desktop mascot with a platform-independent Rust simulation"
 publish = false

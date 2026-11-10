@@ -13,7 +13,7 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const CLASS: &[u16] = &[
@@ -23,6 +23,8 @@ const TITLE: &[u16] = &[
     67, 108, 97, 117, 100, 101, 32, 77, 97, 115, 99, 111, 116, 32, 8212, 32, 1053, 1072, 1089,
     1090, 1088, 1086, 1081, 1082, 1080, 0,
 ];
+const ID_NAV_BASE: i32 = 3000;
+const FIXED: usize = usize::MAX;
 const ID_PET: i32 = 100;
 const ID_FPS: i32 = 101;
 const ID_SCALE: i32 = 102;
@@ -123,6 +125,7 @@ pub enum PreferencesEvent {
 
 #[derive(Clone, Copy)]
 struct Child {
+    page: usize,
     hwnd: HWND,
     x: i32,
     y: i32,
@@ -130,6 +133,9 @@ struct Child {
     h: i32,
 }
 struct WindowState {
+    page: usize,
+    build_page: usize,
+    page_heights: [i32; 7],
     hwnd: HWND,
     children: Vec<Child>,
     events: Vec<PreferencesEvent>,
@@ -160,6 +166,9 @@ struct WindowState {
 impl WindowState {
     fn new() -> Self {
         Self {
+            page: 0,
+            build_page: FIXED,
+            page_heights: [0; 7],
             hwnd: null_mut(),
             children: Vec::new(),
             events: Vec::new(),
@@ -207,7 +216,7 @@ impl PreferencesWindow {
                 WS_OVERLAPPEDWINDOW | WS_VSCROLL,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                680,
+                900,
                 820,
                 null_mut(),
                 null_mut(),
@@ -291,7 +300,7 @@ impl PreferencesWindow {
                 .max(scale(120, self.state.dpi));
             let avail_h = (area.bottom - area.top - scale(48, self.state.dpi))
                 .max(scale(100, self.state.dpi));
-            let width = scale(650, self.state.dpi).min(avail_w);
+            let width = scale(850, self.state.dpi).min(avail_w);
             let height = scale(800, self.state.dpi).min(avail_h);
             SetWindowPos(
                 self.hwnd,
@@ -434,7 +443,7 @@ unsafe fn add_child(
         class.as_ptr(),
         text.as_ptr(),
         WS_CHILD | WS_VISIBLE | style,
-        scale(x, s.dpi),
+        scale(x + if s.build_page == FIXED { 0 } else { 180 }, s.dpi),
         scale(y, s.dpi),
         scale(w, s.dpi),
         scale(h, s.dpi),
@@ -445,9 +454,16 @@ unsafe fn add_child(
     );
     if !hwnd.is_null() {
         SendMessageW(hwnd, WM_SETFONT, s.font as usize, 1);
+        if s.build_page != FIXED {
+            s.page_heights[s.build_page] = s.page_heights[s.build_page].max(scale(
+                y + if class == wide("COMBOBOX") { 40 } else { h } + 24,
+                s.dpi,
+            ));
+        }
         s.children.push(Child {
+            page: s.build_page,
             hwnd,
-            x: scale(x, s.dpi),
+            x: scale(x + if s.build_page == FIXED { 0 } else { 180 }, s.dpi),
             y: scale(y, s.dpi),
             w: scale(w, s.dpi),
             h: scale(h, s.dpi),
@@ -543,12 +559,42 @@ unsafe fn combo_item(hwnd: HWND, text: &str) {
 }
 
 unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
-    let mut y = 18;
-    heading(s, "КТО И КАК ВЫГЛЯДИТ", 20, y, 400)?;
-    y += 30;
-    label(s, "Выбранный питомец", 20, y, 150)?;
-    s.pet_combo = combo(s, ID_PET, 190, y, 400)?;
-    y += 42;
+    s.build_page = FIXED;
+    heading(s, "Claude Mascot", 20, 18, 200)?;
+    label(s, "Питомец", 210, 22, 100)?;
+    s.pet_combo = combo(s, ID_PET, 320, 18, 400)?;
+    label(
+        s,
+        "Цвет — выбранному пету; остальные настройки — общие",
+        200,
+        62,
+        600,
+    )?;
+    for (index, title) in [
+        "Внешний вид",
+        "Поведение",
+        "Опоры",
+        "Друзья",
+        "Производительность",
+        "Занятия",
+        "Обновления",
+    ]
+    .iter()
+    .enumerate()
+    {
+        button(
+            s,
+            title,
+            ID_NAV_BASE + index as i32,
+            14,
+            108 + index as i32 * 42,
+            160,
+        )?;
+    }
+    s.build_page = 0;
+    let mut y = 112;
+    heading(s, "ВНЕШНИЙ ВИД", 20, y, 400)?;
+    y += 38;
     label(s, "Цвет тела", 20, y, 150)?;
     s.color_swatch = add_child(
         s,
@@ -573,7 +619,9 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     for item in ["75%", "100%", "150%"] {
         combo_item(s.scale_combo, item);
     }
-    y += 45;
+    s.build_page = 1;
+    y = 150;
+    heading(s, "ПОВЕДЕНИЕ", 20, 112, 400)?;
     label(s, "Интенсивность", 20, y, 120)?;
     s.intensity_value = add_child(s, "STATIC", "50%", 0, 0, 0, 140, y, 40, 22);
     if s.intensity_value.is_null() {
@@ -596,13 +644,16 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     SendMessageW(s.intensity, TBM_SETRANGEMIN, 1, 0);
     SendMessageW(s.intensity, TBM_SETRANGEMAX, 1, 100);
-    y += 50;
+    s.build_page = 4;
+    y = 150;
+    heading(s, "ПРОИЗВОДИТЕЛЬНОСТЬ", 20, 112, 400)?;
     label(s, "Частота кадров", 20, y, 150)?;
     s.fps_combo = combo(s, ID_FPS, 190, y, 400)?;
     for item in ["30 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS"] {
         combo_item(s.fps_combo, item);
     }
-    y += 52;
+    s.build_page = 3;
+    y = 112;
     heading(s, "ЛИЧНОЕ ПРОСТРАНСТВО", 20, y, 400)?;
     y += 30;
     label(s, "Минимальный свободный зазор (px)", 20, y, 300)?;
@@ -638,9 +689,33 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     if s.max_edit.is_null() {
         return Err(last_error("CreateWindowExW max edit"));
     }
-    y += 44;
-    heading(s, "ОТОБРАЖЕНИЕ И ПОВЕДЕНИЕ", 20, y, 400)?;
-    y += 28;
+    s.build_page = 2;
+    heading(s, "ОПОРЫ", 20, 112, 400)?;
+    label(
+        s,
+        "Пет исследует достижимые окна и видимые ярлыки.",
+        20,
+        150,
+        570,
+    )?;
+    label(
+        s,
+        "Внутренние элементы интерфейса пока не поддерживаются.",
+        20,
+        182,
+        590,
+    )?;
+    s.build_page = 6;
+    heading(s, "ОБНОВЛЕНИЯ", 20, 112, 400)?;
+    label(
+        s,
+        &format!("Установлена версия {}", env!("CARGO_PKG_VERSION")),
+        20,
+        150,
+        500,
+    )?;
+    button(s, "Проверить обновления", ID_QUICK_BASE + 60, 20, 270, 260)?;
+    button(s, "Последний результат", ID_QUICK_BASE + 63, 300, 270, 260)?;
     for (id, text) in [
         (ID_MOOD, "Показывать настроение"),
         (ID_BUBBLES, "Показывать реплики"),
@@ -652,10 +727,22 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         (ID_AUTO_UPDATES, "Проверять обновления автоматически"),
         (ID_AUTO_INSTALL, "Устанавливать MSI автоматически"),
     ] {
-        checkbox(s, text, id, 25, y)?;
-        y += 31;
+        let (page, top) = match id {
+            ID_MOOD => (0, 270),
+            ID_BUBBLES => (0, 307),
+            ID_REACTIONS => (1, 220),
+            ID_ACTIVITIES => (1, 257),
+            ID_PAUSED => (1, 294),
+            ID_SOCIAL => (3, 250),
+            ID_DESKTOP => (2, 230),
+            ID_AUTO_UPDATES => (6, 190),
+            _ => (6, 227),
+        };
+        s.build_page = page;
+        checkbox(s, text, id, 25, top)?;
     }
-    y += 8;
+    s.build_page = 5;
+    y = 112;
     heading(s, "ЗАПУСТИТЬ ЗАНЯТИЕ", 20, y, 400)?;
     y += 30;
     s.activity_combo = combo(s, ID_ACTIVITY, 20, y, 570)?;
@@ -667,7 +754,8 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     SendMessageW(s.activity_combo, CB_SETCURSEL, 0, 0);
     button(s, "Запустить", ID_RUN_ACTIVITY, 20, y + 40, 140)?;
-    y += 84;
+    s.build_page = 3;
+    y = 310;
     heading(s, "БЫСТРОЕ ДЕЙСТВИЕ", 20, y, 400)?;
     y += 30;
     for (idx, (text, action)) in [
@@ -695,7 +783,8 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
             175,
         )?;
     }
-    y += 114;
+    s.build_page = 1;
+    y = 350;
     heading(s, "КОМАНДЫ", 20, y, 300)?;
     y += 30;
     for (idx, (text, action)) in [
@@ -728,7 +817,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     s.content_height = scale(y + row_count(12, 3) * 38 + 24, s.dpi);
     s.built = true;
-    update_scroll(s);
+    select_page(s, 0);
     Ok(())
 }
 fn row_count(n: usize, columns: usize) -> i32 {
@@ -980,6 +1069,13 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
     let code = ((wparam >> 16) & 0xffff) as u32;
     let control = lparam as HWND;
     match (id, code) {
+        (id, BN_CLICKED) if (ID_NAV_BASE..ID_NAV_BASE + 7).contains(&id) => {
+            select_page(s, (id - ID_NAV_BASE) as usize);
+        }
+        (id, BN_CLICKED) if id == ID_QUICK_BASE + 60 || id == ID_QUICK_BASE + 63 => {
+            s.events
+                .push(PreferencesEvent::RunAction((id - ID_QUICK_BASE) as u16));
+        }
         (ID_PET, CBN_SELCHANGE) => {
             let index = SendMessageW(s.pet_combo, CB_GETCURSEL, 0, 0) as usize;
             if let Some(id) = s.data.pet_ids.get(index) {
@@ -1083,7 +1179,8 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
     }
 }
 unsafe fn draw_button(s: &WindowState, item: &DRAWITEMSTRUCT) {
-    let selected = item.itemState & ODS_SELECTED != 0;
+    let selected = item.itemState & ODS_SELECTED != 0
+        || GetDlgCtrlID(item.hwndItem) == ID_NAV_BASE + s.page as i32;
     let fill = if selected {
         s.accent_brush
     } else {
@@ -1127,6 +1224,7 @@ unsafe fn parse_edit(hwnd: HWND, fallback: f64) -> f64 {
         .clamp(0.0, 512.0)
 }
 unsafe fn update_scroll(s: &mut WindowState) {
+    s.content_height = s.page_heights[s.page];
     let visible = (s.content_height - s.client_height).max(0);
     let info = SCROLLINFO {
         cbSize: size_of::<SCROLLINFO>() as u32,
@@ -1162,11 +1260,19 @@ unsafe fn scroll_to(s: &mut WindowState, pos: i32) {
     }
     s.scroll = pos;
     for child in &s.children {
+        ShowWindow(
+            child.hwnd,
+            if child.page == FIXED || (child.page == s.page && child.y - pos >= scale(100, s.dpi)) {
+                SW_SHOWNA
+            } else {
+                SW_HIDE
+            },
+        );
         SetWindowPos(
             child.hwnd,
             null_mut(),
             child.x,
-            child.y - pos,
+            child.y - if child.page == FIXED { 0 } else { pos },
             child.w,
             child.h,
             SWP_NOZORDER | SWP_NOACTIVATE,
@@ -1184,9 +1290,46 @@ unsafe fn scroll_to(s: &mut WindowState, pos: i32) {
     SetScrollInfo(s.hwnd, SB_VERT, &info, 1);
 }
 
+unsafe fn select_page(s: &mut WindowState, page: usize) {
+    if page >= s.page_heights.len() {
+        return;
+    }
+    // Commit a spacing edit via its existing focus-loss handler before hiding it.
+    SetFocus(GetDlgItem(s.hwnd, ID_NAV_BASE + page as i32));
+    s.page = page;
+    s.scroll = -1;
+    scroll_to(s, 0);
+    update_scroll(s);
+    InvalidateRect(s.hwnd, null(), 1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pages_hide_other_controls_keep_header_fixed_and_preserve_values() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            let visible = |h| GetWindowLongW(h, GWL_STYLE) as u32 & WS_VISIBLE != 0;
+            assert!(visible(panel.state.color_swatch));
+            assert!(!visible(panel.state.fps_combo));
+            let mut before: RECT = std::mem::zeroed();
+            GetWindowRect(panel.state.pet_combo, &mut before);
+            select_page(&mut panel.state, 4);
+            assert!(visible(panel.state.fps_combo));
+            assert!(!visible(panel.state.color_swatch));
+            assert!(visible(panel.state.pet_combo));
+            select_page(&mut panel.state, 3);
+            set_text(panel.state.min_edit, "40");
+            select_page(&mut panel.state, 6);
+            select_page(&mut panel.state, 3);
+            assert_eq!(parse_edit(panel.state.min_edit, 0.0), 40.0);
+            scroll_to(&mut panel.state, 50);
+            let mut after: RECT = std::mem::zeroed();
+            GetWindowRect(panel.state.pet_combo, &mut after);
+            assert_eq!(before.top, after.top);
+        }
+    }
     #[test]
     fn real_controls_represent_preferences_and_scroll_more_than_once() {
         let mut panel = PreferencesWindow::new().unwrap();
@@ -1225,7 +1368,7 @@ mod tests {
                 ..PreferencesState::default()
             });
             assert_eq!(SendMessageW(panel.state.fps_combo, CB_GETCURSEL, 0, 0), 5);
-            let child = panel.state.pet_combo;
+            let child = panel.state.color_swatch;
             scroll_to(&mut panel.state, 100);
             let mut first: RECT = std::mem::zeroed();
             GetWindowRect(child, &mut first);
