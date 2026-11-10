@@ -41,8 +41,15 @@ pub enum SpeechEvent {
     Climb,
     Rest,
     Sleep,
+    Knocked,
+    Dizzy,
+    Recovered,
+    RoughPlay,
+    RoughPlayReply,
+    PlayTumble,
+    PlayLaugh,
 }
-pub const EVENT_COUNT: usize = SpeechEvent::Sleep as usize + 1;
+pub const EVENT_COUNT: usize = SpeechEvent::PlayLaugh as usize + 1;
 pub const ALL_EVENTS: [SpeechEvent; EVENT_COUNT] = [
     SpeechEvent::Wake,
     SpeechEvent::Wander,
@@ -81,6 +88,13 @@ pub const ALL_EVENTS: [SpeechEvent; EVENT_COUNT] = [
     SpeechEvent::Climb,
     SpeechEvent::Rest,
     SpeechEvent::Sleep,
+    SpeechEvent::Knocked,
+    SpeechEvent::Dizzy,
+    SpeechEvent::Recovered,
+    SpeechEvent::RoughPlay,
+    SpeechEvent::RoughPlayReply,
+    SpeechEvent::PlayTumble,
+    SpeechEvent::PlayLaugh,
 ];
 impl SpeechEvent {
     pub fn lines(self) -> &'static [&'static str] {
@@ -324,6 +338,50 @@ impl SpeechEvent {
                 "Ушёл в крабьи сны",
                 "Лапки отдыхают",
                 "Ещё пять минуточек...",
+            ],
+            Self::Knocked => &[
+                "Ой-ой-ой!",
+                "Меня сбили!",
+                "Кувырок!",
+                "Полетели-и!",
+                "Ух, вот это удар!",
+                "Э-эй, полегче!",
+            ],
+            Self::Dizzy => &[
+                "Всё кружится...",
+                "Где верх, где низ?",
+                "Звёздочки...",
+                "Голова кругом",
+                "Сейчас, отдышусь...",
+            ],
+            Self::Recovered => &[
+                "Я в порядке!",
+                "Цел и невредим",
+                "Лапки на месте",
+                "Снова в строю",
+                "Фух, приземлился",
+            ],
+            Self::RoughPlay => &[
+                "Давай поборемся!",
+                "Сейчас толкну!",
+                "Лови бочком!",
+                "Шуточная потасовка!",
+                "Защищайся!",
+            ],
+            Self::RoughPlayReply => &[
+                "Ну давай!",
+                "Я готов!",
+                "Не сдвинешь!",
+                "Попробуй-ка!",
+                "Держусь крепко!",
+            ],
+            Self::PlayTumble => &["Уи-и-и!", "Ха, кувырок!", "Лечу-у-у!", "Хи-хи, опрокинул!"],
+            Self::PlayLaugh => &[
+                "Ещё разок!",
+                "Вот это было весело!",
+                "Ха-ха, твоя взяла!",
+                "Реванш!",
+                "Я даже не устал",
             ],
         }
     }

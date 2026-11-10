@@ -20,7 +20,14 @@ pub enum SocialKind {
     Tag,
     Tower,
     Leapfrog,
+    /// Friendly shove: square up, a short charge, then the partner tumbles.
+    RoughPlay,
 }
+
+/// Distance at which the rough-play charge stops just short of body contact.
+const ROUGH_PLAY_REACH: f64 = 80.0;
+/// Square-up pause before the rough-play charge.
+const ROUGH_PLAY_SQUARE_UP: f64 = 0.8;
 
 /// Per-frame movement owned by the social coordinator. The normal pet physics
 /// still advances these motions; this is only an intent/landing contract.
@@ -226,6 +233,7 @@ impl SocialCoordinator {
                                     | State::Dance
                                     | State::Wave
                                     | State::Activity
+                                    | State::Dizzy
                             )
                         })
                     })
@@ -379,6 +387,10 @@ impl SocialCoordinator {
                 }
                 continue;
             }
+            if pair.kind == SocialKind::RoughPlay {
+                self.advance_rough_play(ix, pair, refs, n, world, dt);
+                continue;
+            }
             let ai = find(refs, n, pair.a);
             let bi = find(refs, n, pair.b);
             if matches!(pair.kind, SocialKind::Tag | SocialKind::Tower) {
@@ -528,6 +540,90 @@ impl SocialCoordinator {
             } else {
                 self.pairs[ix] = Some(pair)
             }
+        }
+    }
+
+    /// Rough play: both square up, the initiator charges and stops just short
+    /// of body contact, then the partner receives a friendly tumble. Any loss
+    /// of ownership (drag, command, chase, lost support) cancels without a shove.
+    fn advance_rough_play(
+        &mut self,
+        ix: usize,
+        mut pair: Pair,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+        dt: f64,
+    ) {
+        let (Some(ai), Some(bi)) = (find(refs, n, pair.a), find(refs, n, pair.b)) else {
+            self.pairs[ix] = None;
+            self.finish_pair(pair, refs, n, world, false);
+            return;
+        };
+        let valid = {
+            let pa = refs[ai].as_deref().unwrap();
+            let pb = refs[bi].as_deref().unwrap();
+            active_marker(pa, pair, pair.a, pair.b)
+                && active_marker(pb, pair, pair.b, pair.a)
+                && !pa.dragging
+                && !pb.dragging
+                && !pa.chase
+                && !pb.chase
+                && matches!(pa.state, State::Social | State::Run)
+                && pb.state == State::Social
+                && pa.socially_supported(world)
+                && pb.socially_supported(world)
+                && same_support(pa, pb, world)
+        };
+        if !valid {
+            self.pairs[ix] = None;
+            self.finish_pair(pair, refs, n, world, false);
+            return;
+        }
+        pair.elapsed += dt;
+        for i in [ai, bi] {
+            if let Some(s) = refs[i].as_deref_mut().and_then(|p| p.social.as_mut()) {
+                s.elapsed = pair.elapsed;
+            }
+        }
+        let (ax, bx, scale) = {
+            let pa = refs[ai].as_deref().unwrap();
+            let pb = refs[bi].as_deref().unwrap();
+            (
+                pa.pos.x,
+                pb.pos.x,
+                pa.display_scale.max(pb.display_scale).clamp(0.5, 2.0),
+            )
+        };
+        let direction = if bx >= ax { 1.0 } else { -1.0 };
+        if pair.chaser == 0 {
+            pair.phase = (pair.phase - dt).max(0.0);
+            if pair.phase <= 0.0 {
+                pair.chaser = 1;
+                let p = refs[ai].as_deref_mut().unwrap();
+                p.facing = direction;
+                p.social_motion = Some(SocialMotion::Run {
+                    target_x: bx - direction * ROUGH_PLAY_REACH * scale,
+                    speed: 230.0,
+                });
+            }
+        } else if (bx - ax).abs() <= (ROUGH_PLAY_REACH + 8.0) * scale {
+            self.pairs[ix] = None;
+            self.finish_pair(pair, refs, n, world, true);
+            if let Some(p) = refs[ai].as_deref_mut() {
+                p.vel = Vec2::default();
+                p.squash = p.squash.max(0.4);
+            }
+            if let Some(p) = refs[bi].as_deref_mut() {
+                p.play_knock(direction);
+            }
+            return;
+        }
+        if pair.elapsed >= pair.duration {
+            self.pairs[ix] = None;
+            self.finish_pair(pair, refs, n, world, true);
+        } else {
+            self.pairs[ix] = Some(pair);
         }
     }
 
@@ -1125,7 +1221,13 @@ impl SocialCoordinator {
                         kind = SocialKind::Greeting;
                     }
                 }
-                if self.start(i, j, kind, refs, world) {
+                // An autonomous shove without enough landing room becomes a
+                // greeting instead of blocking this pair until the hash changes.
+                if self.start(i, j, kind, refs, world)
+                    || (kind == SocialKind::RoughPlay
+                        && req.is_none()
+                        && self.start(i, j, SocialKind::Greeting, refs, world))
+                {
                     break 'outer;
                 }
             }
@@ -1210,8 +1312,12 @@ impl SocialCoordinator {
             kind,
             elapsed: 0.0,
             duration,
-            phase: initial_tag_separation,
-            chaser: if kind == SocialKind::Leapfrog {
+            phase: if kind == SocialKind::RoughPlay {
+                ROUGH_PLAY_SQUARE_UP
+            } else {
+                initial_tag_separation
+            },
+            chaser: if matches!(kind, SocialKind::Leapfrog | SocialKind::RoughPlay) {
                 0
             } else {
                 a_id
@@ -1292,7 +1398,10 @@ impl SocialCoordinator {
                     if owns_marker
                         && matches!(
                             p.kind,
-                            SocialKind::Tag | SocialKind::Tower | SocialKind::Leapfrog
+                            SocialKind::Tag
+                                | SocialKind::Tower
+                                | SocialKind::Leapfrog
+                                | SocialKind::RoughPlay
                         )
                     {
                         pet.social_motion = None;
@@ -1317,7 +1426,8 @@ impl SocialCoordinator {
                     {
                         pet.social = None;
                         if pet.state == State::Social
-                            || (p.kind == SocialKind::Tag && pet.state == State::Run)
+                            || (matches!(p.kind, SocialKind::Tag | SocialKind::RoughPlay)
+                                && pet.state == State::Run)
                             || (p.kind == SocialKind::ShareLaptop
                                 && id == p.a
                                 && pet.state == State::Laptop)
@@ -1338,7 +1448,7 @@ impl SocialCoordinator {
                                     + if pet.satisfaction < 35.0 { 8.0 } else { 4.0 })
                                 .min(100.0)
                             }
-                            SocialKind::DanceTogether => {
+                            SocialKind::DanceTogether | SocialKind::RoughPlay => {
                                 pet.satisfaction = (pet.satisfaction + 2.0).min(100.0)
                             }
                             _ => {}
@@ -1424,8 +1534,17 @@ fn eligible(p: &Pet, w: &World, active: bool) -> bool {
         }
 }
 fn choose(a: &Pet, b: &Pet, age: f64, previous: Option<SocialKind>, distance: f64) -> SocialKind {
+    // Rough play is a rare, separately hashed choice so the established mix of
+    // calmer interactions keeps its usual frequencies.
+    let rough_play = rough_play_willing(a)
+        && rough_play_willing(b)
+        && (a.id.wrapping_mul(0x9E37) ^ b.id.wrapping_mul(0x85EB))
+            .wrapping_add(age as u64 / 4)
+            .is_multiple_of(13);
     let preferred = if a.satisfaction < 35.0 || b.satisfaction < 35.0 {
         SocialKind::Comfort
+    } else if rough_play {
+        SocialKind::RoughPlay
     } else {
         match ((a.id ^ b.id).wrapping_add(age as u64)) % 23 {
             0 => SocialKind::Tag,
@@ -1469,7 +1588,16 @@ fn social_distance_range(kind: SocialKind, scale: f64) -> (f64, f64) {
         SocialKind::Tag => (64.0 * scale, 240.0 * scale),
         SocialKind::Tower => (60.0 * scale, f64::INFINITY),
         SocialKind::Leapfrog => (60.0 * scale, 260.0 * scale),
+        SocialKind::RoughPlay => (100.0 * scale, 240.0 * scale),
     }
+}
+
+/// Autonomous rough play needs two content Claudes with random activities on.
+fn rough_play_willing(p: &Pet) -> bool {
+    p.auto_activities
+        && p.activity_intensity >= 25
+        && p.satisfaction >= 55.0
+        && p.behavior_manual_lock <= 0.0
 }
 fn duration(k: SocialKind) -> f64 {
     match k {
@@ -1481,6 +1609,7 @@ fn duration(k: SocialKind) -> f64 {
         SocialKind::Tag => 7.5,
         SocialKind::Tower => 8.0,
         SocialKind::Leapfrog => 10.0,
+        SocialKind::RoughPlay => 3.5,
     }
 }
 fn same_support(a: &Pet, b: &Pet, w: &World) -> bool {
@@ -1502,6 +1631,7 @@ fn distance_allowed(kind: Option<SocialKind>, distance: f64) -> bool {
         Some(SocialKind::HighFive) => distance <= 220.0,
         Some(SocialKind::ShareLaptop) => distance <= 320.0,
         Some(SocialKind::Leapfrog) => distance <= 520.0,
+        Some(SocialKind::RoughPlay) => distance <= 260.0,
         _ => distance <= MAX_DISTANCE,
     }
 }
@@ -1543,6 +1673,30 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
             support.w >= 320.0
                 && leapfrog_target(a, b, support).is_some()
                 && leapfrog_target(b, a, support).is_some()
+        }
+        SocialKind::RoughPlay => {
+            // The partner rolls away from the initiator; keep that landing on
+            // the same support and inside the work area, and never shove an
+            // upset Claude.
+            let direction = if b.pos.x >= a.pos.x { 1.0 } else { -1.0 };
+            let room = if direction > 0.0 {
+                support.right() - b.pos.x
+            } else {
+                b.pos.x - support.x
+            };
+            let area = w.area_at(b.pos);
+            let area_room = if direction > 0.0 {
+                area.right() - b.pos.x
+            } else {
+                b.pos.x - area.x
+            };
+            support.w >= 320.0
+                && room >= 180.0 * scale
+                && area_room >= 180.0 * scale
+                && a.pos.x >= support.x + 25.0
+                && a.pos.x <= support.right() - 25.0
+                && a.satisfaction >= 40.0
+                && b.satisfaction >= 40.0
         }
         _ => true,
     }
@@ -1720,6 +1874,13 @@ impl Pet {
                     E::LeapfrogJump
                 } else {
                     E::LeapfrogWait
+                }
+            }
+            SocialKind::RoughPlay => {
+                if initiator {
+                    E::RoughPlay
+                } else {
+                    E::RoughPlayReply
                 }
             }
         };

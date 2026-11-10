@@ -1253,7 +1253,7 @@ mod native {
                     74 => e.pet.command(Command::Laptop, &world),
                     75 => e.pet.command(Command::Stretch, &world),
                     76 => e.pet.command(Command::LookAround, &world),
-                    90..=98 => {
+                    90..=99 => {
                         use claude_mascot::social::SocialKind;
                         let kind = match c {
                             91 => Some(SocialKind::Greeting),
@@ -1264,6 +1264,7 @@ mod native {
                             96 => Some(SocialKind::Tag),
                             97 => Some(SocialKind::Tower),
                             98 => Some(SocialKind::Leapfrog),
+                            99 => Some(SocialKind::RoughPlay),
                             _ => None,
                         };
                         e.pet.command(Command::Wander, &world);

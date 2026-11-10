@@ -10,6 +10,35 @@ pub const WIDTH: usize = 280;
 pub const HEIGHT: usize = 240;
 pub const FEET_X: f64 = 140.0;
 pub const FEET_Y: f64 = 216.0;
+/// Body rotation pivot height above the feet (center of the contact box).
+const BODY_PIVOT_Y: f64 = 27.5;
+/// Rotations snap to 15 degree steps so nearest-neighbor pixels stay crisp.
+const ROTATION_STEP: f64 = std::f64::consts::PI / 12.0;
+
+/// Quantized on-screen body rotation for a pet. Speech and meters never rotate.
+pub(crate) fn body_angle(p: &Pet) -> f64 {
+    // `visual_tilt` is the physical tilt sampled on the 12 Hz pose clock, so
+    // the sprite holds each rotated pose like every other pixel pose.
+    let held = p.visual_tilt();
+    if p.dragging || !held.is_finite() {
+        return 0.0;
+    }
+    let mut angle = held;
+    if p.state == State::Dizzy {
+        // A small rocking wobble on the shared pose clock fades out as the
+        // dizzy spell ends.
+        let t = pose_time(p.state_time);
+        let duration = p.state_duration.max(0.1);
+        let fade = ((duration - t) / duration).clamp(0.0, 1.0);
+        angle += (t * 7.0).sin() * 0.3 * fade;
+    }
+    let steps = (angle / ROTATION_STEP).round();
+    if !steps.is_finite() || steps == 0.0 {
+        0.0
+    } else {
+        steps * ROTATION_STEP
+    }
+}
 
 /// Sprite poses share one stepped clock; world-space physics stays at 240 Hz.
 pub(crate) fn pose_time(time: f64) -> f64 {
@@ -59,6 +88,16 @@ impl Canvas {
         let blend =
             |shift: u32| ((source >> shift) & 255u32) + (((*d >> shift) & 255u32) * inv / 255u32);
         *d = ((a + (*d >> 24) * inv / 255) << 24) | (blend(16) << 16) | (blend(8) << 8) | blend(0);
+    }
+    /// Composite an already premultiplied pixel.
+    fn over_premultiplied(&mut self, x: usize, y: usize, source: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let d = &mut self.pixels[y * self.width + x];
+        let inv = 255 - (source >> 24);
+        let channel = |shift: u32| ((source >> shift) & 255) + ((*d >> shift) & 255) * inv / 255;
+        *d = (channel(24) << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
     }
     pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64, color: u32) {
         let x0 = (x.round() as i32).max(0);
@@ -130,6 +169,8 @@ impl Canvas {
 pub struct Renderer {
     pub canvas: Canvas,
     scaled_canvas: Canvas,
+    /// Reused scratch layer for the body while it is rotated by a tumble.
+    body: Canvas,
     font: Option<Font>,
     glyphs: BTreeMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
     /// Controls the small satisfaction meter below speech bubbles.
@@ -150,6 +191,7 @@ impl Renderer {
         Ok(Self {
             canvas: Canvas::new(WIDTH, HEIGHT),
             scaled_canvas: Canvas::new(WIDTH, HEIGHT),
+            body: Canvas::new(WIDTH, HEIGHT),
             font,
             glyphs: BTreeMap::new(),
             show_mood: true,
@@ -171,7 +213,19 @@ impl Renderer {
         }
         // Activities contribute only their props. Claude's recognizable body,
         // palette, eyes, and proportions always come from this renderer.
-        draw_claude(&mut self.canvas, pet);
+        let angle = body_angle(pet);
+        if angle == 0.0 {
+            draw_claude(&mut self.canvas, pet);
+        } else {
+            // The same canonical sprite is drawn once, then rotated with
+            // nearest-neighbor sampling. Speech and meters stay upright.
+            self.body.clear();
+            draw_claude(&mut self.body, pet);
+            blit_rotated(&self.body, &mut self.canvas, angle);
+        }
+        if pet.state == State::Dizzy && !pet.dragging {
+            dizzy_stars(&mut self.canvas, pose_time(pet.state_time));
+        }
         if self.show_mood {
             let width = 42.0;
             let in_tower = pet.social.is_some_and(|s| s.kind == SocialKind::Tower);
@@ -403,6 +457,80 @@ fn draw_bubble(
         );
     }
 }
+/// Rotate the visible body pixels of `src` around the body center and
+/// composite them over `dst`. The pivot is raised just enough that the lowest
+/// rotated pixel stays on the feet line, so a rolled body never sinks into the
+/// floor or leaves the window bottom.
+fn blit_rotated(src: &Canvas, dst: &mut Canvas, angle: f64) {
+    let (w, h) = (src.width, src.height);
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+    for (y, row) in src.pixels.chunks_exact(w.max(1)).enumerate().take(h) {
+        for (x, pixel) in row.iter().enumerate() {
+            if pixel >> 24 != 0 {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let (sin, cos) = angle.sin_cos();
+    let pivot = (FEET_X, FEET_Y - BODY_PIVOT_Y);
+    let corners = [
+        (x0 as f64, y0 as f64),
+        (x1 as f64 + 1.0, y0 as f64),
+        (x0 as f64, y1 as f64 + 1.0),
+        (x1 as f64 + 1.0, y1 as f64 + 1.0),
+    ];
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (cx, cy) in corners {
+        let (rx, ry) = (cx - pivot.0, cy - pivot.1);
+        let x = rx * cos - ry * sin;
+        let y = rx * sin + ry * cos;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    let lift = (max_y - (y1 as f64 + 1.0 - pivot.1)).max(0.0);
+    let target = (pivot.0, pivot.1 - lift);
+    let bx0 = (target.0 + min_x).floor().max(0.0) as usize;
+    let by0 = (target.1 + min_y).floor().max(0.0) as usize;
+    let bx1 = ((target.0 + max_x).ceil().max(0.0) as usize).min(dst.width);
+    let by1 = ((target.1 + max_y).ceil().max(0.0) as usize).min(dst.height);
+    for dy in by0..by1 {
+        for dx in bx0..bx1 {
+            // Inverse-map the destination pixel center into the source sprite.
+            let rx = dx as f64 + 0.5 - target.0;
+            let ry = dy as f64 + 0.5 - target.1;
+            let sx = (rx * cos + ry * sin + pivot.0).floor();
+            let sy = (-rx * sin + ry * cos + pivot.1).floor();
+            if sx < x0 as f64 || sy < y0 as f64 || sx > x1 as f64 || sy > y1 as f64 {
+                continue;
+            }
+            let pixel = src.pixels[sy as usize * w + sx as usize];
+            if pixel >> 24 != 0 {
+                dst.over_premultiplied(dx, dy, pixel);
+            }
+        }
+    }
+}
+
+/// Three small stars circle above the head during a dizzy spell. Their
+/// positions step with the shared 12 Hz pose clock.
+fn dizzy_stars(c: &mut Canvas, t: f64) {
+    for n in 0..3 {
+        let a = t * 5.0 + n as f64 * std::f64::consts::TAU / 3.0;
+        let x = (FEET_X + a.cos() * 24.0).round();
+        let y = (FEET_Y - 66.0 + a.sin() * 5.0).round();
+        c.rect(x - 1.0, y - 3.0, 2.0, 6.0, 0xFFF2D46B);
+        c.rect(x - 3.0, y - 1.0, 6.0, 2.0, 0xFFF2D46B);
+    }
+}
+
 fn heart(c: &mut Canvas, x: f64, y: f64, color: u32) {
     c.rect(x, y, 5.0, 4.0, color);
     c.rect(x + 7.0, y, 5.0, 4.0, color);
@@ -434,6 +562,8 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let social_high_five = social_kind == Some(SocialKind::HighFive);
     let social_dance = social_kind == Some(SocialKind::DanceTogether);
     let social_comfort = social_kind == Some(SocialKind::Comfort);
+    let social_rough = social_kind == Some(SocialKind::RoughPlay);
+    let dizzy = p.state == State::Dizzy && !p.dragging;
     let social_watching_laptop = social_kind == Some(SocialKind::ShareLaptop)
         && social.is_some_and(|activity| activity.role == SocialRole::Partner);
     let shared_laptop_owner = social_kind == Some(SocialKind::ShareLaptop)
@@ -741,6 +871,16 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(-11.0, top + lift - 1.0, 2.0, 2.0, palette.highlight);
         px(7.0, top + lift, 2.0, 3.0, palette.body);
         px(9.0, top + lift - 1.0, 2.0, 2.0, palette.highlight);
+    } else if social_rough {
+        // Playful guard: both hands forward, bouncing on the pose clock.
+        let bounce = if ((state_time * 4.0).floor() as usize).is_multiple_of(2) {
+            0.0
+        } else {
+            0.4
+        };
+        px(6.0, top + 1.5 + bounce, 2.0, 2.0, palette.body);
+        px(8.0, top + 2.0 + bounce, 2.0, 2.0, palette.highlight);
+        px(-8.0, top + 2.0 - bounce, 2.0, 2.0, palette.body);
     } else if crouching {
         // Fixed compact pose for the brief pre-jump crouch.
         px(-8.0, top + 2.0, 3.0, 2.0, palette.body);
@@ -852,6 +992,21 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(eye - 0.3, top + 2.8, 0.6, 0.6, palette.eyes);
             px(eye + 0.3, top + 2.2, 0.6, 0.6, palette.eyes);
             px(eye + 0.9, top + 2.8, 0.6, 0.6, palette.eyes);
+        } else if dizzy {
+            // Same canonical eye blocks, wandering in opposite directions.
+            let swing = if ((state_time * 4.0).floor() as usize).is_multiple_of(2) {
+                0.5
+            } else {
+                -0.5
+            };
+            let side = if eye < 0.0 { 1.0 } else { -1.0 };
+            px(
+                eye + side * swing,
+                top + 2.0 - side * swing * 0.6,
+                1.0,
+                2.0,
+                palette.eyes,
+            );
         } else {
             px(
                 eye + eye_offset_x,
@@ -1696,5 +1851,215 @@ mod tests {
                 .save_png(&preview_dir.join(format!("pleasant-{suffix}.png")))
                 .unwrap();
         }
+    }
+
+    fn tumbling_pet(tilt: f64) -> Pet {
+        let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
+        pet.state = State::Thrown;
+        pet.time = 1.0;
+        pet.state_time = 0.2;
+        pet.vel = crate::Vec2::default();
+        pet.body_color = 0x609BD5;
+        pet.tilt = tilt;
+        pet.visual_tilt = tilt;
+        pet.bubble = Some("Кувырок!".into());
+        pet.bubble_time = 2.0;
+        pet
+    }
+
+    fn body_rows(pixels: &[u32], color: u32) -> (usize, usize, usize) {
+        let mut count = 0;
+        let (mut top, mut bottom) = (HEIGHT, 0);
+        for (i, pixel) in pixels.iter().enumerate() {
+            if *pixel == color {
+                count += 1;
+                top = top.min(i / WIDTH);
+                bottom = bottom.max(i / WIDTH);
+            }
+        }
+        (count, top, bottom)
+    }
+
+    #[test]
+    fn all_tumble_poses_fit_the_reserved_ceiling_clearance() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let mut maximum_height: f64 = 0.0;
+        for squash in [0.0, 0.5, 1.0] {
+            for facing in [-1.0, 1.0] {
+                for step in 0..24 {
+                    let mut pet = tumbling_pet(step as f64 * ROTATION_STEP);
+                    pet.squash = squash;
+                    pet.facing = facing;
+                    let frame = renderer.frame(&pet, false);
+                    let top = frame.pixels.iter().position(|p| p >> 24 != 0).unwrap() / WIDTH;
+                    maximum_height = maximum_height.max(FEET_Y - top as f64);
+                }
+            }
+        }
+        assert!(
+            maximum_height <= crate::engine::TUMBLE_HEADROOM,
+            "rendered tumble needs {maximum_height}px of headroom"
+        );
+    }
+
+    #[test]
+    fn tumbling_body_rotates_crisply_while_bubble_and_meter_stay_upright() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = true;
+        let upright = renderer.frame(&tumbling_pet(0.0), true).pixels.clone();
+        let quarter = renderer
+            .frame(&tumbling_pet(std::f64::consts::FRAC_PI_2), true)
+            .pixels
+            .clone();
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/impact-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("tumble-90.png"))
+            .unwrap();
+        assert_ne!(upright, quarter, "the body must visibly rotate");
+
+        // Palette and proportions survive: the same body color covers about
+        // the same area, and no blended in-between colors are introduced.
+        let (upright_body, _, upright_bottom) = body_rows(&upright, 0xFF609BD5);
+        let (rotated_body, rotated_top, rotated_bottom) = body_rows(&quarter, 0xFF609BD5);
+        assert!(upright_body > 500);
+        let ratio = rotated_body as f64 / upright_body as f64;
+        assert!((0.85..=1.15).contains(&ratio), "body area ratio {ratio}");
+        assert!(
+            !quarter.contains(&0xFFD97757),
+            "custom palette must persist"
+        );
+        let palette: std::collections::HashSet<u32> = upright.iter().copied().collect();
+        assert!(
+            quarter[(150 * WIDTH)..].iter().all(|c| palette.contains(c)),
+            "nearest-neighbor rotation must not invent antialiased colors"
+        );
+        // A rotated body is lifted to the feet line instead of sinking.
+        assert!(rotated_bottom <= FEET_Y as usize && upright_bottom <= FEET_Y as usize);
+        assert!(rotated_top > 100, "rotated body must stay below the bubble");
+
+        // Speech rows are identical and the mood bar fill keeps its width.
+        assert_eq!(
+            upright[(90 * WIDTH)..(130 * WIDTH)],
+            quarter[(90 * WIDTH)..(130 * WIDTH)],
+            "speech bubble must stay upright and unchanged"
+        );
+        let meter = |pixels: &[u32]| {
+            pixels[(140 * WIDTH)..(141 * WIDTH)]
+                .iter()
+                .filter(|c| **c == 0xFF77C88A)
+                .count()
+        };
+        assert_eq!(meter(&upright), meter(&quarter));
+        assert!(meter(&upright) >= 25);
+    }
+
+    #[test]
+    fn rotation_is_quantized_and_dizzy_shows_stars_upright() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = false;
+        let upright = renderer.frame(&tumbling_pet(0.0), false).pixels.clone();
+        let tiny = renderer.frame(&tumbling_pet(0.1), false).pixels.clone();
+        assert_eq!(upright, tiny, "sub-step tilts snap to the upright sprite");
+        let step = renderer.frame(&tumbling_pet(0.27), false).pixels.clone();
+        assert_ne!(upright, step, "a 15 degree step is visible");
+        for tilt in [0.6, 1.3, 2.4, -2.9, std::f64::consts::PI] {
+            let frame = renderer.frame(&tumbling_pet(tilt), false).pixels.clone();
+            let (count, _, bottom) = body_rows(&frame, 0xFF609BD5);
+            assert!(count > 400, "body stays visible at tilt {tilt}");
+            assert!(bottom <= FEET_Y as usize, "no sinking at tilt {tilt}");
+        }
+        let mut dizzy = tumbling_pet(0.0);
+        dizzy.state = State::Dizzy;
+        dizzy.state_duration = 1.2;
+        dizzy.state_time = 0.3;
+        let stars = renderer.frame(&dizzy, false).pixels.clone();
+        assert!(stars.contains(&0xFFF2D46B), "dizzy stars should be drawn");
+        assert!(stars.contains(&0xFF609BD5));
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/impact-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        renderer
+            .canvas
+            .save_png(&preview_dir.join("dizzy.png"))
+            .unwrap();
+        // A dragged pet is never drawn rotated.
+        let mut held = tumbling_pet(1.3);
+        held.dragging = true;
+        assert_eq!(body_angle(&held), 0.0);
+    }
+
+    #[test]
+    fn simulated_tumble_rotation_holds_within_each_twelve_hertz_pose_frame() {
+        let world = crate::World {
+            work_areas: vec![crate::Rect::new(0.0, 0.0, 1600.0, 900.0)],
+            ..crate::World::default()
+        };
+        let mut pet = Pet::new(3, Skin::Claude, crate::Vec2::new(500.0, 900.0));
+        pet.state = State::Idle;
+        pet.auto_activities = false;
+        pet.auto_reactions = false;
+        assert!(pet.knock_back(crate::engine::Knock {
+            direction: 1.0,
+            strength: 1000.0,
+        }));
+        let mut last: Option<(i64, State, f64)> = None;
+        let mut changes = 0;
+        for _ in 0..240 {
+            pet.update(1.0 / 240.0, &world);
+            let tick = (pet.time * 12.0 + 1e-8).floor() as i64;
+            let angle = body_angle(&pet);
+            if let Some((last_tick, last_state, last_angle)) = last {
+                if last_tick == tick && last_state == pet.state && pet.state == State::Thrown {
+                    assert_eq!(last_angle, angle, "rotation must hold inside a pose frame");
+                } else if last_angle != angle {
+                    changes += 1;
+                }
+            }
+            last = Some((tick, pet.state, angle));
+        }
+        assert!(
+            changes >= 4,
+            "the held rotation still advances each pose frame"
+        );
+    }
+
+    #[test]
+    fn scaled_desktop_frames_rotate_the_body_but_not_speech_or_meter() {
+        let mut renderer = Renderer::new().unwrap();
+        renderer.show_mood = true;
+        let scale = 1.5;
+        let upright = renderer
+            .frame_scaled(&tumbling_pet(0.0), true, scale)
+            .pixels
+            .clone();
+        let rolled = renderer
+            .frame_scaled(&tumbling_pet(std::f64::consts::FRAC_PI_2), true, scale)
+            .pixels
+            .clone();
+        let width = (WIDTH as f64 * scale).round() as usize;
+        assert_eq!(upright.len(), rolled.len());
+        assert_ne!(upright, rolled, "the scaled body must rotate too");
+        let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/impact-preview");
+        std::fs::create_dir_all(&preview_dir).unwrap();
+        renderer
+            .scaled_canvas
+            .save_png(&preview_dir.join("tumble-90-scale-1_5.png"))
+            .unwrap();
+        // The bubble is drawn at output resolution after the rotated body.
+        let rows = (140 * width)..(190 * width);
+        assert_eq!(upright[rows.clone()], rolled[rows], "speech stays upright");
+        let meter = |pixels: &[u32]| {
+            pixels[(211 * width)..(212 * width)]
+                .iter()
+                .filter(|c| **c == 0xFF77C88A)
+                .count()
+        };
+        assert_eq!(meter(&upright), meter(&rolled));
+        assert!(meter(&upright) >= 40, "meter fill stays horizontal");
+        let body = |pixels: &[u32]| pixels.iter().filter(|c| **c == 0xFF609BD5).count();
+        let ratio = body(&rolled) as f64 / body(&upright) as f64;
+        assert!((0.85..=1.15).contains(&ratio), "scaled body area {ratio}");
     }
 }

@@ -158,7 +158,8 @@ fn autonomous_pet_eventually_leaps_to_a_visible_reachable_window_top() {
     p.state = State::Idle;
     for _ in 0..12_000 {
         p.update(1.0 / 60.0, &w);
-        if p.surface == Some(0) {
+        // A side grip owns the same surface before the pet reaches its top.
+        if p.surface == Some(0) && (p.pos.y - 400.0).abs() < 1.0 {
             break;
         }
     }

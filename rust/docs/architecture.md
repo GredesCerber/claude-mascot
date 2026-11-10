@@ -1,13 +1,14 @@
-# Rust port architecture (0.8.0)
+# Rust port architecture (0.9.0)
 
 The Python application at the repository root is preserved. Rust is Windows-first
-and Claude-only. Combat, atlas decoding and crack overlays were removed in 0.4.0.
+and Claude-only. Tagilla, weapons, atlas decoding and crack overlays were removed in 0.4.0.
 
 | Module | Responsibility |
 | --- | --- |
 | lib.rs | Physical-pixel coordinates, rectangles, world/window snapshots |
 | engine.rs | Deterministic physics, support tracking, mood, commands and timed activities |
 | engine_exploration.rs | Ownership, cancellation and bounded progression of approach/crouch/flight/climb routes |
+| engine_impact.rs | Bounded knock-back rotation, bounce budgets, manual interruption and dizzy recovery |
 | exploration*.rs | Pure geometry for varied jump targets, edge approaches and voluntary descent |
 | contacts.rs | Body contacts, swept crossings, scaled masses and impact impulses |
 | behavior.rs | Personal space, safe jump-over avoidance and context decisions |

@@ -9,6 +9,9 @@ use std::collections::VecDeque;
 #[path = "engine_exploration.rs"]
 mod exploration_runtime;
 use exploration_runtime::ExploreRoute;
+#[path = "engine_impact.rs"]
+mod impact_runtime;
+pub use impact_runtime::Knock;
 
 use serde::{de, Deserialize, Deserializer, Serialize};
 
@@ -27,6 +30,9 @@ const MAX_COORD: f64 = 10_000_000.0;
 const WALL_BOUNCE_MIN_SPEED: f64 = 280.0;
 const WALL_RESTITUTION: f64 = 0.62;
 pub const CURSOR_HOLD_DY: f64 = 70.0;
+/// Velocity change needed to tumble a pet owned by a social coordinator.
+const COORDINATED_TUMBLE_DV: f64 = 800.0;
+pub(crate) const TUMBLE_HEADROOM: f64 = 110.0;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Skin {
@@ -73,6 +79,8 @@ pub enum State {
     LookAround,
     Social,
     Activity,
+    /// Brief grounded recovery after a knock-back tumble.
+    Dizzy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +175,17 @@ pub struct Pet {
     pub(crate) behavior_velocity_ttl: f64,
     pub(crate) behavior_manual_lock: f64,
     exploration_route: Option<ExploreRoute>,
+    /// Visual body rotation in radians (clockwise on screen). Zero when upright.
+    pub tilt: f64,
+    /// `tilt` sampled on the shared 12 Hz pose clock for crisp rendering.
+    pub(crate) visual_tilt: f64,
+    pub(crate) visual_tilt_tick: i64,
+    pub(crate) spin: f64,
+    pub(crate) impact_bounces: u8,
+    pub(crate) dizzy_next: bool,
+    pub(crate) dizzy_time: f64,
+    pub(crate) impact_cooldown: f64,
+    pub(crate) play_tumble: bool,
 }
 
 impl Pet {
@@ -245,6 +264,15 @@ impl Pet {
             behavior_velocity_ttl: 0.0,
             behavior_manual_lock: 0.0,
             exploration_route: None,
+            tilt: 0.0,
+            visual_tilt: 0.0,
+            visual_tilt_tick: -1,
+            spin: 0.0,
+            impact_bounces: 0,
+            dizzy_next: false,
+            dizzy_time: 0.0,
+            impact_cooldown: 0.0,
+            play_tumble: false,
         }
     }
 
@@ -280,6 +308,7 @@ impl Pet {
         }
         self.hearts = (self.hearts - dt).max(0.0);
         self.squash = (self.squash - dt * 2.0).max(0.0);
+        self.advance_tumble(dt);
         if !self.satisfaction.is_finite() {
             self.satisfaction = 75.0;
         } else if self.satisfaction < 75.0 {
@@ -311,6 +340,10 @@ impl Pet {
                 return;
             }
             if let Some(i) = self.current_surface_index(world) {
+                if self.drop_support_if_hidden(i, world) {
+                    self.snapshot_windows(world);
+                    return;
+                }
                 self.follow_surface(i, world);
             } else {
                 let floor = self.floor_y(world);
@@ -482,9 +515,15 @@ impl Pet {
         self.activity = None;
         self.pending_activity = None;
         self.pending_ground = None;
+        self.interrupt_tumble();
         if matches!(
             self.state,
-            State::Laptop | State::Stretch | State::LookAround | State::Social | State::Activity
+            State::Laptop
+                | State::Stretch
+                | State::LookAround
+                | State::Social
+                | State::Activity
+                | State::Dizzy
         ) {
             self.set_state(
                 if self.has_support(world) {
@@ -641,6 +680,7 @@ impl Pet {
         self.surface_prev = None;
         self.pos = pos;
         self.vel = Vec2::default();
+        self.reset_tumble();
         self.set_state(State::Thrown, 0.0);
     }
 
@@ -655,6 +695,7 @@ impl Pet {
         self.pending_activity = None;
         self.dragging = false;
         self.release_pending = true;
+        self.reset_tumble();
         self.vel = if valid_vec(velocity) {
             Vec2::new(
                 velocity.x.clamp(-1800.0, 1800.0),
@@ -701,7 +742,7 @@ impl Pet {
         self.speak(SpeechEvent::Petted, 1.8);
         if matches!(
             self.state,
-            State::Idle | State::Walk | State::Sit | State::Social | State::Activity
+            State::Idle | State::Walk | State::Sit | State::Social | State::Activity | State::Dizzy
         ) {
             self.set_state(State::Happy, 1.1);
         }
@@ -741,6 +782,7 @@ impl Pet {
                     | State::Social
                     | State::Hold
                     | State::Chase
+                    | State::Dizzy
             )
         {
             self.pending_ground = None;
@@ -801,8 +843,18 @@ impl Pet {
             }
             return;
         }
-        if self.state == State::Land {
-            if self.state_time > self.state_duration.max(0.55) {
+        // Dizzy recovery shares the grounded slide of an ordinary landing, so
+        // knock-back momentum is preserved and friction brings it to rest.
+        if matches!(self.state, State::Land | State::Dizzy) {
+            let minimum = if self.state == State::Dizzy {
+                0.5
+            } else {
+                0.55
+            };
+            if self.state_time > self.state_duration.max(minimum) {
+                if self.state == State::Dizzy {
+                    self.finish_dizzy();
+                }
                 let next = self.pending_ground.take().unwrap_or(State::Idle);
                 if next == State::Activity {
                     self.activity = self.pending_activity.take();
@@ -894,7 +946,12 @@ impl Pet {
                 self.surface_id = None;
                 self.surface_prev = None;
                 self.clamp_to_area(world);
-                self.set_state(State::Land, 0.55);
+                if self.dizzy_next {
+                    self.vel.x *= 0.6;
+                    self.enter_dizzy();
+                } else {
+                    self.set_state(State::Land, 0.55);
+                }
                 return;
             }
             let old = self.pos;
@@ -905,6 +962,9 @@ impl Pet {
                 self.bounce_from_screen_wall(world);
             } else {
                 self.clamp_to_area(world);
+            }
+            if self.spin != 0.0 || self.dizzy_next {
+                self.tumble_ceiling(world);
             }
             if let Some(SocialMotion::Leap { target, owner_id }) = self.social_motion {
                 if self.vel.y >= 0.0
@@ -932,7 +992,12 @@ impl Pet {
                     self.surface_id = surface.and_then(|i| world.windows.get(i).map(|w| w.id));
                     self.surface_prev = surface.and_then(|i| world.windows.get(i).map(|w| w.rect));
                     let impact = self.vel.y;
-                    if impact > 1_300.0 && self.state != State::Jump {
+                    // A knock-back may spend a bounce or begin recovering here.
+                    let consumed = self.tumble_landing(impact);
+                    if consumed {
+                        self.squash = self.squash.max(0.5);
+                    } else if impact > 1_300.0 && self.state != State::Jump {
+                        let thrown = self.state == State::Thrown;
                         self.vel.y = -impact * 0.35;
                         self.vel.x *= 0.6;
                         self.squash = 0.45;
@@ -940,6 +1005,22 @@ impl Pet {
                         self.surface_id = None;
                         self.surface_prev = None;
                         self.set_state(State::Thrown, 0.0);
+                        if thrown {
+                            // A hard thrown landing rolls over its leading edge.
+                            let direction = if self.vel.x.abs() > 1.0 {
+                                self.vel.x
+                            } else {
+                                self.facing
+                            };
+                            self.start_tumble(
+                                Knock {
+                                    direction,
+                                    strength: impact * 0.5,
+                                },
+                                false,
+                                false,
+                            );
+                        }
                     } else {
                         self.vel.y = 0.0;
                         self.vel.x *= 0.7;
@@ -1028,6 +1109,20 @@ impl Pet {
                 || self.behavior_velocity_ttl > 0.0
                 || self.social_motion.is_some()
             {
+                // A settled spacing hold (steering at zero) keeps friends from
+                // wandering into each other, but must not starve exploration
+                // of reachable windows for as long as they stand together.
+                let settled = self.behavior_manual_lock <= 0.0
+                    && self.social_motion.is_none()
+                    && self.behavior_velocity.is_some_and(|v| v.abs() <= 3.0)
+                    && !world.windows.is_empty();
+                if settled
+                    && self
+                        .random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0)
+                    && self.try_start_exploration(world)
+                {
+                    return;
+                }
                 self.clamp_to_area(world);
                 return;
             }
@@ -1154,11 +1249,7 @@ impl Pet {
             return;
         }
         let Some(i) = self.current_surface_index(world) else {
-            self.surface = None;
-            self.surface_id = None;
-            self.surface_prev = None;
-            self.vel = Vec2::new(0.0, 0.0);
-            self.set_state(State::Fall, 0.0);
+            self.detach_lost_support();
             return;
         };
         let Some(current) = world
@@ -1167,12 +1258,13 @@ impl Pet {
             .filter(|w| valid_rect(w.rect))
             .map(|w| w.rect)
         else {
-            self.surface = None;
-            self.surface_prev = None;
-            self.set_state(State::Fall, 0.0);
+            self.detach_lost_support();
             return;
         };
         self.surface_id = Some(world.windows[i].id);
+        if self.drop_support_if_hidden(i, world) {
+            return;
+        }
         if let Some(old) = self.surface_prev {
             let dx = current.x - old.x;
             let dy = current.y - old.y;
@@ -1191,6 +1283,59 @@ impl Pet {
         } else {
             self.surface_prev = Some(current);
         }
+    }
+
+    /// Desktop icons sit below every real window. When another window now
+    /// covers the part of an occupied icon under Claude (for example after
+    /// Alt+Tab), that support is no longer visible: drop only this support,
+    /// keep the real position and horizontal speed, and let gravity find a
+    /// visible landing. A manual sit or sleep resumes after landing. Exposed
+    /// icons and ordinary window tops are left untouched.
+    fn drop_support_if_hidden(&mut self, index: usize, world: &World) -> bool {
+        let Some(w) = world.windows.get(index) else {
+            return false;
+        };
+        if !w.is_desktop_icon || !valid_rect(w.rect) {
+            return false;
+        }
+        let r = w.rect;
+        let probe = Vec2::new(
+            self.pos
+                .x
+                .clamp(r.x + 1.0, (r.right() - 1.0).max(r.x + 1.0)),
+            self.pos
+                .y
+                .clamp(r.y + 1.0, (r.bottom() - 1.0).max(r.y + 1.0)),
+        );
+        if !covered(world, probe, index) {
+            return false;
+        }
+        self.detach_lost_support();
+        true
+    }
+
+    fn detach_lost_support(&mut self) {
+        let resting = match self.state {
+            State::Sleep if self.forced_sleep => Some(State::Sleep),
+            State::Sit if self.state_duration <= 0.0 => Some(State::Sit),
+            _ => None,
+        };
+        if self.pending_ground.is_none() {
+            self.pending_ground = resting;
+        }
+        self.exploration_route = None;
+        self.target = None;
+        self.peek_goal = None;
+        self.social = None;
+        self.social_motion = None;
+        self.activity = None;
+        self.behavior_velocity = None;
+        self.behavior_velocity_ttl = 0.0;
+        self.surface = None;
+        self.surface_id = None;
+        self.surface_prev = None;
+        self.vel.y = self.vel.y.max(0.0);
+        self.set_state(State::Fall, 0.0);
     }
 
     fn update_climb(&mut self, dt: f64, world: &World) {
@@ -1510,10 +1655,16 @@ impl Pet {
         }
     }
 
-    pub(crate) fn contact_impact(&mut self, velocity: Vec2, strong: bool) {
+    /// Apply a resolved body contact. `knock` is present only for genuinely
+    /// hard hits; ordinary bumps keep the plain translational response.
+    pub(crate) fn contact_impact(&mut self, velocity: Vec2, strong: bool, knock: Option<Knock>) {
         if self.dragging {
             return;
         }
+        // Social arcs, perches and leaps stay with their coordinator unless the
+        // hit is far stronger than anything the coordinator itself produces.
+        let coordinated = self.social.is_some() || self.social_motion.is_some();
+        let grounded = !self.is_airborne();
         if velocity.x.is_finite() && velocity.y.is_finite() {
             self.vel = Vec2::new(
                 velocity.x.clamp(-2_200.0, 2_200.0),
@@ -1529,8 +1680,19 @@ impl Pet {
             self.auto_pursuit_time = 0.0;
             self.behavior_velocity = None;
             self.behavior_velocity_ttl = 0.0;
+            self.exploration_route = None;
+            self.target = None;
+            self.peek_goal = None;
+            self.surface = None;
+            self.surface_id = None;
+            self.surface_prev = None;
             self.state = State::Thrown;
             self.state_time = 0.0;
+        }
+        if let Some(knock) = knock {
+            if !coordinated || knock.strength >= COORDINATED_TUMBLE_DV {
+                self.start_tumble(knock, grounded, false);
+            }
         }
     }
 
@@ -2110,6 +2272,7 @@ impl Pet {
         self.surface = None;
         self.surface_prev = None;
         self.dragging = false;
+        self.reset_tumble();
         self.set_state(State::Fall, 0.0);
     }
     fn clamp_to_area(&mut self, world: &World) {
@@ -2145,24 +2308,36 @@ impl Pet {
         } else {
             a.right() - inset
         };
-        if self.pos.x < left && self.vel.x < 0.0 {
+        let wall_hit = if self.pos.x < left && self.vel.x < 0.0 {
             self.pos.x = left;
-            if self.vel.x.abs() > WALL_BOUNCE_MIN_SPEED {
-                self.vel.x = -self.vel.x * WALL_RESTITUTION;
-                self.squash = 0.35;
-            } else {
-                self.vel.x = 0.0;
-            }
+            true
         } else if self.pos.x > right && self.vel.x > 0.0 {
             self.pos.x = right;
-            if self.vel.x.abs() > WALL_BOUNCE_MIN_SPEED {
-                self.vel.x = -self.vel.x * WALL_RESTITUTION;
-                self.squash = 0.35;
-            } else {
-                self.vel.x = 0.0;
-            }
+            true
         } else {
             self.pos.x = self.pos.x.clamp(left, right);
+            false
+        };
+        if !wall_hit {
+            return;
+        }
+        let speed = self.vel.x.abs();
+        if speed > WALL_BOUNCE_MIN_SPEED {
+            self.vel.x = -self.vel.x * WALL_RESTITUTION;
+            self.squash = 0.35;
+            if self.state == State::Thrown && speed >= impact_runtime::WALL_TUMBLE_SPEED {
+                // A fast throw into the screen edge knocks Claude head over heels.
+                self.start_tumble(
+                    Knock {
+                        direction: self.vel.x,
+                        strength: speed * 0.6,
+                    },
+                    false,
+                    false,
+                );
+            }
+        } else {
+            self.vel.x = 0.0;
         }
     }
 

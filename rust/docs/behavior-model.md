@@ -59,14 +59,15 @@ Accessories keep their own colors. The last selected color is saved as the
 default for newly invited pets and future sessions; a persistent multi-pet
 roster is not implemented.
 
-## Exploration routes (0.8.0)
+## Exploration routes (0.9.0)
 
 Pure geometry planners are separated from `engine_exploration.rs`, which owns
 approach, crouch, flight, climb and ledge arrival. Decisions use the simulation
 RNG; safety checks use window IDs and geometry only. Normal transitions use
 17% exploration / up to 25% ledge-descent thresholds, bounded by availability,
 intensity and cooldowns. Manual commands and social activities have priority.
-A route has a 45-second maximum lifetime. Physics runs during airborne travel;
+Short routes have a 45-second lifetime; a long climb has a larger finite budget
+calculated from its approach distance and vertical travel. Physics runs during airborne travel;
 missing destinations do not teleport or stop the pet in midair.
 
 Climbing starts only after walking to the actual edge position, preserves feet
@@ -74,3 +75,10 @@ height on attachment and uses ordinary vertical climb motion. Rollover walks
 onto the top. Jump preparation holds a fixed pixel pose for 0.22 seconds.
 Descent can first stage at a safe ledge and must clear its old platform on the
 returning arc. See [upstream comparison](behavior-parity.md).
+
+A floating window can require a standing hop before its side enters hand reach.
+The hop uses ordinary gravity and only attaches at the real edge height. Direct
+jumps and side climbs remain random alternatives, even when a direct jump would
+be shorter. Hidden/offscreen tops and covered climbing edges are rejected.
+Settled zero-speed spacing holds allow occasional exploration attempts, while
+active steering, manual controls and social ownership retain priority.

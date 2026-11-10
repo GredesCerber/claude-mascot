@@ -215,10 +215,35 @@ fn safe_arc(
     let start = pet.pos;
     let half = HALF_WIDTH * display_scale(pet);
     let top = BODY_TOP * display_scale(pet);
+    let mut previous_y = start.y;
     for step in 1..=64 {
         let t = duration * step as f64 / 64.0;
         let x = start.x + velocity.x * t;
         let y = start.y + velocity.y * t + 0.5 * GRAVITY * t * t;
+        let descending = velocity.y + GRAVITY * t > 0.0;
+        let prev = previous_y;
+        // The pet is drawn above every window, so it only collides with a
+        // window lower in the stacking order by landing on its visible top
+        // edge while falling. A large window behind the source (for example a
+        // maximized app behind a floating one) is not an obstacle for the arc.
+        let blocks = |i: usize, w: &crate::WindowInfo| {
+            if i < source_index {
+                descending
+                    && prev <= w.rect.y
+                    && y >= w.rect.y
+                    && x + half > w.rect.x
+                    && x - half < w.rect.right()
+                    && !covered_at(world, i, x, w.rect.y - 1.0)
+            } else {
+                // Windows in front of the source keep the conservative body
+                // test: the arc must not pass through them.
+                x + half > w.rect.x
+                    && x - half < w.rect.right()
+                    && y > w.rect.y
+                    && y - top < w.rect.bottom()
+            }
+        };
+        previous_y = y;
         if x - half < area.x
             || x + half > area.right()
             || y > area.bottom() + 1e-6
@@ -229,14 +254,12 @@ fn safe_arc(
         if y >= source.y && x + half > source.x && x - half < source.right() {
             return false;
         }
-        if world.windows.iter().enumerate().any(|(i, w)| {
-            i != source_index
-                && w.rect.is_valid()
-                && x + half > w.rect.x
-                && x - half < w.rect.right()
-                && y > w.rect.y
-                && y - top < w.rect.bottom()
-        }) {
+        if world
+            .windows
+            .iter()
+            .enumerate()
+            .any(|(i, w)| i != source_index && w.rect.is_valid() && blocks(i, w))
+        {
             return false;
         }
     }

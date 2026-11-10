@@ -1,5 +1,5 @@
 //! Runtime ownership of optional exploration: approach, prepare, travel, arrive.
-use super::{covered, Pet, Rect, State, Vec2, World, BODY_HALF_WIDTH, WALK_SPEED};
+use super::{covered, Pet, Rect, State, Vec2, World, BODY_HALF_WIDTH, GRAVITY, WALK_SPEED};
 use crate::exploration::{self, JumpPlan};
 use crate::exploration_climb::{self, ClimbPlan};
 use crate::exploration_descent;
@@ -8,16 +8,29 @@ use std::hash::{Hash, Hasher};
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     ApproachClimb(ClimbPlan),
-    ApproachDescent { x: f64, plan: JumpPlan },
+    ApproachDescent {
+        x: f64,
+        plan: JumpPlan,
+    },
     Crouch(JumpPlan),
     Flight(JumpPlan),
     Climbing(ClimbPlan),
     Rollover(ClimbPlan),
+    /// Brief crouch below a floating window before hopping to its side edge.
+    HopCrouch(ClimbPlan),
+    /// Physical standing hop; the hands grab the edge once within reach.
+    HopFlight(ClimbPlan),
 }
+/// Climbing speed used by `Pet::update_climb`, for route time budgets.
+const CLIMB_SPEED: f64 = 65.0;
+/// Default ownership limit for short routes.
+const ROUTE_BUDGET: f64 = 45.0;
 #[derive(Clone, Debug)]
 pub(super) struct ExploreRoute {
     phase: Phase,
     age: f64,
+    /// Seconds this route may own the pet before it is abandoned.
+    budget: f64,
     prepared: f64,
     source: Option<usize>,
     destination: Option<Rect>,
@@ -68,7 +81,10 @@ impl Pet {
             || self.exploration_route.is_some()
             || self.explore_cooldown > 0.0
             || self.behavior_manual_lock > 0.0
-            || self.behavior_velocity_ttl > 0.0
+            // A settled spacing hold (zero steering velocity) must not starve
+            // exploration; only active steering movement owns the pet.
+            || (self.behavior_velocity_ttl > 0.0
+                && self.behavior_velocity.is_some_and(|v| v.abs() > 3.0))
             || !self.auto_activities
             || self.activity_intensity == 0
             || self.dragging
@@ -134,6 +150,7 @@ impl Pet {
         ExploreRoute {
             phase: Phase::Crouch(plan),
             age: 0.0,
+            budget: ROUTE_BUDGET,
             prepared: 0.0,
             source: self
                 .current_surface_index(world)
@@ -177,9 +194,16 @@ impl Pet {
         {
             return false;
         }
+        // Tall high-DPI windows take a while to walk to and climb; give the
+        // route enough time instead of abandoning it halfway up the side.
+        let budget = ROUTE_BUDGET.max(
+            12.0 + (plan.approach_x - self.pos.x).abs() / WALK_SPEED
+                + (self.pos.y - rect.y).max(0.0) / CLIMB_SPEED,
+        );
         self.exploration_route = Some(ExploreRoute {
             phase: Phase::ApproachClimb(plan),
             age: 0.0,
+            budget,
             prepared: 0.0,
             source: None,
             destination: None,
@@ -203,7 +227,7 @@ impl Pet {
         route.age += dt;
         if !self.display_scale.is_finite()
             || (self.display_scale - route.scale).abs() > 1e-6
-            || route.age > 45.0
+            || route.age > route.budget
             || !self.auto_activities
             || self.activity_intensity == 0
             || self.dragging
@@ -233,6 +257,16 @@ impl Pet {
                         self.abort_exploration(world);
                         return false;
                     };
+                    if plan.hop > 0.0 {
+                        // A floating window: crouch, then hop up to its edge.
+                        self.vel = Vec2::default();
+                        self.facing = plan.side;
+                        self.set_state(State::Crouch, 0.22);
+                        route.phase = Phase::HopCrouch(plan);
+                        route.prepared = 0.0;
+                        self.exploration_route = Some(route);
+                        return true;
+                    }
                     // Attach at the current feet height: no vertical or horizontal teleport.
                     if self.pos.y
                         > world.windows[i].rect.bottom()
@@ -296,6 +330,97 @@ impl Pet {
                 }
                 self.exploration_route = Some(route);
                 true
+            }
+            Phase::HopCrouch(plan) => {
+                // Re-validate the edge every tick; any change cancels on the floor.
+                let Some(plan) = exploration_climb::refresh_climb(self, world, plan)
+                    .filter(|fresh| fresh.hop > 0.0)
+                    .filter(|fresh| (self.pos.x - fresh.approach_x).abs() <= 3.0)
+                else {
+                    self.abort_exploration(world);
+                    return false;
+                };
+                if self.state != State::Crouch {
+                    self.abort_exploration(world);
+                    return false;
+                }
+                route.prepared += dt;
+                if route.prepared + 1e-9 >= 0.22 {
+                    let launch = (2.0 * GRAVITY * plan.hop).sqrt();
+                    self.surface = None;
+                    self.surface_id = None;
+                    self.surface_prev = None;
+                    self.vel = Vec2::new(0.0, -launch);
+                    self.set_state(State::Jump, 0.0);
+                    route.phase = Phase::HopFlight(plan);
+                } else {
+                    route.phase = Phase::HopCrouch(plan);
+                }
+                self.exploration_route = Some(route);
+                true
+            }
+            Phase::HopFlight(plan) => {
+                let scale = self.display_scale.clamp(0.5, 2.0);
+                let found = world
+                    .windows
+                    .iter()
+                    .position(|w| w.id == plan.window_id)
+                    .map(|i| (i, world.windows[i].rect));
+                let Some((i, rect)) = found.filter(|(i, rect)| {
+                    rect.is_valid()
+                        && !world.windows[*i].fullscreen
+                        && (self.pos.x
+                            - if plan.side < 0.0 {
+                                rect.x - BODY_HALF_WIDTH * scale
+                            } else {
+                                rect.right() + BODY_HALF_WIDTH * scale
+                            })
+                        .abs()
+                            <= 3.0
+                }) else {
+                    // The window moved or closed: keep the real flight.
+                    self.exploration_route = None;
+                    self.target = None;
+                    self.explore_cooldown = self.explore_cooldown.max(3.0);
+                    return false;
+                };
+                if !matches!(self.state, State::Jump | State::Fall) {
+                    // Landed without a grip; the hop simply ends on the floor.
+                    self.exploration_route = None;
+                    self.target = None;
+                    self.explore_cooldown = self.explore_cooldown.max(3.0);
+                    return false;
+                }
+                let grip_y = rect.bottom() + exploration_climb::GRIP_REACH * scale - 1.0;
+                let edge = Vec2::new(
+                    if plan.side < 0.0 {
+                        rect.x - 3.0 * scale
+                    } else {
+                        rect.right() + 3.0 * scale
+                    },
+                    rect.bottom() - 1.0,
+                );
+                if self.pos.y <= grip_y && self.pos.y > rect.y + 1.0 && !covered(world, edge, i) {
+                    // Hands reach the edge: attach at the current height, no snap.
+                    self.surface = Some(i);
+                    self.surface_id = Some(plan.window_id);
+                    self.surface_prev = Some(rect);
+                    self.vel = Vec2::default();
+                    self.facing = plan.side;
+                    self.set_state(State::Climb, 0.0);
+                    route.phase = Phase::Climbing(plan);
+                    self.exploration_route = Some(route);
+                    return true;
+                }
+                if self.vel.y > 0.0 {
+                    // Past the apex without reaching: fall back under gravity.
+                    self.exploration_route = None;
+                    self.target = None;
+                    self.explore_cooldown = self.explore_cooldown.max(3.0);
+                    return false;
+                }
+                self.exploration_route = Some(route);
+                false
             }
             Phase::Flight(plan) => {
                 if !matches!(self.state, State::Jump | State::Fall)

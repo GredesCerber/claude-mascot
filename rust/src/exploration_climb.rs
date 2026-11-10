@@ -5,6 +5,12 @@ use crate::{Rect, Vec2, WindowInfo, World};
 
 const MAX_APPROACH: f64 = 1_500.0;
 const BODY_HALF: f64 = 24.0;
+/// Climbing hands hold a side edge while the feet are this far below it.
+pub(crate) const GRIP_REACH: f64 = 40.0;
+/// Extra rise above the grip height so a hop reliably reaches the edge.
+pub(crate) const HOP_MARGIN: f64 = 18.0;
+/// Highest standing hop used to grab a floating window's side (per scale).
+const MAX_GRAB_HOP: f64 = 480.0;
 
 fn pet_scale(pet: &Pet) -> f64 {
     if pet.display_scale.is_finite() {
@@ -20,6 +26,23 @@ pub(crate) struct ClimbPlan {
     /// -1 means the left edge; +1 means the right edge.
     pub side: f64,
     pub approach_x: f64,
+    /// Standing hop (feet rise in px) needed before the hands reach the side
+    /// edge of a floating window. Zero when the window reaches the floor.
+    pub hop: f64,
+}
+
+/// Feet rise needed to grab the side of `w` from `floor`, or `None` when the
+/// edge is out of a standing hop's reach (or hangs below the floor).
+fn grab_hop(floor: f64, w: &WindowInfo, scale: f64) -> Option<f64> {
+    let reach = GRIP_REACH * scale;
+    if (w.rect.bottom() - floor).abs() <= reach {
+        return Some(0.0);
+    }
+    if w.rect.bottom() > floor {
+        return None;
+    }
+    let hop = floor - (w.rect.bottom() + reach) + HOP_MARGIN * scale;
+    (hop <= MAX_GRAB_HOP * scale).then_some(hop)
 }
 
 pub(crate) fn plan_climb(pet: &Pet, world: &World, roll: f64) -> Option<ClimbPlan> {
@@ -27,17 +50,18 @@ pub(crate) fn plan_climb(pet: &Pet, world: &World, roll: f64) -> Option<ClimbPla
         return None;
     }
     let floor = world.area_at(pet.pos).bottom();
+    let scale = pet_scale(pet);
     let mut candidates = Vec::new();
     for w in &world.windows {
-        if !eligible(w)
-            || floor - w.rect.y < 200.0 * pet_scale(pet)
-            || (w.rect.bottom() - floor).abs() > 40.0 * pet_scale(pet)
-        {
+        if !eligible(w) || floor - w.rect.y < 200.0 * scale {
             continue;
         }
+        let Some(hop) = grab_hop(floor, w, scale) else {
+            continue;
+        };
         for side in [-1.0, 1.0] {
             if let Some(x) = approach_x(pet, world, w, side) {
-                candidates.push((w.id, side, x, (x - pet.pos.x).abs()));
+                candidates.push((w.id, side, x, (x - pet.pos.x).abs(), hop));
             }
         }
     }
@@ -46,10 +70,11 @@ pub(crate) fn plan_climb(pet: &Pet, world: &World, roll: f64) -> Option<ClimbPla
         .min(candidates.len().saturating_sub(1));
     candidates
         .get(pick)
-        .map(|(window_id, side, approach_x, _)| ClimbPlan {
+        .map(|(window_id, side, approach_x, _, hop)| ClimbPlan {
             window_id: *window_id,
             side: *side,
             approach_x: *approach_x,
+            hop: *hop,
         })
 }
 
@@ -60,11 +85,16 @@ pub(crate) fn refresh_climb(pet: &Pet, world: &World, plan: ClimbPlan) -> Option
     }
     let floor = world.area_at(pet.pos).bottom();
     let scale = pet_scale(pet);
-    if floor - w.rect.y < 200.0 * scale || (w.rect.bottom() - floor).abs() > 40.0 * scale {
+    if floor - w.rect.y < 200.0 * scale {
         return None;
     }
+    let hop = grab_hop(floor, w, scale)?;
     let approach_x = approach_x(pet, world, w, plan.side)?;
-    Some(ClimbPlan { approach_x, ..plan })
+    Some(ClimbPlan {
+        approach_x,
+        hop,
+        ..plan
+    })
 }
 
 /// True only at the physical side attachment point; caller may then enter Climb.
@@ -104,6 +134,18 @@ fn approach_x(pet: &Pet, world: &World, w: &WindowInfo, side: f64) -> Option<f64
         return None;
     }
     let area = floor_area(pet, world)?;
+    let landing_x = if side < 0.0 {
+        w.rect.x + BODY_HALF * scale + 1.0
+    } else {
+        w.rect.right() - BODY_HALF * scale - 1.0
+    };
+    if w.rect.y < area.y + 55.0 * scale + 8.0
+        || landing_x - BODY_HALF * scale < area.x
+        || landing_x + BODY_HALF * scale > area.right()
+        || covered(world, Vec2::new(landing_x, w.rect.y + 1.0), w)
+    {
+        return None;
+    }
     // The pet's full horizontal body must remain within this one work area.
     if pet.pos.x.min(x) - BODY_HALF * scale < area.x
         || pet.pos.x.max(x) + BODY_HALF * scale > area.right()
@@ -124,6 +166,20 @@ fn approach_x(pet: &Pet, world: &World, w: &WindowInfo, side: f64) -> Option<f64
     let lo = pet.pos.x.min(x);
     let hi = pet.pos.x.max(x);
     let target_index = world.windows.iter().position(|window| window.id == w.id)?;
+    let grip_x = if side < 0.0 {
+        w.rect.x - 3.0 * scale
+    } else {
+        w.rect.right() + 3.0 * scale
+    };
+    if world.windows.iter().skip(target_index + 1).any(|other| {
+        valid(other.rect)
+            && grip_x >= other.rect.x
+            && grip_x <= other.rect.right()
+            && other.rect.bottom() > w.rect.y
+            && other.rect.y < w.rect.bottom().min(area.bottom())
+    }) {
+        return None;
+    }
     if world.windows.iter().skip(target_index + 1).any(|other| {
         valid(other.rect)
             && other.rect.y < area.bottom()

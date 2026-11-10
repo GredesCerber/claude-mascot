@@ -1,6 +1,6 @@
 //! Bounded pairwise body contact resolution for the desktop simulation.
 use crate::{
-    engine::{Pet, State},
+    engine::{Knock, Pet, State},
     social::SocialKind,
     Vec2, World,
 };
@@ -9,6 +9,15 @@ const CAP: usize = 8;
 const RESTITUTION: f64 = 0.55;
 const HALF_WIDTH: f64 = 38.0;
 const HALF_HEIGHT: f64 = 27.5;
+/// Closing speed of a side hit that is hard enough to tumble a body. Walking,
+/// running, tag and jump-over contacts stay well below it.
+const TUMBLE_SIDE_SPEED: f64 = 480.0;
+/// Head-on vertical drops need far more speed; a normal hop onto a friend's
+/// head only bounces.
+const TUMBLE_VERTICAL_SPEED: f64 = 950.0;
+/// The receiving body's own velocity change must also be meaningful, so a
+/// heavy (scaled-up) pet barely moved by a light one stays on its feet.
+const TUMBLE_MIN_DV: f64 = 240.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Body {
@@ -28,6 +37,8 @@ pub struct ContactCoordinator {
     previous: [Option<(u64, Vec2)>; CAP],
     pub contact_count: u64,
     pub strong_impacts: u64,
+    /// Contacts hard enough to hand at least one body to a knock-back tumble.
+    pub tumble_impacts: u64,
 }
 impl ContactCoordinator {
     pub fn new() -> Self {
@@ -35,6 +46,7 @@ impl ContactCoordinator {
             previous: [None; CAP],
             contact_count: 0,
             strong_impacts: 0,
+            tumble_impacts: 0,
         }
     }
 
@@ -125,6 +137,8 @@ impl ContactCoordinator {
                 let mut new_a = a.vel;
                 let mut new_b = b.vel;
                 let mut strong = false;
+                let mut knock_a = None;
+                let mut knock_b = None;
                 if normal_speed < 0.0 {
                     let impact = normal_speed.abs();
                     let restitution = if is_tag_pair(a, b) { 0.25 } else { RESTITUTION };
@@ -138,6 +152,39 @@ impl ContactCoordinator {
                         || matches!(b.state, State::Thrown) && impact >= 150.0;
                     if strong {
                         self.strong_impacts = self.strong_impacts.saturating_add(1);
+                    }
+                    let threshold = if vertical {
+                        TUMBLE_VERTICAL_SPEED
+                    } else {
+                        TUMBLE_SIDE_SPEED
+                    };
+                    if impact >= threshold && impulse.is_finite() {
+                        // Spin follows the push each body receives. A purely
+                        // vertical hit rolls away from the other body.
+                        let side = if b.pos.x > a.pos.x || (b.pos.x == a.pos.x && a.id < b.id) {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                        let dir_a = if n.x != 0.0 { -n.x } else { -side };
+                        let dir_b = if n.x != 0.0 { n.x } else { side };
+                        let dv_a = impulse * inv_a;
+                        let dv_b = impulse * inv_b;
+                        if dv_a >= TUMBLE_MIN_DV {
+                            knock_a = Some(Knock {
+                                direction: dir_a,
+                                strength: dv_a,
+                            });
+                        }
+                        if dv_b >= TUMBLE_MIN_DV {
+                            knock_b = Some(Knock {
+                                direction: dir_b,
+                                strength: dv_b,
+                            });
+                        }
+                        if knock_a.is_some() || knock_b.is_some() {
+                            self.tumble_impacts = self.tumble_impacts.saturating_add(1);
+                        }
                     }
                 }
                 if let Some((pa, pb)) = pair_mut(&mut slots, i, j) {
@@ -169,10 +216,10 @@ impl ContactCoordinator {
                     }
                     if normal_speed < 0.0 {
                         if inv_a > 0.0 {
-                            pa.contact_impact(new_a, strong);
+                            pa.contact_impact(new_a, strong, knock_a);
                         }
                         if inv_b > 0.0 {
-                            pb.contact_impact(new_b, strong);
+                            pb.contact_impact(new_b, strong, knock_b);
                         }
                     }
                 }

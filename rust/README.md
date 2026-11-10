@@ -1,13 +1,17 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
-Version 0.8.0 keeps **Claude only** and includes
+Version 0.9.0 keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
 It includes varied window/landing selection, deliberate approaches to window edges,
 a 0.22-second pixel crouch before exploration jumps, voluntary ledge descent,
 desktop-icon perches, adaptive jumps, cursor/Explorer reactions,
-75 activities from the supplied pixel pack and eight friendly social activities.
+75 activities from the supplied pixel pack and nine friendly social activities.
+Hard hits now produce bounded tumbling, bounces and a short dizzy recovery.
+Floating windows can be reached by a hop to their side followed by climbing;
+safe routes are chosen randomly rather than by shortest distance. Covered desktop
+icons release their occupants under gravity, including after Alt+Tab.
 Version 0.7.1 establishes this fork's own release/update channel and migrates
 the old upstream update setting while keeping other preferences.
 The original [Python/Linux application](https://github.com/kerimovernes/claude-mascot)
@@ -50,7 +54,7 @@ the pets running. Intensity changes optional behavior frequency, not FPS.
 | Заняться → Все занятия (75) | All pack scenes grouped by mood, code, workshop, nature, food, celebration, adventure, reflection and sport |
 | Поведение | Wander, sit, sleep, climb, chase the cursor |
 | Друзья | Invite another Claude (up to eight), remove the selected pet |
-| Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend, tag, group tower, leapfrog |
+| Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend, tag, group tower, leapfrog, friendly rough play |
 | Настройки | Scale, speech, mood meter, fullscreen hiding, startup, frame rate |
 
 Laptop opens for 1 second, types for 8 seconds and closes for 1 second.
@@ -96,7 +100,7 @@ derive matching limb/shadow/highlight colors while preserving Claude's geometry.
 The last selected color is saved as the default for new pets and future sessions.
 
 Speech varies by event and activity: 300 scene lines (four per catalog entry)
-plus 186 options for 37 reactions and social roles. Recent choices are remembered
+plus 221 options for 44 reactions and social roles. Recent choices are remembered
 to avoid immediate repeats; repeated clicks and ambient chatter have cooldowns.
 Speech randomness is separate from physics and is reseeded for each native session.
 Nearby friends take speaking turns so their bubbles do not overlap.
@@ -147,11 +151,12 @@ embed the icon and package a portable ZIP. Executable QA arguments:
 .\target\release\claude-mascot.exe --smoke-test 5 --trace .\smoke.json
 ```
 
-See [architecture](docs/architecture.md), [0.8.0 checks](docs/verification-0.8.0.md)
+See [architecture](docs/architecture.md), [0.9.0 checks](docs/verification-0.9.0.md)
 and the [remaining roadmap](docs/planning/PLAN-RU.md).
-The proposed phrase bank is planning data, not a runtime dialogue engine.
+Runtime speech banks and their cooldowns are implemented in `dialogue.rs`.
 
 This port does not provide complete Python parity. Linux/KDE/Wayland integration
 is provided by Python; window route planning and media peek remain simplified.
-Mixed-DPI coverage, a real MSI install/upgrade/remove cycle and a published
-portable updater cycle remain separate acceptance checks.
+Mixed-DPI hardware coverage, a complete clean-install/uninstall MSI cycle and a
+published portable updater cycle remain separate acceptance checks. An installed
+MSI upgrade from 0.7.1 to 0.8.0 was verified on the development machine.

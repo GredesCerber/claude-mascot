@@ -669,6 +669,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         ("Догонялки", 96),
         ("Башня", 97),
         ("Чехарда", 98),
+        ("Потасовка", 99),
     ]
     .into_iter()
     .enumerate()
@@ -1053,7 +1054,7 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         _ if (ID_QUICK_BASE + 70..=ID_QUICK_BASE + 76).contains(&id) => s
             .events
             .push(PreferencesEvent::RunAction((id - ID_QUICK_BASE) as u16)),
-        _ if (ID_QUICK_BASE + 90..=ID_QUICK_BASE + 98).contains(&id) => s
+        _ if (ID_QUICK_BASE + 90..=ID_QUICK_BASE + 99).contains(&id) => s
             .events
             .push(PreferencesEvent::RunAction((id - ID_QUICK_BASE) as u16)),
         _ => {}

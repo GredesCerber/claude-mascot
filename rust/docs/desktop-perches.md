@@ -26,3 +26,10 @@ desktop-host/list-item filters remain independent of this geometry allowance.
 
 QA may inspect `DesktopMonitor::icon_rectangles()` and report the count and
 rectangles only. Do not log UIA names, paths, or element properties.
+
+Occupied icon supports are also checked against the current stacking order.
+Alt+Tab can leave the UIA rectangle cached while another window hides it: only
+the occupied point's visibility matters, so exposed icons survive a focus change.
+Hidden or deleted supports release the pet from its actual position under gravity;
+manual sit/sleep resumes after landing. Ordinary window-top supports keep their
+existing behavior. This validation also runs for a social scene on an icon.
