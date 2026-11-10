@@ -1324,7 +1324,13 @@ mod native {
                             .as_ref()
                             .and_then(|v| v["message"].as_str())
                             .unwrap_or("Встроенный установщик ещё не запускался.");
-                        update_dialog(message, false);
+                        update_dialog(
+                            &format!(
+                                "Установлена версия {}.\n\n{message}",
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                            false,
+                        );
                     }
                     _ => {}
                 }
