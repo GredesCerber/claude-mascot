@@ -329,11 +329,19 @@ impl SocialCoordinator {
                                 refs[ci].as_deref().unwrap(),
                                 pair.support,
                             )
-                            .map(|target| (id, other, target))
+                            .and_then(|target| {
+                                crate::leapfrog::plan(
+                                    refs[ji].as_deref().unwrap(),
+                                    refs[ci].as_deref().unwrap(),
+                                    target,
+                                    world,
+                                )
+                                .map(|arc| (id, other, target, arc))
+                            })
                         };
                         // At a ledge, hop back over the crouching friend instead
                         // of abandoning the game after just one or two jumps.
-                        let Some((next, other_id, target)) =
+                        let Some((next, other_id, target, arc)) =
                             target_for(croucher_id).or_else(|| target_for(jumper_id))
                         else {
                             self.pairs[ix] = None;
@@ -375,12 +383,7 @@ impl SocialCoordinator {
                         }
                         if let Some(i) = find(refs, n, next) {
                             let jumper = refs[i].as_deref_mut().unwrap();
-                            jumper.state = State::Crouch;
-                            jumper.state_time = 0.0;
-                            jumper.social_motion = Some(SocialMotion::Leap {
-                                target,
-                                owner_id: other_id,
-                            });
+                            jumper.prepare_leapfrog(target, other_id, arc);
                         }
                     }
                 }
@@ -1378,15 +1381,16 @@ impl SocialCoordinator {
         } else if kind == SocialKind::Leapfrog {
             let jumper = refs[i].as_deref().unwrap();
             let croucher = refs[j].as_deref().unwrap();
-            if let Some(target) = leapfrog_target(jumper, croucher, pair.support) {
+            if let Some((target, arc)) =
+                leapfrog_target(jumper, croucher, pair.support).and_then(|target| {
+                    crate::leapfrog::plan(jumper, croucher, target, world).map(|arc| (target, arc))
+                })
+            {
                 if let Some(jumper_i) = find(refs, CAP, a_id) {
-                    let jumper = refs[jumper_i].as_deref_mut().unwrap();
-                    jumper.state = State::Crouch;
-                    jumper.state_time = 0.0;
-                    jumper.social_motion = Some(SocialMotion::Leap {
-                        target,
-                        owner_id: b_id,
-                    });
+                    refs[jumper_i]
+                        .as_deref_mut()
+                        .unwrap()
+                        .prepare_leapfrog(target, b_id, arc);
                 }
             }
         }
@@ -1743,8 +1747,10 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
             support.y - w.area_at(a.pos).y
                 >= 180.0 * a.display_scale.max(b.display_scale).clamp(0.5, 2.0)
                 && support.w >= 320.0
-                && leapfrog_target(a, b, support).is_some()
-                && leapfrog_target(b, a, support).is_some()
+                && d >= 38.0 * (a.display_scale + b.display_scale) + 4.0 * scale
+                && leapfrog_target(a, b, support)
+                    .and_then(|target| crate::leapfrog::plan(a, b, target, w))
+                    .is_some()
         }
         SocialKind::RoughPlay => {
             // The partner rolls away from the initiator; keep that landing on
@@ -1819,7 +1825,7 @@ fn leapfrog_target(jumper: &Pet, croucher: &Pet, support: Rect) -> Option<Vec2> 
     } else {
         -1.0
     };
-    let x = croucher.pos.x + direction * 100.0 * scale;
+    let x = croucher.pos.x + direction * 160.0 * scale;
     let margin = 35.0 * scale;
     if x < support.x + margin
         || x > support.right() - margin

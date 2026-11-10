@@ -9,6 +9,7 @@ pub mod engine;
 pub(crate) mod exploration;
 pub(crate) mod exploration_climb;
 pub(crate) mod exploration_descent;
+pub(crate) mod leapfrog;
 #[cfg(windows)]
 pub mod media;
 pub mod palette;

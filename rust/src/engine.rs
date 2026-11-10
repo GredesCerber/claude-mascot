@@ -134,6 +134,7 @@ pub struct Pet {
     pub(crate) climb_face_fraction: f64,
     previous_floor_area: Option<Rect>,
     floor_bounce_cooldown: f64,
+    leapfrog_arc: Option<crate::leapfrog::Arc>,
     /// Short lived point of interest for the renderer (for example, a newly opened file manager).
     pub attention_target: Option<Vec2>,
     /// Enables gentle reactions to visible desktop activity.
@@ -275,6 +276,7 @@ impl Pet {
             climb_face_fraction: 0.5,
             previous_floor_area: None,
             floor_bounce_cooldown: 0.0,
+            leapfrog_arc: None,
             attention_target: None,
             auto_reactions: true,
             activity: None,
@@ -2123,6 +2125,18 @@ impl Pet {
         }
     }
 
+    pub(crate) fn prepare_leapfrog(
+        &mut self,
+        target: Vec2,
+        owner_id: u64,
+        arc: crate::leapfrog::Arc,
+    ) {
+        self.leapfrog_arc = Some(arc);
+        self.state = State::Crouch;
+        self.state_time = 0.0;
+        self.vel = Vec2::default();
+        self.social_motion = Some(SocialMotion::Leap { target, owner_id });
+    }
     fn update_social_motion(&mut self, _dt: f64, world: &World) -> bool {
         match self.social_motion {
             Some(SocialMotion::Perch { target, .. }) => {
@@ -2151,20 +2165,31 @@ impl Pet {
                     self.social_motion = None;
                     return false;
                 }
-                if self.state != State::Jump && !self.is_airborne() {
-                    let leapfrog = self
-                        .social
-                        .is_some_and(|s| s.kind == crate::social::SocialKind::Leapfrog);
-                    if leapfrog && self.state == State::Crouch && self.state_time < 0.16 {
-                        return true;
+                if self
+                    .social
+                    .is_some_and(|s| s.kind == crate::social::SocialKind::Leapfrog)
+                {
+                    if let Some(arc) = self.leapfrog_arc {
+                        if self.state == State::Crouch {
+                            if self.state_time < 0.16 {
+                                return true;
+                            }
+                            self.vel = Vec2::new(0.0, -arc.launch);
+                            self.state = State::Jump;
+                            self.state_time = 0.0;
+                            self.surface = None;
+                            self.surface_id = None;
+                            self.surface_prev = None;
+                        } else if self.state == State::Jump && self.pos.y <= arc.start_y {
+                            self.vel.x = arc.vx;
+                            self.facing = arc.vx.signum();
+                            self.leapfrog_arc = None;
+                        }
                     }
-                    let minimum_rise = if leapfrog {
-                        120.0 * self.display_scale.clamp(0.5, 2.0)
-                    } else {
-                        80.0
-                    };
-                    let rise =
-                        (self.pos.y - target.y + self.head_clearance()).clamp(minimum_rise, 900.0);
+                    return false;
+                }
+                if self.state != State::Jump && !self.is_airborne() {
+                    let rise = (self.pos.y - target.y + self.head_clearance()).clamp(80.0, 900.0);
                     let area = world.area_at(self.pos);
                     let available_rise = (self.pos.y - area.y - self.head_clearance()).max(0.0);
                     if rise > available_rise {
