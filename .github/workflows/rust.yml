@@ -41,5 +41,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --lib --test engine_regression
+      - run: cargo test --locked
       - run: cargo run --locked -- --headless
