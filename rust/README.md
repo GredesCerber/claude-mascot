@@ -1,7 +1,7 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
-Version 0.9.0 keeps **Claude only** and includes
+Version 0.10.0 keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
 It includes varied window/landing selection, deliberate approaches to window edges,
@@ -27,8 +27,11 @@ Rendering rate is independent of the 240 Hz physics loop.
 Windows 10/11 x64. No Python or Rust runtime is required.
 Use the per-user MSI for shortcuts, upgrades and removal through Windows
 Settings or the Start Menu uninstall shortcut. See [MSI packaging](docs/msi.md).
-MSI installs can check for updates and show the installed version. A newer release
-can open its download page after confirmation; installation still uses a newer MSI.
+MSI installs download verified installer updates, apply them through Windows
+Installer and restart the pet. Automatic checking and installation can be disabled
+in Settings. New installs enable both; existing settings opt into automatic
+installation using the new checkbox. Without it, one confirmation installs the
+update directly, without opening a release webpage. See [updates](docs/updates.md).
 
 Alternatively, extract the portable ZIP and run `claude-mascot.exe`.
 `Install.ps1` copies the portable application to
@@ -151,7 +154,7 @@ embed the icon and package a portable ZIP. Executable QA arguments:
 .\target\release\claude-mascot.exe --smoke-test 5 --trace .\smoke.json
 ```
 
-See [architecture](docs/architecture.md), [0.9.0 checks](docs/verification-0.9.0.md)
+See [architecture](docs/architecture.md), [0.10.0 checks](docs/verification-0.10.0.md)
 and the [remaining roadmap](docs/planning/PLAN-RU.md).
 Runtime speech banks and their cooldowns are implemented in `dialogue.rs`.
 

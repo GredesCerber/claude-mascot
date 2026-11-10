@@ -1,4 +1,4 @@
-# Rust port architecture (0.9.0)
+# Rust port architecture (0.10.0)
 
 The Python application at the repository root is preserved. Rust is Windows-first
 and Claude-only. Tagilla, weapons, atlas decoding and crack overlays were removed in 0.4.0.
@@ -25,6 +25,7 @@ and Claude-only. Tagilla, weapons, atlas decoding and crack overlays were remove
 | settings.rs | Versioned JSON and legacy character migration |
 | media.rs | Background best-effort playback monitoring |
 | update*.rs | Portable staging, digest checks, rollback and MSI ownership safeguards |
+| update_msi.rs | Read-only product inspection, per-user Windows Installer upgrade, installed digest verification and restart |
 
 Each physics step advances pets, resolves contacts, updates free behavior, then
 advances social scenes, using bounded storage and stable IDs. Owned scenes

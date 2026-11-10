@@ -1,11 +1,11 @@
 //! Opt-in, user-controlled update checks for official GitHub releases.
 //!
-//! This module checks release metadata in the background. It never downloads
-//! until the caller invokes `request_download` after obtaining user consent,
-//! and it only stages a verified executable; it does not launch or replace it.
+//! The caller authorizes downloads by confirmation or a saved automatic-install
+//! preference. Only verified release payloads are staged; this worker never
+//! launches installers or replaces application files.
 
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,8 +19,26 @@ pub use crate::settings::DEFAULT_UPDATE_REPOSITORY as DEFAULT_REPOSITORY;
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub(crate) const MAX_EXECUTABLE_SIZE: u64 = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    #[default]
+    Executable,
+    Msi,
+}
+impl AssetKind {
+    pub fn asset_name(self, version: &str) -> String {
+        match self {
+            Self::Executable => "claude-mascot-windows-x64.exe".into(),
+            Self::Msi => format!("claude-mascot-{version}-x64.msi"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseInfo {
+    pub kind: AssetKind,
+    pub executable_sha256: Option<String>,
     pub version: String,
     pub tag: String,
     pub url: String,
@@ -30,6 +48,8 @@ pub struct ReleaseInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedUpdate {
+    pub kind: AssetKind,
+    pub executable_sha256: Option<String>,
     pub executable: std::path::PathBuf,
     pub sha256: String,
     pub version: String,
@@ -50,7 +70,7 @@ pub enum UpdateEvent {
 
 enum Command {
     Check { manual: bool },
-    Download(ReleaseInfo),
+    Download(ReleaseInfo, bool),
     SetEnabled(bool),
     Stop,
 }
@@ -65,12 +85,22 @@ pub struct UpdateService {
 
 impl UpdateService {
     pub fn new(repo: String, enabled: bool) -> Self {
+        Self::new_for_kind(repo, enabled, AssetKind::Executable)
+    }
+
+    pub fn new_for_kind(repo: String, enabled: bool, kind: AssetKind) -> Self {
+        Self::new_deferred(repo, enabled, kind, false)
+    }
+
+    pub fn new_deferred(repo: String, enabled: bool, kind: AssetKind, skip_first: bool) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let worker_events = event_tx.clone();
         let worker = thread::Builder::new()
             .name("mascot-update-check".into())
-            .spawn(move || update_worker(repo, enabled, command_rx, worker_events));
+            .spawn(move || {
+                update_worker(repo, enabled, kind, skip_first, command_rx, worker_events)
+            });
         match worker {
             Ok(worker) => Self {
                 commands: command_tx,
@@ -98,7 +128,11 @@ impl UpdateService {
 
     /// Queue a download after the UI has explicitly obtained user consent.
     pub fn request_download(&self, release: ReleaseInfo) {
-        let _ = self.commands.send(Command::Download(release));
+        self.request_download_with_mode(release, true);
+    }
+
+    pub fn request_download_with_mode(&self, release: ReleaseInfo, manual: bool) {
+        let _ = self.commands.send(Command::Download(release, manual));
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -127,11 +161,18 @@ impl Drop for UpdateService {
 fn update_worker(
     repo: String,
     initially_enabled: bool,
+    kind: AssetKind,
+    skip_first: bool,
     commands: Receiver<Command>,
     events: Sender<UpdateEvent>,
 ) {
     let mut enabled = initially_enabled;
-    let mut next_check = Instant::now();
+    let mut next_check = Instant::now()
+        + if skip_first {
+            CHECK_INTERVAL
+        } else {
+            Duration::ZERO
+        };
     loop {
         let timeout = if enabled {
             next_check.saturating_duration_since(Instant::now())
@@ -147,25 +188,26 @@ fn update_worker(
                 enabled = value;
             }
             Ok(Command::Check { manual }) => {
-                let result = check_latest(&repo);
+                let result = check_latest(&repo, kind);
                 send_check_result(&events, result, manual);
                 if enabled {
                     next_check = Instant::now() + CHECK_INTERVAL;
                 }
             }
-            Ok(Command::Download(release)) => {
-                let result = download_release(&repo, &release);
+            Ok(Command::Download(release, manual)) => {
+                let result = if release.kind == kind {
+                    download_release(&repo, &release)
+                } else {
+                    Err("Update package type does not match this installation".into())
+                };
                 let event = match result {
                     Ok(staged) => UpdateEvent::Downloaded(staged),
-                    Err(message) => UpdateEvent::Error {
-                        message,
-                        manual: true,
-                    },
+                    Err(message) => UpdateEvent::Error { message, manual },
                 };
                 let _ = events.send(event);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let result = check_latest(&repo);
+                let result = check_latest(&repo, kind);
                 send_check_result(&events, result, false);
                 next_check = Instant::now() + CHECK_INTERVAL;
             }
@@ -185,18 +227,18 @@ fn send_check_result(
     let _ = events.send(event);
 }
 
-fn check_latest(repo: &str) -> Result<Option<ReleaseInfo>, String> {
+fn check_latest(repo: &str, kind: AssetKind) -> Result<Option<ReleaseInfo>, String> {
     #[cfg(windows)]
     {
         let json = update_http::fetch_latest_json(repo)?;
         let Some(json) = json else {
             return Ok(None);
         };
-        parse_release(&json, repo, env!("CARGO_PKG_VERSION"))
+        parse_release_for_kind(&json, repo, env!("CARGO_PKG_VERSION"), kind)
     }
     #[cfg(not(windows))]
     {
-        let _ = repo;
+        let _ = (repo, kind);
         Err("Automatic update checks are supported on Windows only".into())
     }
 }
@@ -231,6 +273,15 @@ struct GithubAsset {
 
 /// Validate GitHub release metadata without performing I/O.
 pub fn parse_release(json: &str, repo: &str, current: &str) -> Result<Option<ReleaseInfo>, String> {
+    parse_release_for_kind(json, repo, current, AssetKind::Executable)
+}
+
+pub fn parse_release_for_kind(
+    json: &str,
+    repo: &str,
+    current: &str,
+    kind: AssetKind,
+) -> Result<Option<ReleaseInfo>, String> {
     validate_repository(repo)?;
     let release: GithubRelease = serde_json::from_str(json)
         .map_err(|error| format!("Invalid GitHub release metadata: {error}"))?;
@@ -254,14 +305,22 @@ pub fn parse_release(json: &str, repo: &str, current: &str) -> Result<Option<Rel
         return Ok(None);
     }
 
-    const ASSET_NAME: &str = "claude-mascot-windows-x64.exe";
+    if kind == AssetKind::Msi
+        && (!version.build.is_empty()
+            || version.major > 255
+            || version.minor > 255
+            || version.patch > 65535)
+    {
+        return Err("Release version cannot be represented by Windows Installer".into());
+    }
+    let asset_name = kind.asset_name(&version.to_string());
     let mut matching = release
         .assets
         .iter()
-        .filter(|asset| asset.name == ASSET_NAME);
+        .filter(|asset| asset.name == asset_name);
     let asset = matching
         .next()
-        .ok_or_else(|| format!("Release is missing required asset {ASSET_NAME}"))?;
+        .ok_or_else(|| format!("Release is missing required asset {asset_name}"))?;
     if matching.next().is_some() {
         return Err("Release contains ambiguous duplicate Windows assets".into());
     }
@@ -272,7 +331,7 @@ pub fn parse_release(json: &str, repo: &str, current: &str) -> Result<Option<Rel
         ));
     }
     let expected_url = format!(
-        "https://github.com/{repo}/releases/download/{}/{ASSET_NAME}",
+        "https://github.com/{repo}/releases/download/{}/{asset_name}",
         release.tag_name
     );
     if asset.browser_download_url != expected_url {
@@ -288,6 +347,16 @@ pub fn parse_release(json: &str, repo: &str, current: &str) -> Result<Option<Rel
     }
 
     Ok(Some(ReleaseInfo {
+        kind,
+        executable_sha256: if kind == AssetKind::Msi {
+            Some(
+                parse_release_for_kind(json, repo, &current.to_string(), AssetKind::Executable)?
+                    .ok_or("Missing companion executable metadata")?
+                    .sha256,
+            )
+        } else {
+            None
+        },
         version: version.to_string(),
         tag: release.tag_name,
         url: expected_url,
@@ -322,6 +391,83 @@ fn validate_repository(repo: &str) -> Result<(), String> {
 mod tests {
     use super::{parse_release, validate_repository};
     use serde_json::json;
+
+    fn msi_fixture() -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_str(&fixture(
+            "1.2.3",
+            "owner/repo",
+            "claude-mascot-windows-x64.exe",
+            Some(&format!("sha256:{}", "a".repeat(64))),
+            1024,
+        ))
+        .unwrap();
+        value["assets"].as_array_mut().unwrap().push(json!({
+            "name":"claude-mascot-1.2.3-x64.msi", "size":2048,
+            "digest":format!("sha256:{}", "b".repeat(64)),
+            "browser_download_url":"https://github.com/owner/repo/releases/download/v1.2.3/claude-mascot-1.2.3-x64.msi"
+        }));
+        value
+    }
+
+    #[test]
+    fn msi_update_selects_versioned_installer_and_requires_both_digests() {
+        let value = msi_fixture();
+        let release = super::parse_release_for_kind(
+            &value.to_string(),
+            "owner/repo",
+            "1.0.0",
+            super::AssetKind::Msi,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(release.kind, super::AssetKind::Msi);
+        assert!(release.url.ends_with("claude-mascot-1.2.3-x64.msi"));
+        assert_eq!(release.sha256, "b".repeat(64));
+        assert_eq!(release.executable_sha256, Some("a".repeat(64)));
+        for index in [0, 1] {
+            let mut broken = value.clone();
+            broken["assets"][index]["digest"] = serde_json::Value::Null;
+            assert!(super::parse_release_for_kind(
+                &broken.to_string(),
+                "owner/repo",
+                "1.0.0",
+                super::AssetKind::Msi
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn msi_update_rejects_wrong_url_name_duplicates_and_oversize() {
+        for (key, invalid) in [
+            (
+                "browser_download_url",
+                json!("https://attacker.invalid/package.msi"),
+            ),
+            ("name", json!("claude-mascot-1.2.2-x64.msi")),
+            ("size", json!(64 * 1024 * 1024 + 1)),
+        ] {
+            let mut value = msi_fixture();
+            value["assets"][1][key] = invalid;
+            assert!(super::parse_release_for_kind(
+                &value.to_string(),
+                "owner/repo",
+                "1.0.0",
+                super::AssetKind::Msi
+            )
+            .is_err());
+        }
+        let mut duplicate = msi_fixture();
+        let asset = duplicate["assets"][1].clone();
+        duplicate["assets"].as_array_mut().unwrap().push(asset);
+        assert!(super::parse_release_for_kind(
+            &duplicate.to_string(),
+            "owner/repo",
+            "1.0.0",
+            super::AssetKind::Msi
+        )
+        .is_err());
+    }
 
     fn fixture(
         version: &str,

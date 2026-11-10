@@ -2,7 +2,9 @@
 //! it copies this helper to the private staging directory, starts it, and exits.
 #![cfg(windows)]
 
-use crate::update::StagedUpdate;
+use crate::update::{AssetKind, StagedUpdate};
+#[path = "update_msi.rs"]
+mod msi;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -34,6 +36,9 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApplyPlan {
+    #[serde(default)]
+    pub kind: AssetKind,
+    pub executable_sha256: Option<String>,
     pub target: PathBuf,
     pub staged: PathBuf,
     pub sha256: String,
@@ -48,6 +53,7 @@ pub fn schedule(
     target: &Path,
     restart_args: &[String],
 ) -> Result<(), String> {
+    validate_update_version(&staged.version)?;
     validate_digest(&staged.sha256)?;
     let stage_file = fs::canonicalize(&staged.executable)
         .map_err(|e| format!("Cannot resolve staged update: {e}"))?;
@@ -63,7 +69,18 @@ pub fn schedule(
         return Err("Update target must be the currently running executable".into());
     }
 
-    verify_staged(&stage_file, &staged.sha256)?;
+    verify_payload(
+        &stage_file,
+        &staged.sha256,
+        staged.kind,
+        &staged.version,
+        staged.executable_sha256.as_deref(),
+    )?;
+    if staged.kind == AssetKind::Msi {
+        msi::validate_target(&target)?;
+    } else {
+        refuse_msi_target(&target)?;
+    }
 
     let helper = stage_dir.join("updater.exe");
     copy_create_new(
@@ -72,6 +89,8 @@ pub fn schedule(
         MAX_EXECUTABLE_SIZE,
     )?;
     let plan = ApplyPlan {
+        kind: staged.kind,
+        executable_sha256: staged.executable_sha256.clone(),
         target,
         staged: stage_file,
         sha256: staged.sha256.to_ascii_lowercase(),
@@ -95,12 +114,45 @@ pub fn schedule(
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
-    if let Err(e) = command.spawn() {
-        let _ = fs::remove_file(&plan_path);
-        let _ = fs::remove_file(&helper);
-        return Err(format!("Cannot start update helper: {e}"));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = fs::remove_file(&plan_path);
+            let _ = fs::remove_file(&helper);
+            return Err(format!("Cannot start update helper: {e}"));
+        }
+    };
+    let ready = stage_dir.join("update-ready");
+    let started = Instant::now();
+    loop {
+        if fs::read(&ready).is_ok_and(|b| b == std::process::id().to_le_bytes()) {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return Err(
+                    "Update helper failed before confirming readiness; current app remains running"
+                        .into(),
+                )
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Cannot inspect update helper: {error}"));
+            }
+        }
+        if started.elapsed() >= Duration::from_secs(5) {
+            // Parent is still alive, so installation cannot have started yet.
+            // Do not leave a late helper waiting to install on a later quit.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                "Update helper did not confirm readiness; current app remains running".into(),
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
     }
-    Ok(())
 }
 
 /// Validate and apply a plan. Called by the copied helper before normal startup.
@@ -148,18 +200,54 @@ fn apply_inner(plan_path: &Path) -> Result<(), String> {
     let plan: ApplyPlan =
         serde_json::from_slice(&plan_bytes).map_err(|e| format!("Invalid update plan: {e}"))?;
     validate_digest(&plan.sha256)?;
+    validate_update_version(&plan.version)?;
     if plan.version.trim().is_empty() || plan.version.len() > 128 {
         return Err("Update version metadata is invalid".into());
     }
     let target = absolute_existing_file(&plan.target)?;
-    refuse_msi_target(&target)?;
+    if plan.kind == AssetKind::Msi {
+        msi::validate_target(&target)?;
+    } else {
+        refuse_msi_target(&target)?;
+    }
     let staged =
         fs::canonicalize(&plan.staged).map_err(|e| format!("Cannot resolve staged update: {e}"))?;
     validate_layout(&helper, &plan_path, &stage_dir, &staged, &target)?;
-    verify_staged(&staged, &plan.sha256)?;
+    use std::os::windows::fs::OpenOptionsExt;
+    let _msi_lock = if plan.kind == AssetKind::Msi {
+        Some(
+            OpenOptions::new()
+                .read(true)
+                .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+                .open(&staged)
+                .map_err(|e| format!("Cannot lock staged MSI: {e}"))?,
+        )
+    } else {
+        None
+    };
+    verify_payload(
+        &staged,
+        &plan.sha256,
+        plan.kind,
+        &plan.version,
+        plan.executable_sha256.as_deref(),
+    )?;
 
+    let ready_path = stage_dir.join("update-ready");
+    let mut ready = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(ready_path)
+        .map_err(|e| e.to_string())?;
+    ready
+        .write_all(&plan.parent_pid.to_le_bytes())
+        .and_then(|_| ready.sync_all())
+        .map_err(|e| e.to_string())?;
     wait_for_parent_exit(plan.parent_pid, &target)?;
     let old_sha256 = hash_file(&target)?;
+    if plan.kind == AssetKind::Msi {
+        return msi::install_and_restart(&plan, &staged, &target, &old_sha256);
+    }
     let replacement = match replace_transaction(&staged, &target, &plan.sha256) {
         Ok(replacement) => replacement,
         Err(error) => {
@@ -192,6 +280,28 @@ fn apply_inner(plan_path: &Path) -> Result<(), String> {
 
 struct Replacement {
     backup: PathBuf,
+}
+
+fn validate_update_version(version: &str) -> Result<(), String> {
+    let next = semver::Version::parse(version).map_err(|_| "Invalid update version")?;
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| "Invalid application version")?;
+    if next <= current || !next.pre.is_empty() || !next.build.is_empty() {
+        return Err("Update helper accepts only newer stable versions".into());
+    }
+    Ok(())
+}
+
+pub fn last_msi_result() -> Option<serde_json::Value> {
+    use std::io::Read;
+    let exe = std::env::current_exe().ok()?;
+    let file = File::open(exe.parent()?.join("update-result.json")).ok()?;
+    let mut bytes = Vec::new();
+    file.take(16385).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 16384 {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Copy beside the target, then rename the old and new files without ever
@@ -428,6 +538,16 @@ fn verify_pe(path: &Path) -> Result<(), String> {
 }
 
 fn verify_staged(path: &Path, expected_sha256: &str) -> Result<(), String> {
+    verify_payload(path, expected_sha256, AssetKind::Executable, "", None)
+}
+
+fn verify_payload(
+    path: &Path,
+    expected_sha256: &str,
+    kind: AssetKind,
+    version: &str,
+    executable_digest: Option<&str>,
+) -> Result<(), String> {
     validate_digest(expected_sha256)?;
     let size = fs::metadata(path)
         .map_err(|e| format!("Cannot inspect staged update: {e}"))?
@@ -438,7 +558,12 @@ fn verify_staged(path: &Path, expected_sha256: &str) -> Result<(), String> {
     if hash_file(path)? != expected_sha256.to_ascii_lowercase() {
         return Err("Staged update SHA-256 does not match its plan".into());
     }
-    verify_pe(path)
+    if kind == AssetKind::Msi {
+        validate_digest(executable_digest.ok_or("MSI update is missing its executable digest")?)?;
+        msi::validate_package(path, version)
+    } else {
+        verify_pe(path)
+    }
 }
 
 fn unique_path(dir: &Path, prefix: &str, suffix: &str) -> PathBuf {
@@ -528,6 +653,14 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn helper_refuses_same_old_or_prerelease_versions() {
+        assert!(validate_update_version(env!("CARGO_PKG_VERSION")).is_err());
+        assert!(validate_update_version("0.0.1").is_err());
+        assert!(validate_update_version("99.0.0-beta.1").is_err());
+        assert!(validate_update_version("99.0.0").is_ok());
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {

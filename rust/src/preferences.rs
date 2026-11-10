@@ -36,6 +36,8 @@ const ID_ACTIVITIES: i32 = 113;
 const ID_SOCIAL: i32 = 114;
 const ID_DESKTOP: i32 = 115;
 const ID_PAUSED: i32 = 116;
+const ID_AUTO_UPDATES: i32 = 117;
+const ID_AUTO_INSTALL: i32 = 118;
 const ID_CHOOSE_COLOR: i32 = 120;
 const ID_COLOR_BUTTON: i32 = 140;
 const ID_RESET_COLOR: i32 = 121;
@@ -71,6 +73,8 @@ pub struct PreferencesState {
     pub social_enabled: bool,
     pub desktop_perches: bool,
     pub paused: bool,
+    pub auto_updates: bool,
+    pub auto_install_updates: bool,
 }
 impl Default for PreferencesState {
     fn default() -> Self {
@@ -90,6 +94,8 @@ impl Default for PreferencesState {
             social_enabled: true,
             desktop_perches: true,
             paused: false,
+            auto_updates: true,
+            auto_install_updates: true,
         }
     }
 }
@@ -108,6 +114,8 @@ pub enum PreferencesEvent {
     ToggleSocial(bool),
     ToggleDesktop(bool),
     TogglePaused(bool),
+    ToggleAutoUpdates(bool),
+    ToggleAutoInstall(bool),
     ChooseColor,
     ResetColor,
     RunAction(u16),
@@ -641,6 +649,8 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         (ID_SOCIAL, "Взаимодействия между питомцами"),
         (ID_DESKTOP, "Прыжки на ярлыки"),
         (ID_PAUSED, "Пауза"),
+        (ID_AUTO_UPDATES, "Проверять обновления автоматически"),
+        (ID_AUTO_INSTALL, "Устанавливать MSI автоматически"),
     ] {
         checkbox(s, text, id, 25, y)?;
         y += 31;
@@ -786,6 +796,8 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
         (ID_SOCIAL, s.data.social_enabled),
         (ID_DESKTOP, s.data.desktop_perches),
         (ID_PAUSED, s.data.paused),
+        (ID_AUTO_UPDATES, s.data.auto_updates),
+        (ID_AUTO_INSTALL, s.data.auto_install_updates),
     ] {
         let control = GetDlgItem(s.hwnd, id);
         SendMessageW(
@@ -1014,7 +1026,9 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
                 || id == ID_ACTIVITIES
                 || id == ID_SOCIAL
                 || id == ID_DESKTOP
-                || id == ID_PAUSED =>
+                || id == ID_PAUSED
+                || id == ID_AUTO_UPDATES
+                || id == ID_AUTO_INSTALL =>
         {
             let value = SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
             match id {
@@ -1041,6 +1055,14 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
                 ID_DESKTOP => {
                     s.data.desktop_perches = value;
                     s.events.push(PreferencesEvent::ToggleDesktop(value));
+                }
+                ID_AUTO_UPDATES => {
+                    s.data.auto_updates = value;
+                    s.events.push(PreferencesEvent::ToggleAutoUpdates(value));
+                }
+                ID_AUTO_INSTALL => {
+                    s.data.auto_install_updates = value;
+                    s.events.push(PreferencesEvent::ToggleAutoInstall(value));
                 }
                 _ => {
                     s.data.paused = value;

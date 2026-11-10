@@ -1,7 +1,7 @@
 //! Bounded HTTPS transport and verified staging for official GitHub releases.
 //! TLS validation and proxy selection remain WinHTTP system defaults.
 
-use super::{ReleaseInfo, StagedUpdate, MAX_EXECUTABLE_SIZE};
+use super::{AssetKind, ReleaseInfo, StagedUpdate, MAX_EXECUTABLE_SIZE};
 use sha2::{Digest, Sha256};
 use std::ffi::c_void;
 use std::fs::{self, OpenOptions};
@@ -16,7 +16,6 @@ use windows_sys::Win32::Networking::WinHttp::*;
 const MAX_JSON_SIZE: u64 = 1024 * 1024;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(180);
 const IO_CHUNK_SIZE: usize = 64 * 1024;
-const WINDOWS_ASSET: &str = "claude-mascot-windows-x64.exe";
 static STAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct InternetHandle(*mut c_void);
@@ -65,7 +64,11 @@ pub(crate) fn download_and_stage(
     validate_download_metadata(repo, release)?;
     let (status, bytes) = get(
         "github.com",
-        &download_path(repo, &release.tag),
+        &download_path(
+            repo,
+            &release.tag,
+            &release.kind.asset_name(&release.version),
+        ),
         "application/octet-stream",
         MAX_EXECUTABLE_SIZE,
     )?;
@@ -83,20 +86,26 @@ pub(crate) fn download_and_stage(
     if !digest.eq_ignore_ascii_case(&release.sha256) {
         return Err("Downloaded executable SHA-256 did not match release metadata".into());
     }
-    if bytes.get(..2) != Some(b"MZ") {
-        return Err("Downloaded asset is not a Windows executable (missing MZ header)".into());
+    let signature_ok = match release.kind {
+        AssetKind::Executable => bytes.starts_with(b"MZ"),
+        AssetKind::Msi => bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
+    };
+    if !signature_ok {
+        return Err("Downloaded asset has an invalid package signature".into());
     }
 
-    let executable = stage_bytes(&bytes)?;
+    let executable = stage_bytes(&bytes, release.kind)?;
     Ok(StagedUpdate {
+        kind: release.kind,
+        executable_sha256: release.executable_sha256.clone(),
         executable,
         sha256: digest,
         version: release.version.clone(),
     })
 }
 
-fn download_path(repo: &str, tag: &str) -> String {
-    format!("/{repo}/releases/download/{tag}/{WINDOWS_ASSET}")
+fn download_path(repo: &str, tag: &str, asset: &str) -> String {
+    format!("/{repo}/releases/download/{tag}/{asset}")
 }
 
 fn validate_download_metadata(repo: &str, release: &ReleaseInfo) -> Result<(), String> {
@@ -121,8 +130,17 @@ fn validate_download_metadata(repo: &str, release: &ReleaseInfo) -> Result<(), S
     if release.sha256.len() != 64 || !release.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Release SHA-256 digest is malformed".into());
     }
+    if release.kind == AssetKind::Msi
+        && release
+            .executable_sha256
+            .as_ref()
+            .is_none_or(|h| h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err("MSI update is missing the companion executable digest".into());
+    }
+    let asset = release.kind.asset_name(&release.version);
     let expected_url = format!(
-        "https://github.com/{repo}/releases/download/{}/{WINDOWS_ASSET}",
+        "https://github.com/{repo}/releases/download/{}/{asset}",
         release.tag
     );
     if release.url != expected_url {
@@ -131,7 +149,7 @@ fn validate_download_metadata(repo: &str, release: &ReleaseInfo) -> Result<(), S
     Ok(())
 }
 
-fn stage_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
+fn stage_bytes(bytes: &[u8], kind: AssetKind) -> Result<PathBuf, String> {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -153,7 +171,11 @@ fn stage_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
             }
         }
     };
-    let executable = stage_dir.join("new.exe");
+    let executable = stage_dir.join(if kind == AssetKind::Msi {
+        "new.msi"
+    } else {
+        "new.exe"
+    });
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -342,7 +364,7 @@ mod tests {
     #[test]
     fn asset_path_matches_github_browser_download_route() {
         assert_eq!(
-            download_path("kerimovernes/claude-mascot", "rust-v0.2.2"),
+            download_path("kerimovernes/claude-mascot", "rust-v0.2.2", "claude-mascot-windows-x64.exe"),
             "/kerimovernes/claude-mascot/releases/download/rust-v0.2.2/claude-mascot-windows-x64.exe"
         );
     }

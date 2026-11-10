@@ -17,7 +17,7 @@ const MSI_UPDATE_MESSAGE: &str =
 #[cfg(windows)]
 enum UpdateChoice {
     DownloadExe,
-    OpenMsiRelease(String),
+    DownloadMsi,
 }
 
 #[cfg(windows)]
@@ -26,6 +26,14 @@ fn update_choice(
     repository: &str,
     release: &claude_mascot::update::ReleaseInfo,
 ) -> Result<UpdateChoice, String> {
+    let kind = if msi_mode {
+        claude_mascot::update::AssetKind::Msi
+    } else {
+        claude_mascot::update::AssetKind::Executable
+    };
+    if release.kind != kind {
+        return Err("Update package does not match installation mode".into());
+    }
     if !msi_mode {
         return Ok(UpdateChoice::DownloadExe);
     }
@@ -51,41 +59,7 @@ fn update_choice(
     if release.tag != format!("v{version}") && release.tag != format!("rust-v{version}") {
         return Err("Release tag does not match its parsed version".into());
     }
-    Ok(UpdateChoice::OpenMsiRelease(format!(
-        "https://github.com/{repository}/releases/tag/{}",
-        release.tag
-    )))
-}
-
-#[cfg(windows)]
-fn open_release_page(url: &str) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let operation = "open".encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let url = std::ffi::OsStr::new(url)
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both NUL-terminated buffers live through this synchronous call.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            url.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result as isize > 32 {
-        Ok(())
-    } else {
-        Err(format!(
-            "Windows could not open the release page (code {})",
-            result as isize
-        ))
-    }
+    Ok(UpdateChoice::DownloadMsi)
 }
 
 #[cfg(any(windows, test))]
@@ -229,22 +203,27 @@ fn main() {
         }
         let _ = std::fs::write(&p, &e);
         #[cfg(windows)]
-        unsafe {
-            use windows_sys::Win32::UI::WindowsAndMessaging::*;
-            let msg = format!("{e}\n\nПодробности: {}", p.display())
-                .encode_utf16()
-                .chain(Some(0))
-                .collect::<Vec<_>>();
-            let title = "Claude Mascot Rust"
-                .encode_utf16()
-                .chain(Some(0))
-                .collect::<Vec<_>>();
-            MessageBoxW(
-                std::ptr::null_mut(),
-                msg.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONERROR,
-            );
+        if !std::env::args_os()
+            .nth(1)
+            .is_some_and(|a| a == "--apply-update")
+        {
+            unsafe {
+                use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                let msg = format!("{e}\n\nПодробности: {}", p.display())
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>();
+                let title = "Claude Mascot Rust"
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>();
+                MessageBoxW(
+                    std::ptr::null_mut(),
+                    msg.as_ptr(),
+                    title.as_ptr(),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
         }
         std::process::exit(1);
     }
@@ -333,7 +312,15 @@ mod msi_marker_tests {
 fn check_updates(o: &Options, msi_mode: bool) -> Result<(), String> {
     use claude_mascot::update::{UpdateEvent, UpdateService};
     let s = Settings::load(&o.config)?;
-    let service = UpdateService::new(s.update_repo.clone(), false);
+    let service = UpdateService::new_for_kind(
+        s.update_repo.clone(),
+        false,
+        if msi_mode {
+            claude_mascot::update::AssetKind::Msi
+        } else {
+            claude_mascot::update::AssetKind::Executable
+        },
+    );
     service.request_check();
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_secs(45) {
@@ -800,6 +787,8 @@ mod native {
             social_enabled: settings.social_enabled,
             desktop_perches: settings.desktop_perches,
             paused: settings.paused,
+            auto_updates: settings.auto_updates,
+            auto_install_updates: settings.auto_install_updates,
         }
     }
     fn host(settings: &Settings, tray: bool) -> Result<NativeHost, String> {
@@ -856,11 +845,19 @@ mod native {
         desktop.apply(&mut world);
         let area = world.area_at(world.cursor);
         let media = claude_mascot::media::MediaMonitor::new();
-        let updates = UpdateService::new(
+        let updates = UpdateService::new_deferred(
             settings.update_repo.clone(),
-            settings.auto_updates && !o.skip_update_check && o.seconds.is_none(),
+            settings.auto_updates && o.seconds.is_none(),
+            if msi_mode {
+                claude_mascot::update::AssetKind::Msi
+            } else {
+                claude_mascot::update::AssetKind::Executable
+            },
+            o.skip_update_check,
         );
         let mut update_in_progress = false;
+        let mut update_was_automatic = false;
+        let mut pending_update = None;
         let mut declined_update: Option<String> = None;
         let mut entries = vec![spawn(
             Pet::new(
@@ -909,6 +906,19 @@ mod native {
         let mut preferences: Option<claude_mascot::preferences::PreferencesWindow> = None;
         let mut contacts = claude_mascot::contacts::ContactCoordinator::new();
         let mut selected_pet_id = 1;
+        if msi_mode && o.skip_update_check {
+            if let Some(result) = claude_mascot::update_apply::last_msi_result() {
+                entries[0].pet.bubble = Some(if result["ok"].as_bool() == Some(true) {
+                    format!(
+                        "Обновился до {}!",
+                        result["version"].as_str().unwrap_or("новой версии")
+                    )
+                } else {
+                    "Обновление не установилось. Подробности в меню настроек".into()
+                });
+                entries[0].pet.bubble_time = 4.0;
+            }
+        }
         let mut open_preferences = o.open_settings;
         let mut next_id = o.pets as u64 + 1;
         let start = Instant::now();
@@ -963,20 +973,17 @@ mod native {
                             && (manual || declined_update.as_deref() != Some(&release.version))
                         {
                             match update_choice(msi_mode, &settings.update_repo, &release) {
-                                Ok(UpdateChoice::OpenMsiRelease(url)) => {
-                                    if update_dialog(
-                                        &format!("Доступна версия {}. Сейчас установлена {}.\n\n{}", release.version, env!("CARGO_PKG_VERSION"), "Для обновления MSI нужен новый установочный пакет. Открыть страницу найденного релиза?"),
-                                        true,
-                                    ) {
-                                        if let Err(error) = open_release_page(&url) {
-                                            update_dialog(&error, false);
-                                        }
-                                    } else {
-                                        declined_update = Some(release.version);
-                                    }
-                                }
-                                Ok(UpdateChoice::DownloadExe) => {
-                                    if update_dialog(&format!("Доступна версия {}. Сейчас установлена {}.\n\nСкачать и перезапустить приложение? Настройки сохранятся.",release.version,env!("CARGO_PKG_VERSION")),true){update_in_progress=true;updates.request_download(release);}else{declined_update=Some(release.version);}
+                                Ok(UpdateChoice::DownloadMsi | UpdateChoice::DownloadExe) => {
+                                    let automatic = msi_mode
+                                        && settings.auto_updates
+                                        && settings.auto_install_updates;
+                                    if automatic || update_dialog(&format!("Доступна версия {}. Сейчас установлена {}.\n\nСкачать, установить и перезапустить пета? Настройки сохранятся.",release.version,env!("CARGO_PKG_VERSION")),true) {
+                                        update_in_progress = true;
+                                        update_was_automatic = automatic;
+                                        updates.request_download_with_mode(release, !automatic);
+                                        entries[0].pet.bubble = Some("Скачиваю обновление…".into());
+                                        entries[0].pet.bubble_time = 3.0;
+                                    } else { declined_update=Some(release.version); }
                                 }
                                 Err(error) => {
                                     update_dialog(&error, false);
@@ -992,34 +999,8 @@ mod native {
                         update_dialog(&status, false);
                     }
                     UpdateEvent::Downloaded(staged) => {
-                        if msi_mode {
-                            update_in_progress = false;
-                            update_dialog(MSI_UPDATE_MESSAGE, false);
-                            continue;
-                        }
                         if update_in_progress {
-                            settings.save(&o.config)?;
-                            let config =
-                                std::fs::canonicalize(&o.config).map_err(|e| e.to_string())?;
-                            let args = vec![
-                                "--skip-update-check".into(),
-                                "--config".into(),
-                                config.to_string_lossy().into_owned(),
-                            ];
-                            match claude_mascot::update_apply::schedule(
-                                &staged,
-                                &std::env::current_exe().map_err(|e| e.to_string())?,
-                                &args,
-                            ) {
-                                Ok(()) => return Ok(()),
-                                Err(e) => {
-                                    update_in_progress = false;
-                                    update_dialog(
-                                        &format!("Не удалось запустить обновление: {e}"),
-                                        false,
-                                    );
-                                }
-                            }
+                            pending_update = Some(staged);
                         }
                     }
                     UpdateEvent::Error { message, manual } => {
@@ -1029,6 +1010,10 @@ mod native {
                                 &format!("Не удалось обновить приложение:\n{message}"),
                                 false,
                             );
+                        } else {
+                            entries[0].pet.bubble =
+                                Some("Обновление не получилось. Попробую позже".into());
+                            entries[0].pet.bubble_time = 3.0;
                         }
                     }
                     _ => {}
@@ -1139,6 +1124,15 @@ mod native {
                         }
                         TogglePaused(value) => {
                             settings.paused = value;
+                            save = true;
+                        }
+                        ToggleAutoUpdates(value) => {
+                            settings.auto_updates = value;
+                            updates.set_enabled(value && o.seconds.is_none());
+                            save = true;
+                        }
+                        ToggleAutoInstall(value) => {
+                            settings.auto_install_updates = value;
                             save = true;
                         }
                         ToggleDesktop(value) => {
@@ -1320,6 +1314,18 @@ mod native {
                         updates.set_enabled(settings.auto_updates && o.seconds.is_none());
                         save = true;
                     }
+                    62 => {
+                        settings.auto_install_updates = !settings.auto_install_updates;
+                        save = true;
+                    }
+                    63 => {
+                        let result = claude_mascot::update_apply::last_msi_result();
+                        let message = result
+                            .as_ref()
+                            .and_then(|v| v["message"].as_str())
+                            .unwrap_or("Встроенный установщик ещё не запускался.");
+                        update_dialog(message, false);
+                    }
                     _ => {}
                 }
             }
@@ -1398,6 +1404,37 @@ mod native {
                     preferences_at = now;
                 }
             }
+            if update_was_automatic && (!settings.auto_updates || !settings.auto_install_updates) {
+                pending_update = None;
+                update_in_progress = false;
+            }
+            if let Some(staged) = pending_update.as_ref().filter(|_| {
+                !entries.iter().any(|e| e.drag.is_some())
+                    && !world.fullscreen_active()
+                    && preferences.as_ref().is_none_or(|panel| !panel.is_visible())
+            }) {
+                settings.save(&o.config)?;
+                let config = std::fs::canonicalize(&o.config).map_err(|e| e.to_string())?;
+                let args = vec![
+                    "--skip-update-check".into(),
+                    "--config".into(),
+                    config.to_string_lossy().into_owned(),
+                    "--pets".into(),
+                    entries.len().to_string(),
+                ];
+                match claude_mascot::update_apply::schedule(
+                    staged,
+                    &std::env::current_exe().map_err(|e| e.to_string())?,
+                    &args,
+                ) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        update_in_progress = false;
+                        pending_update = None;
+                        update_dialog(&format!("Не удалось запустить обновление: {e}"), false);
+                    }
+                }
+            }
             social.enabled = settings.social_enabled;
             behavior.set_settings(behavior_settings(
                 settings.personal_space_min,
@@ -1453,6 +1490,7 @@ mod native {
             for e in &mut entries {
                 e.host.set_menu_state(MenuState {
                     auto_updates: settings.auto_updates,
+                    auto_install_updates: settings.auto_install_updates,
                     selected_action: match e.pet.state {
                         claude_mascot::engine::State::Sit => 2,
                         claude_mascot::engine::State::Sleep => 3,
@@ -1566,6 +1604,8 @@ mod update_choice_tests {
 
     fn release(tag: &str) -> ReleaseInfo {
         ReleaseInfo {
+            kind: claude_mascot::update::AssetKind::Msi,
+            executable_sha256: Some("0".repeat(64)),
             version: "1.2.3".into(),
             tag: tag.into(),
             url: "https://github.com/example/mascot/releases/download/v1.2.3/app.exe".into(),
@@ -1575,13 +1615,15 @@ mod update_choice_tests {
     }
 
     #[test]
-    fn msi_offers_release_page_and_portable_keeps_exe_update_path() {
+    fn msi_downloads_installer_and_portable_keeps_exe_update_path() {
         assert!(matches!(
             update_choice(true, "example/mascot", &release("v1.2.3")),
-            Ok(UpdateChoice::OpenMsiRelease(url)) if url == "https://github.com/example/mascot/releases/tag/v1.2.3"
+            Ok(UpdateChoice::DownloadMsi)
         ));
+        let mut portable = release("v1.2.3");
+        portable.kind = claude_mascot::update::AssetKind::Executable;
         assert!(matches!(
-            update_choice(false, "example/mascot", &release("v1.2.3")),
+            update_choice(false, "example/mascot", &portable),
             Ok(UpdateChoice::DownloadExe)
         ));
     }

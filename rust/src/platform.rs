@@ -48,6 +48,7 @@ pub struct MenuState {
     pub hide_fullscreen: bool,
     pub autostart: bool,
     pub auto_updates: bool,
+    pub auto_install_updates: bool,
     pub chase: bool,
     pub scale: f64,
     pub target_fps: u32,
@@ -70,6 +71,7 @@ impl Default for MenuState {
             hide_fullscreen: false,
             autostart: false,
             auto_updates: true,
+            auto_install_updates: true,
             chase: false,
             scale: 1.0,
             target_fps: crate::timing::DEFAULT_FPS,
@@ -934,10 +936,13 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         || AppendMenuW(settings.raw(), MF_SEPARATOR, 0, null()) == 0
         || !append_item(settings.raw(), 60, "Проверить обновления", 0)
         || !append_item(settings.raw(), 61, "Автопроверка обновлений", 0)
+        || !append_item(settings.raw(), 62, "Устанавливать MSI автоматически", 0)
+        || !append_item(settings.raw(), 63, "Результат последнего обновления", 0)
     {
         return None;
     }
     check_menu(settings.raw(), 61, s.auto_updates);
+    check_menu(settings.raw(), 62, s.auto_install_updates);
     if !append_submenu(root.raw(), settings, "Настройки")
         || AppendMenuW(root.raw(), MF_SEPARATOR, 0, null()) == 0
         || !append_item(root.raw(), 31, "Выход", 0)
@@ -1455,9 +1460,9 @@ mod tests {
             .expect("Windows should build the native menu tree");
 
             for id in [
-                1, 2, 3, 4, 5, 20, 30, 31, 40, 41, 42, 43, 44, 50, 51, 52, 60, 61, 70, 71, 72, 73,
-                45, 46, 47, 48, 74, 75, 76, 80, 81, 82, 83, 84, 90, 91, 92, 93, 94, 95, 96, 97, 98,
-                99,
+                1, 2, 3, 4, 5, 20, 30, 31, 40, 41, 42, 43, 44, 50, 51, 52, 60, 61, 62, 63, 70, 71,
+                72, 73, 45, 46, 47, 48, 74, 75, 76, 80, 81, 82, 83, 84, 90, 91, 92, 93, 94, 95, 96,
+                97, 98, 99,
             ] {
                 let _ = command_state(menu.raw(), id);
             }

@@ -32,6 +32,9 @@ pub struct Settings {
     pub activity_intensity: u8,
     pub paused: bool,
     pub auto_updates: bool,
+    /// Existing installations opt in explicitly; new installs enable this.
+    #[serde(default)]
+    pub auto_install_updates: bool,
     pub update_repo: String,
 }
 impl Default for Settings {
@@ -54,6 +57,7 @@ impl Default for Settings {
             activity_intensity: 50,
             paused: false,
             auto_updates: true,
+            auto_install_updates: true,
             update_repo: DEFAULT_UPDATE_REPOSITORY.into(),
         }
     }
@@ -328,6 +332,21 @@ fn matches_own_autostart_value(value: &str, executable: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_install_is_default_for_new_installs_but_existing_users_opt_in() {
+        assert!(super::Settings::default().auto_install_updates);
+        let legacy: super::Settings = serde_json::from_str(r#"{"auto_updates":true}"#).unwrap();
+        assert!(!legacy.auto_install_updates);
+        let enabled: super::Settings =
+            serde_json::from_str(r#"{"auto_updates":true,"auto_install_updates":true}"#).unwrap();
+        assert!(enabled.auto_install_updates);
+        let saved = serde_json::to_string(&enabled).unwrap();
+        assert!(
+            serde_json::from_str::<super::Settings>(&saved)
+                .unwrap()
+                .auto_install_updates
+        );
+    }
     use super::*;
     #[test]
     fn backwards_compatible_defaults() {

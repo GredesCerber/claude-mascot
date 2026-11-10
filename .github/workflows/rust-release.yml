@@ -74,6 +74,9 @@ jobs:
           $msi = Get-ChildItem "$env:RUNNER_TEMP/mascot-release" -Filter *.msi | Select-Object -First 1
           wix msi validate $msi.FullName
           if ($LASTEXITCODE) { throw "MSI validation failed" }
+          $env:MASCOT_TEST_MSI_PATH = $msi.FullName
+          cargo test --manifest-path rust/Cargo.toml --locked --lib validates_real_release_package -- --ignored
+          if ($LASTEXITCODE) { throw 'Updater rejected the built MSI package.' }
       - name: Package executable and SHA-256 manifest
         shell: pwsh
         run: |
