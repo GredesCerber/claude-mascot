@@ -87,7 +87,7 @@ fn newly_active_file_manager_gets_a_brief_notice_and_attention_point() {
     step(&mut pet, &w, 15); // establish initial window baseline
     w.windows.push(window(22, true, true, 600.0));
     step(&mut pet, &w, 8);
-    assert_eq!(pet.state, State::Wave);
+    assert_eq!(pet.state, State::LookAround);
     assert!(pet.attention_target.is_some());
     step(&mut pet, &w, 20);
     assert!(pet.gaze.x > 0.0 && pet.gaze.y < 0.0);
@@ -102,7 +102,7 @@ fn active_file_manager_navigation_title_change_is_not_missed() {
     assert_ne!(pet.state, State::Wave);
     w.windows[0].title = "New folder".to_owned();
     step(&mut pet, &w, 10);
-    assert_eq!(pet.state, State::Wave);
+    assert_eq!(pet.state, State::LookAround);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn startup_windows_and_reordering_do_not_trigger_reactions() {
     assert_ne!(pet.state, State::Wave);
     w.windows[1].active = true;
     step(&mut pet, &w, 10);
-    assert_eq!(pet.state, State::Wave);
+    assert_eq!(pet.state, State::LookAround);
 }
 
 #[test]

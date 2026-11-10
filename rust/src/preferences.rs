@@ -13,7 +13,9 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, SetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetActiveWindow, GetFocus, SetFocus,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const CLASS: &[u16] = &[
@@ -45,8 +47,11 @@ const ID_COLOR_BUTTON: i32 = 140;
 const ID_RESET_COLOR: i32 = 121;
 const ID_ACTIVITY: i32 = 130;
 const ID_RUN_ACTIVITY: i32 = 131;
+const ID_ACTIVITY_SEARCH: i32 = 132;
+const ID_PAUSE_ALL: i32 = 3100;
 const ID_QUICK_BASE: i32 = 140;
 const DARK_RGB: u32 = 0x252220;
+const PANEL_RGB: u32 = 0x302B27;
 const CREAM_RGB: u32 = 0xF3EDE2;
 const ACCENT_RGB: u32 = 0xD97757;
 static PREFERENCES_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -136,6 +141,12 @@ struct WindowState {
     page: usize,
     build_page: usize,
     page_heights: [i32; 7],
+    page_scroll: [i32; 7],
+    scope_label: HWND,
+    activity_items: Vec<usize>,
+    activity_status: HWND,
+    spacing_status: HWND,
+    friends_status: HWND,
     hwnd: HWND,
     children: Vec<Child>,
     events: Vec<PreferencesEvent>,
@@ -143,6 +154,7 @@ struct WindowState {
     font: HFONT,
     bold_font: HFONT,
     dark_brush: HBRUSH,
+    panel_brush: HBRUSH,
     accent_brush: HBRUSH,
     section_headers: Vec<HWND>,
     color_brush: HBRUSH,
@@ -171,6 +183,12 @@ impl WindowState {
             page: 0,
             build_page: FIXED,
             page_heights: [0; 7],
+            page_scroll: [0; 7],
+            scope_label: null_mut(),
+            activity_items: Vec::new(),
+            activity_status: null_mut(),
+            spacing_status: null_mut(),
+            friends_status: null_mut(),
             hwnd: null_mut(),
             children: Vec::new(),
             events: Vec::new(),
@@ -178,6 +196,7 @@ impl WindowState {
             font: null_mut(),
             bold_font: null_mut(),
             dark_brush: null_mut(),
+            panel_brush: null_mut(),
             accent_brush: null_mut(),
             section_headers: Vec::new(),
             color_brush: null_mut(),
@@ -217,7 +236,7 @@ impl PreferencesWindow {
                 WS_EX_APPWINDOW | WS_EX_CONTROLPARENT,
                 CLASS.as_ptr(),
                 TITLE.as_ptr(),
-                WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+                WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 900,
@@ -236,10 +255,12 @@ impl PreferencesWindow {
         state.font = unsafe { make_font(state.dpi, FW_NORMAL) };
         state.bold_font = unsafe { make_font(state.dpi, FW_BOLD as i32) };
         state.dark_brush = unsafe { CreateSolidBrush(colorref(DARK_RGB)) };
+        state.panel_brush = unsafe { CreateSolidBrush(colorref(PANEL_RGB)) };
         state.accent_brush = unsafe { CreateSolidBrush(colorref(ACCENT_RGB)) };
         if state.font.is_null()
             || state.bold_font.is_null()
             || state.dark_brush.is_null()
+            || state.panel_brush.is_null()
             || state.accent_brush.is_null()
         {
             unsafe {
@@ -330,7 +351,7 @@ impl PreferencesWindow {
             let avail_h = (area.bottom - area.top - scale(48, self.state.dpi))
                 .max(scale(100, self.state.dpi));
             let width = scale(850, self.state.dpi).min(avail_w);
-            let height = scale(800, self.state.dpi).min(avail_h);
+            let height = scale(640, self.state.dpi).min(avail_h);
             SetWindowPos(
                 self.hwnd,
                 null_mut(),
@@ -436,6 +457,7 @@ unsafe fn release_gdi_resources(s: &WindowState) {
         s.font as HGDIOBJ,
         s.bold_font as HGDIOBJ,
         s.dark_brush as HGDIOBJ,
+        s.panel_brush as HGDIOBJ,
         s.accent_brush as HGDIOBJ,
         s.color_brush as HGDIOBJ,
     ] {
@@ -477,7 +499,7 @@ unsafe fn add_child(
         class.as_ptr(),
         text.as_ptr(),
         WS_CHILD | WS_VISIBLE | style,
-        scale(x + if s.build_page == FIXED { 0 } else { 180 }, s.dpi),
+        scale(x + if s.build_page == FIXED { 0 } else { 200 }, s.dpi),
         scale(y, s.dpi),
         scale(w, s.dpi),
         scale(h, s.dpi),
@@ -497,7 +519,7 @@ unsafe fn add_child(
         s.children.push(Child {
             page: s.build_page,
             hwnd,
-            x: scale(x + if s.build_page == FIXED { 0 } else { 180 }, s.dpi),
+            x: scale(x + if s.build_page == FIXED { 0 } else { 200 }, s.dpi),
             y: scale(y, s.dpi),
             w: scale(w, s.dpi),
             h: scale(h, s.dpi),
@@ -534,7 +556,7 @@ unsafe fn button(
         "BUTTON",
         text,
         id,
-        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        BS_OWNERDRAW as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         0,
         x,
         y,
@@ -553,12 +575,12 @@ unsafe fn checkbox(s: &mut WindowState, text: &str, id: i32, x: i32, y: i32) -> 
         "BUTTON",
         text,
         id,
-        BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+        BS_AUTOCHECKBOX as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         0,
         x,
         y,
-        260,
-        25,
+        560,
+        28,
     )
     .is_null()
     {
@@ -596,14 +618,9 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     s.build_page = FIXED;
     heading(s, "Claude Mascot", 20, 18, 200)?;
     label(s, "Питомец", 210, 22, 100)?;
-    s.pet_combo = combo(s, ID_PET, 320, 18, 400)?;
-    label(
-        s,
-        "Цвет — выбранному пету; остальные настройки — общие",
-        200,
-        62,
-        600,
-    )?;
+    s.pet_combo = combo(s, ID_PET, 320, 18, 300)?;
+    button(s, "Пауза всем", ID_PAUSE_ALL, 650, 18, 150)?;
+    s.scope_label = add_child(s, "STATIC", "", 0, 0, 0, 200, 62, 600, 22);
     for (index, title) in [
         "Внешний вид",
         "Поведение",
@@ -627,7 +644,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     s.build_page = 0;
     let mut y = 112;
-    heading(s, "ВНЕШНИЙ ВИД", 20, y, 400)?;
+    heading(s, "Внешний вид", 20, y, 400)?;
     y += 38;
     label(s, "Цвет тела", 20, y, 150)?;
     s.color_swatch = add_child(
@@ -655,7 +672,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     s.build_page = 1;
     y = 150;
-    heading(s, "ПОВЕДЕНИЕ", 20, 112, 400)?;
+    heading(s, "Поведение", 20, 112, 400)?;
     label(s, "Интенсивность", 20, y, 120)?;
     s.intensity_value = add_child(s, "STATIC", "50%", 0, 0, 0, 140, y, 40, 22);
     if s.intensity_value.is_null() {
@@ -680,15 +697,29 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     SendMessageW(s.intensity, TBM_SETRANGEMAX, 1, 100);
     s.build_page = 4;
     y = 150;
-    heading(s, "ПРОИЗВОДИТЕЛЬНОСТЬ", 20, 112, 400)?;
+    heading(s, "Производительность", 20, 112, 400)?;
     label(s, "Частота кадров", 20, y, 150)?;
     s.fps_combo = combo(s, ID_FPS, 190, y, 400)?;
     for item in ["30 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS"] {
         combo_item(s.fps_combo, item);
     }
+    label(
+        s,
+        "FPS меняет плавность движения, а не скорость питомцев.",
+        20,
+        200,
+        590,
+    )?;
+    label(
+        s,
+        "60 — обычный режим; 120–240 — для быстрых мониторов.",
+        20,
+        232,
+        590,
+    )?;
     s.build_page = 3;
     y = 112;
-    heading(s, "ЛИЧНОЕ ПРОСТРАНСТВО", 20, y, 400)?;
+    heading(s, "Расстояние между питомцами", 20, y, 400)?;
     y += 30;
     label(s, "Минимальный свободный зазор (px)", 20, y, 300)?;
     s.min_edit = add_child(
@@ -723,8 +754,20 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     if s.max_edit.is_null() {
         return Err(last_error("CreateWindowExW max edit"));
     }
+    s.spacing_status = add_child(
+        s,
+        "STATIC",
+        "8–256 px; максимум до 512 px, на 8 px больше минимума.",
+        0,
+        0,
+        0,
+        20,
+        216,
+        590,
+        22,
+    );
     s.build_page = 2;
-    heading(s, "ОПОРЫ", 20, 112, 400)?;
+    heading(s, "Окна и ярлыки", 20, 112, 400)?;
     label(
         s,
         "Пет исследует достижимые окна и видимые ярлыки.",
@@ -739,8 +782,16 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         182,
         590,
     )?;
+    s.build_page = 1;
+    label(
+        s,
+        "0 — спокойно; 100 — больше самостоятельных занятий",
+        190,
+        188,
+        400,
+    )?;
     s.build_page = 6;
-    heading(s, "ОБНОВЛЕНИЯ", 20, 112, 400)?;
+    heading(s, "Обновления", 20, 112, 400)?;
     label(
         s,
         &format!("Установлена версия {}", env!("CARGO_PKG_VERSION")),
@@ -750,6 +801,20 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     )?;
     button(s, "Проверить обновления", ID_QUICK_BASE + 60, 20, 270, 260)?;
     button(s, "Последний результат", ID_QUICK_BASE + 63, 300, 270, 260)?;
+    label(
+        s,
+        "Обычно установка начинается после «Обновить сейчас».",
+        20,
+        322,
+        590,
+    )?;
+    label(
+        s,
+        "Включите автоустановку, только если подтверждение не нужно.",
+        20,
+        354,
+        590,
+    )?;
     for (id, text) in [
         (ID_MOOD, "Показывать настроение"),
         (ID_BUBBLES, "Показывать реплики"),
@@ -759,7 +824,10 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         (ID_DESKTOP, "Прыжки на ярлыки"),
         (ID_PAUSED, "Пауза"),
         (ID_AUTO_UPDATES, "Проверять обновления автоматически"),
-        (ID_AUTO_INSTALL, "Устанавливать MSI автоматически"),
+        (
+            ID_AUTO_INSTALL,
+            "Устанавливать обновления без подтверждения",
+        ),
     ] {
         let (page, top) = match id {
             ID_MOOD => (0, 270),
@@ -777,20 +845,38 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     s.build_page = 5;
     y = 112;
-    heading(s, "ЗАПУСТИТЬ ЗАНЯТИЕ", 20, y, 400)?;
-    y += 30;
-    s.activity_combo = combo(s, ID_ACTIVITY, 20, y, 570)?;
-    for spec in CATALOG {
-        combo_item(
-            s.activity_combo,
-            &format!("{} · {}", spec.group.label_ru(), spec.title_ru),
-        );
+    heading(s, "Выбрать занятие", 20, y, 400)?;
+    label(s, "Поиск по названию или группе", 20, 150, 570)?;
+    let search = add_child(
+        s,
+        "EDIT",
+        "",
+        ID_ACTIVITY_SEARCH,
+        WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        WS_EX_CLIENTEDGE,
+        20,
+        180,
+        570,
+        30,
+    );
+    if search.is_null() {
+        return Err(last_error("CreateWindowExW activity search"));
     }
-    SendMessageW(s.activity_combo, CB_SETCURSEL, 0, 0);
-    button(s, "Запустить", ID_RUN_ACTIVITY, 20, y + 40, 140)?;
+    s.activity_combo = combo(s, ID_ACTIVITY, 20, 228, 570)?;
+    button(s, "Запустить", ID_RUN_ACTIVITY, 20, 274, 160)?;
+    s.activity_status = add_child(s, "STATIC", "", 0, 0, 0, 200, 280, 390, 22);
+    filter_activities(s, "");
+    label(
+        s,
+        "Занятие выполняет выбранный в шапке питомец.",
+        20,
+        330,
+        590,
+    )?;
     s.build_page = 3;
-    y = 310;
-    heading(s, "БЫСТРОЕ ДЕЙСТВИЕ", 20, y, 400)?;
+    s.friends_status = add_child(s, "STATIC", "", 0, 0, 0, 20, 285, 590, 22);
+    y = 324;
+    heading(s, "Совместные игры", 20, y, 400)?;
     y += 30;
     for (idx, (text, action)) in [
         ("Приветствие", 91u16),
@@ -819,14 +905,14 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     s.build_page = 1;
     y = 350;
-    heading(s, "КОМАНДЫ", 20, y, 300)?;
+    heading(s, "Действия питомца", 20, y, 300)?;
     y += 30;
     for (idx, (text, action)) in [
         ("Погулять", 1u16),
         ("Сесть", 2),
         ("Спать", 3),
         ("Залезть", 4),
-        ("Погоня", 5),
+        ("Бежать за мышкой", 5),
         ("Прыжок", 70),
         ("Погладить", 71),
         ("Танец", 72),
@@ -856,6 +942,48 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
 }
 fn row_count(n: usize, columns: usize) -> i32 {
     n.div_ceil(columns) as i32
+}
+
+fn activity_matches(index: usize, query: &str) -> bool {
+    let spec = &CATALOG[index];
+    let text = format!("{} {}", spec.group.label_ru(), spec.title_ru).to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|term| text.contains(term))
+}
+unsafe fn filter_activities(s: &mut WindowState, query: &str) {
+    let previous = s
+        .activity_items
+        .get(SendMessageW(s.activity_combo, CB_GETCURSEL, 0, 0) as usize)
+        .copied();
+    s.activity_items = (0..CATALOG.len())
+        .filter(|&i| activity_matches(i, query))
+        .collect();
+    SendMessageW(s.activity_combo, CB_RESETCONTENT, 0, 0);
+    for &index in &s.activity_items {
+        let spec = &CATALOG[index];
+        combo_item(
+            s.activity_combo,
+            &format!("{} · {}", spec.group.label_ru(), spec.title_ru),
+        );
+    }
+    let selected = previous
+        .and_then(|id| s.activity_items.iter().position(|&i| i == id))
+        .unwrap_or(0);
+    SendMessageW(s.activity_combo, CB_SETCURSEL, selected, 0);
+    EnableWindow(
+        GetDlgItem(s.hwnd, ID_RUN_ACTIVITY),
+        i32::from(!s.activity_items.is_empty()),
+    );
+    set_text(
+        s.activity_status,
+        &if s.activity_items.is_empty() {
+            "Ничего не найдено. Измените запрос.".to_owned()
+        } else {
+            format!("Найдено: {} из {}", s.activity_items.len(), CATALOG.len())
+        },
+    );
 }
 
 unsafe fn sync_controls(s: &mut WindowState, force: bool) {
@@ -930,10 +1058,10 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
             0,
         );
     }
-    if force || focused != s.min_edit {
+    if force || (focused != s.min_edit && focused != s.max_edit) {
         set_text(s.min_edit, &compact_number(s.data.min_gap));
     }
-    if force || focused != s.max_edit {
+    if force || (focused != s.min_edit && focused != s.max_edit) {
         set_text(s.max_edit, &compact_number(s.data.max_gap));
     }
     let color = s.data.body_color & 0x00ff_ffff;
@@ -943,6 +1071,35 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
         }
         s.color_brush = CreateSolidBrush(colorref(color));
         s.color_value = color;
+    }
+    let has_friends = s.data.pet_ids.len() >= 2;
+    for action in 91..=99 {
+        let button = GetDlgItem(s.hwnd, ID_QUICK_BASE + action);
+        let was_enabled = GetWindowLongW(button, GWL_STYLE) as u32 & WS_DISABLED == 0;
+        if was_enabled != has_friends {
+            EnableWindow(button, i32::from(has_friends));
+            InvalidateRect(button, null(), 1);
+        }
+    }
+    set_text(
+        s.friends_status,
+        if has_friends {
+            "Выберите игру: питомцы подойдут к другу, когда будут свободны."
+        } else {
+            "Для совместных игр добавьте второго питомца через меню пета."
+        },
+    );
+    let pause = GetDlgItem(s.hwnd, ID_PAUSE_ALL);
+    let title = if s.data.paused {
+        "Продолжить"
+    } else {
+        "Пауза всем"
+    };
+    let mut current = [0u16; 64];
+    let n = GetWindowTextW(pause, current.as_mut_ptr(), 64);
+    if String::from_utf16_lossy(&current[..n.max(0) as usize]) != title {
+        set_text(pause, title);
+        InvalidateRect(pause, null(), 1);
     }
     InvalidateRect(s.color_swatch, null(), 1);
 }
@@ -981,6 +1138,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             ShowWindow(hwnd, SW_HIDE);
             0
         }
+        WM_GETMINMAXINFO => {
+            let info = &mut *(lparam as *mut MINMAXINFO);
+            let mut monitor: MONITORINFO = std::mem::zeroed();
+            monitor.cbSize = size_of::<MONITORINFO>() as u32;
+            let handle = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if GetMonitorInfoW(handle, &mut monitor) != 0 {
+                info.ptMinTrackSize.x =
+                    scale(850, s.dpi).min(monitor.rcWork.right - monitor.rcWork.left);
+                info.ptMinTrackSize.y =
+                    scale(420, s.dpi).min(monitor.rcWork.bottom - monitor.rcWork.top);
+            }
+            0
+        }
         WM_SIZE => {
             s.client_height = (lparam as u32 >> 16) as i32;
             update_scroll(s);
@@ -995,6 +1165,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             };
             GetClientRect(hwnd, &mut rect);
             FillRect(wparam as HDC, &rect, s.dark_brush);
+            let panel = RECT {
+                left: scale(202, s.dpi),
+                top: scale(102, s.dpi),
+                right: rect.right - scale(12, s.dpi),
+                bottom: rect.bottom - scale(18, s.dpi),
+            };
+            FillRect(wparam as HDC, &panel, s.panel_brush);
             1
         }
         WM_PAINT => {
@@ -1071,8 +1248,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         CREAM_RGB
                     }),
                 );
-                SetBkColor(wparam as HDC, colorref(DARK_RGB));
-                s.dark_brush as LRESULT
+                let content = s
+                    .children
+                    .iter()
+                    .any(|c| c.hwnd == child && c.page != FIXED);
+                SetBkColor(
+                    wparam as HDC,
+                    colorref(if content { PANEL_RGB } else { DARK_RGB }),
+                );
+                if content {
+                    s.panel_brush as LRESULT
+                } else {
+                    s.dark_brush as LRESULT
+                }
             }
         }
         WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN | WM_CTLCOLORDLG
@@ -1102,7 +1290,38 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
     let id = (wparam & 0xffff) as i32;
     let code = ((wparam >> 16) & 0xffff) as u32;
     let control = lparam as HWND;
+    if matches!(code, EN_SETFOCUS | CBN_SETFOCUS | BN_SETFOCUS) && !control.is_null() {
+        if let Some(child) = s
+            .children
+            .iter()
+            .find(|c| c.hwnd == control && c.page == s.page)
+            .copied()
+        {
+            let mut bounds: RECT = std::mem::zeroed();
+            GetWindowRect(control, &mut bounds);
+            let top = child.y - s.scroll;
+            let bottom = top + bounds.bottom - bounds.top;
+            let pos = if top < scale(110, s.dpi) {
+                child.y - scale(110, s.dpi)
+            } else if bottom > s.client_height - scale(20, s.dpi) {
+                s.scroll + bottom - s.client_height + scale(20, s.dpi)
+            } else {
+                s.scroll
+            };
+            scroll_to(s, pos.clamp(0, (s.content_height - s.client_height).max(0)));
+        }
+    }
     match (id, code) {
+        (ID_PAUSE_ALL, BN_CLICKED) => {
+            s.data.paused = !s.data.paused;
+            s.events.push(PreferencesEvent::TogglePaused(s.data.paused));
+            sync_controls(s, false);
+        }
+        (ID_ACTIVITY_SEARCH, EN_CHANGE) => {
+            let mut query = [0u16; 256];
+            let n = GetWindowTextW(control, query.as_mut_ptr(), 256);
+            filter_activities(s, &String::from_utf16_lossy(&query[..n.max(0) as usize]));
+        }
         (id, BN_CLICKED) if (ID_NAV_BASE..ID_NAV_BASE + 7).contains(&id) => {
             select_page(s, (id - ID_NAV_BASE) as usize);
         }
@@ -1137,17 +1356,30 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         (ID_RESET_COLOR, BN_CLICKED) => s.events.push(PreferencesEvent::ResetColor),
         (ID_RUN_ACTIVITY, BN_CLICKED) => {
             let index = SendMessageW(s.activity_combo, CB_GETCURSEL, 0, 0);
-            if (0..CATALOG.len() as isize).contains(&index) {
+            if let Some(&catalog_index) = s.activity_items.get(index as usize) {
                 s.events
-                    .push(PreferencesEvent::RunAction(100 + index as u16));
+                    .push(PreferencesEvent::RunAction(100 + catalog_index as u16));
             }
         }
         (ID_MIN_GAP, EN_KILLFOCUS) | (ID_MAX_GAP, EN_KILLFOCUS) => {
+            // Moving between the two fields is still one edit of the range.
+            let focused = GetFocus();
+            if focused == s.min_edit || focused == s.max_edit {
+                return;
+            }
             let min = parse_edit(s.min_edit, s.data.min_gap);
             let max = parse_edit(s.max_edit, s.data.max_gap);
-            s.data.min_gap = min;
-            s.data.max_gap = max;
-            s.events.push(PreferencesEvent::SetSpacing(min, max));
+            if crate::settings::valid_personal_space(min, max) {
+                s.data.min_gap = min;
+                s.data.max_gap = max;
+                set_text(s.spacing_status, "Расстояние обновлено для всех питомцев.");
+                s.events.push(PreferencesEvent::SetSpacing(min, max));
+            } else {
+                set_text(
+                    s.spacing_status,
+                    "Проверьте диапазон: минимум 8–256, максимум от min + 8 до 512.",
+                );
+            }
         }
         (_, BN_CLICKED)
             if id == ID_MOOD
@@ -1200,13 +1432,13 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
                 }
             }
         }
-        _ if (ID_QUICK_BASE + 1..=ID_QUICK_BASE + 5).contains(&id) => s
+        _ if code == BN_CLICKED && (ID_QUICK_BASE + 1..=ID_QUICK_BASE + 5).contains(&id) => s
             .events
             .push(PreferencesEvent::RunAction((id - ID_QUICK_BASE) as u16)),
-        _ if (ID_QUICK_BASE + 70..=ID_QUICK_BASE + 76).contains(&id) => s
+        _ if code == BN_CLICKED && (ID_QUICK_BASE + 70..=ID_QUICK_BASE + 76).contains(&id) => s
             .events
             .push(PreferencesEvent::RunAction((id - ID_QUICK_BASE) as u16)),
-        _ if (ID_QUICK_BASE + 90..=ID_QUICK_BASE + 99).contains(&id) => s
+        _ if code == BN_CLICKED && (ID_QUICK_BASE + 90..=ID_QUICK_BASE + 99).contains(&id) => s
             .events
             .push(PreferencesEvent::RunAction((id - ID_QUICK_BASE) as u16)),
         _ => {}
@@ -1218,7 +1450,7 @@ unsafe fn draw_button(s: &WindowState, item: &DRAWITEMSTRUCT) {
     let fill = if selected {
         s.accent_brush
     } else {
-        s.dark_brush
+        s.panel_brush
     };
     FillRect(item.hDC, &item.rcItem, fill);
     FrameRect(item.hDC, &item.rcItem, s.accent_brush);
@@ -1231,7 +1463,14 @@ unsafe fn draw_button(s: &WindowState, item: &DRAWITEMSTRUCT) {
         FrameRect(item.hDC, &focus, s.accent_brush);
     }
     SetBkMode(item.hDC, TRANSPARENT as i32);
-    SetTextColor(item.hDC, colorref(CREAM_RGB));
+    SetTextColor(
+        item.hDC,
+        colorref(if item.itemState & ODS_DISABLED != 0 {
+            0xA59D94
+        } else {
+            CREAM_RGB
+        }),
+    );
     let mut text = [0u16; 128];
     let len = GetWindowTextW(item.hwndItem, text.as_mut_ptr(), text.len() as i32);
     let mut rect = item.rcItem;
@@ -1334,23 +1573,30 @@ unsafe fn scroll_to(s: &mut WindowState, pos: i32) {
     }
     s.scroll = pos;
     for child in &s.children {
-        ShowWindow(
-            child.hwnd,
-            if child.page == FIXED || (child.page == s.page && child.y - pos >= scale(100, s.dpi)) {
-                SW_SHOWNA
-            } else {
-                SW_HIDE
-            },
-        );
+        let top = child.y - if child.page == FIXED { 0 } else { pos };
         SetWindowPos(
             child.hwnd,
             null_mut(),
             child.x,
-            child.y - if child.page == FIXED { 0 } else { pos },
+            top,
             child.w,
             child.h,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
+        let mut bounds: RECT = std::mem::zeroed();
+        GetWindowRect(child.hwnd, &mut bounds);
+        let height = bounds.bottom - bounds.top;
+        let clip = (scale(100, s.dpi) - top).max(0);
+        let visible = child.page == FIXED || (child.page == s.page && clip < height);
+        if child.page != FIXED && visible && clip > 0 {
+            let region = CreateRectRgn(0, clip, child.w, height);
+            if SetWindowRgn(child.hwnd, region, 1) == 0 {
+                DeleteObject(region as HGDIOBJ);
+            }
+        } else {
+            SetWindowRgn(child.hwnd, null_mut(), 1);
+        }
+        ShowWindow(child.hwnd, if visible { SW_SHOWNA } else { SW_HIDE });
     }
     let info = SCROLLINFO {
         cbSize: size_of::<SCROLLINFO>() as u32,
@@ -1370,9 +1616,22 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
     }
     // Commit a spacing edit via its existing focus-loss handler before hiding it.
     SetFocus(GetDlgItem(s.hwnd, ID_NAV_BASE + page as i32));
+    s.page_scroll[s.page] = s.scroll.max(0);
     s.page = page;
+    let pos = s.page_scroll[page].min((s.page_heights[page] - s.client_height).max(0));
     s.scroll = -1;
-    scroll_to(s, 0);
+    scroll_to(s, pos);
+    EnableWindow(s.pet_combo, i32::from(matches!(page, 0 | 1 | 3 | 5)));
+    set_text(
+        s.scope_label,
+        match page {
+            0 => "Цвет — выбранному питомцу. Масштаб и видимость — всем.",
+            1 => "Настройки — всем. Команды — выбранному питомцу.",
+            3 => "Расстояние — всем. Игры — с участием выбранного питомца.",
+            5 => "Занятия для выбранного питомца",
+            _ => "Общие настройки для всех питомцев",
+        },
+    );
     update_scroll(s);
     InvalidateRect(s.hwnd, null(), 1);
 }
@@ -1380,6 +1639,137 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tab_focus_scrolls_commands_into_view_without_running_them() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            SetWindowPos(
+                panel.hwnd,
+                null_mut(),
+                0,
+                0,
+                scale(850, panel.state.dpi),
+                scale(420, panel.state.dpi),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            select_page(&mut panel.state, 1);
+            let button = GetDlgItem(panel.hwnd, ID_QUICK_BASE + 76);
+            handle_command(
+                &mut panel.state,
+                (ID_QUICK_BASE + 76) as usize | ((BN_SETFOCUS as usize) << 16),
+                button as isize,
+            );
+            assert!(panel.state.scroll > 0);
+            assert!(panel.state.events.is_empty());
+            handle_command(
+                &mut panel.state,
+                (ID_QUICK_BASE + 76) as usize,
+                button as isize,
+            );
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::RunAction(76))
+            );
+        }
+    }
+    #[test]
+    fn filtered_activity_runs_catalog_identity_and_empty_search_is_safe() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            let target = CATALOG.len() - 1;
+            filter_activities(&mut panel.state, CATALOG[target].title_ru);
+            let row = panel
+                .state
+                .activity_items
+                .iter()
+                .position(|&i| i == target)
+                .unwrap();
+            SendMessageW(panel.state.activity_combo, CB_SETCURSEL, row, 0);
+            handle_command(&mut panel.state, ID_RUN_ACTIVITY as usize, 0);
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::RunAction(100 + target as u16))
+            );
+            filter_activities(&mut panel.state, "zzzz-no-such-activity");
+            assert!(panel.state.activity_items.is_empty());
+            assert_ne!(
+                GetWindowLongW(GetDlgItem(panel.hwnd, ID_RUN_ACTIVITY), GWL_STYLE) as u32
+                    & WS_DISABLED,
+                0
+            );
+            handle_command(&mut panel.state, ID_RUN_ACTIVITY as usize, 0);
+            assert!(panel.state.events.is_empty());
+            filter_activities(&mut panel.state, "");
+            assert_eq!(panel.state.activity_items.len(), CATALOG.len());
+        }
+    }
+    #[test]
+    fn page_scroll_scope_and_global_pause_work_across_sections() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            SetWindowPos(
+                panel.hwnd,
+                null_mut(),
+                0,
+                0,
+                scale(850, panel.state.dpi),
+                scale(420, panel.state.dpi),
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            select_page(&mut panel.state, 1);
+            scroll_to(&mut panel.state, 60);
+            select_page(&mut panel.state, 4);
+            assert_ne!(
+                GetWindowLongW(panel.state.pet_combo, GWL_STYLE) as u32 & WS_DISABLED,
+                0
+            );
+            select_page(&mut panel.state, 1);
+            assert_eq!(panel.state.scroll, 60);
+            assert_eq!(
+                GetWindowLongW(panel.state.pet_combo, GWL_STYLE) as u32 & WS_DISABLED,
+                0
+            );
+            handle_command(&mut panel.state, ID_PAUSE_ALL as usize, 0);
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::TogglePaused(true))
+            );
+            assert_eq!(
+                SendMessageW(GetDlgItem(panel.hwnd, ID_PAUSED), BM_GETCHECK, 0, 0),
+                BST_CHECKED as isize
+            );
+            handle_command(&mut panel.state, ID_PAUSE_ALL as usize, 0);
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::TogglePaused(false))
+            );
+        }
+    }
+    #[test]
+    fn invalid_spacing_does_not_dispatch_unusable_settings() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            set_text(panel.state.min_edit, "200");
+            set_text(panel.state.max_edit, "100");
+            handle_command(
+                &mut panel.state,
+                ID_MIN_GAP as usize | ((EN_KILLFOCUS as usize) << 16),
+                0,
+            );
+            assert!(panel.state.events.is_empty());
+            assert_eq!(panel.state.data.min_gap, 24.0);
+            set_text(panel.state.max_edit, "240");
+            handle_command(
+                &mut panel.state,
+                ID_MAX_GAP as usize | ((EN_KILLFOCUS as usize) << 16),
+                0,
+            );
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::SetSpacing(200.0, 240.0))
+            );
+        }
+    }
     #[test]
     fn preferences_has_embedded_small_and_big_window_icons() {
         let panel = PreferencesWindow::new().unwrap();

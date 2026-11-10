@@ -140,6 +140,8 @@ pub struct Pet {
     pub(crate) reaction_cooldown: f64,
     pub(crate) cursor_dwell: f64,
     pub(crate) cursor_play_cooldown: f64,
+    cursor_greeting: CursorGreeting,
+    cursor_greeting_cooldown: f64,
     pub(crate) cursor_interest: bool,
     pub(crate) cursor_motion_recent: f64,
     pub(crate) auto_pursuit_time: f64,
@@ -189,6 +191,49 @@ pub struct Pet {
     pub(crate) play_tumble: bool,
 }
 
+/// Distance hysteresis makes the gesture independent of render/update FPS.
+#[derive(Clone, Debug, Default)]
+struct CursorGreeting {
+    extreme: Option<f64>,
+    direction: f64,
+    reversals: u8,
+    elapsed: f64,
+    since_turn: f64,
+}
+impl CursorGreeting {
+    fn sample(&mut self, dt: f64, x: f64) -> bool {
+        self.elapsed += dt;
+        self.since_turn += dt;
+        if !x.is_finite() || self.elapsed > 1.8 || self.since_turn > 0.65 {
+            *self = Self::default();
+        }
+        let Some(extreme) = self.extreme else {
+            self.extreme = Some(x);
+            return false;
+        };
+        let delta = x - extreme;
+        if self.direction == 0.0 {
+            if delta.abs() >= 20.0 {
+                self.direction = delta.signum();
+                self.extreme = Some(x);
+                self.since_turn = 0.0;
+            }
+        } else if delta * self.direction > 0.0 {
+            self.extreme = Some(x);
+        } else if delta.abs() >= 20.0 {
+            self.direction = delta.signum();
+            self.extreme = Some(x);
+            self.reversals += 1;
+            self.since_turn = 0.0;
+            if self.reversals >= 3 {
+                *self = Self::default();
+                return true;
+            }
+        }
+        false
+    }
+}
+
 impl Pet {
     pub fn new(id: u64, skin: Skin, pos: Vec2) -> Self {
         let pos = if valid_vec(pos) {
@@ -230,6 +275,8 @@ impl Pet {
             reaction_cooldown: 0.0,
             cursor_dwell: 0.0,
             cursor_play_cooldown: 90.0 + (id.wrapping_mul(37) % 61) as f64,
+            cursor_greeting: CursorGreeting::default(),
+            cursor_greeting_cooldown: 0.0,
             cursor_interest: false,
             cursor_motion_recent: 0.0,
             auto_pursuit_time: 0.0,
@@ -301,6 +348,7 @@ impl Pet {
         self.reaction_scan = (self.reaction_scan - dt).max(0.0);
         self.reaction_cooldown = (self.reaction_cooldown - dt).max(0.0);
         self.cursor_play_cooldown = (self.cursor_play_cooldown - dt).max(0.0);
+        self.cursor_greeting_cooldown = (self.cursor_greeting_cooldown - dt).max(0.0);
         self.attention_time = (self.attention_time - dt).max(0.0);
         if self.attention_time == 0.0 {
             self.attention_target = None;
@@ -1146,8 +1194,7 @@ impl Pet {
                     self.set_state(State::Dance, 2.6);
                     self.speak(SpeechEvent::Dance, 2.0);
                 } else if choice < 0.22 && self.satisfaction >= 30.0 && self.auto_activities {
-                    self.set_state(State::Wave, 1.8);
-                    self.speak(SpeechEvent::Wave, 2.0);
+                    self.set_state(State::LookAround, 1.8);
                 } else if choice < 0.42 {
                     let sit_duration = 4.0 + self.random() * 5.0;
                     self.set_state(State::Sit, sit_duration);
@@ -1813,6 +1860,7 @@ impl Pet {
 
     fn update_reactions(&mut self, dt: f64, world: &World) {
         if !self.auto_reactions {
+            self.cursor_greeting = CursorGreeting::default();
             self.reaction_baselined = false;
             self.prior_reaction_windows.clear();
             self.attention_target = None;
@@ -1822,9 +1870,35 @@ impl Pet {
             return;
         }
         if self.dragging || !valid_vec(world.cursor) {
+            self.cursor_greeting = CursorGreeting::default();
             self.reaction_baselined = false;
             self.cancel_auto_pursuit();
             self.cursor_dwell = 0.0;
+            return;
+        }
+        // A greeting is deliberate horizontal back-and-forth near the pet,
+        // not normal pointer travel or small mouse jitter. Busy pets stay busy.
+        let can_greet = self.eligible_for_reaction(world)
+            && self.behavior_manual_lock <= 0.0
+            && self.social_motion.is_none()
+            && self.activity_intensity > 0
+            && self.cursor_greeting_cooldown <= 0.0
+            && self.reaction_cooldown <= 0.0
+            && !world.fullscreen_active()
+            && distance(world.cursor, self.pos) < 210.0;
+        if !can_greet {
+            self.cursor_greeting = CursorGreeting::default();
+        } else if self.cursor_greeting.sample(dt, world.cursor.x) {
+            self.cursor_greeting_cooldown = 45.0;
+            self.reaction_cooldown = 8.0;
+            self.cursor_dwell = 0.0;
+            self.facing = if world.cursor.x < self.pos.x {
+                -1.0
+            } else {
+                1.0
+            };
+            self.set_state(State::Wave, 1.8);
+            self.speak(SpeechEvent::Wave, 2.0);
             return;
         }
         self.cursor_motion_recent = (self.cursor_motion_recent - dt).max(0.0);
@@ -1904,7 +1978,7 @@ impl Pet {
                                 },
                                 2.0,
                             );
-                            self.set_state(State::Wave, 1.0);
+                            self.set_state(State::LookAround, 1.0);
                             self.reaction_cooldown = 12.0;
                         }
                     } else if new_window && self.random_chance(0.35) {
@@ -2489,6 +2563,68 @@ mod responsive_engine_tests {
         }
     }
 
+    #[test]
+    fn cursor_greeting_requires_real_reversals_at_multiple_frame_rates() {
+        for fps in [30, 60, 120, 240] {
+            let mut gesture = CursorGreeting::default();
+            let mut detected = false;
+            for frame in 0..fps {
+                let t = frame as f64 / fps as f64;
+                let x = 500.0 + 35.0 * (t * std::f64::consts::TAU * 2.5).sin();
+                detected |= gesture.sample(1.0 / fps as f64, x);
+            }
+            assert!(detected, "gesture must work at {fps} Hz");
+            for mode in 0..3 {
+                let mut gesture = CursorGreeting::default();
+                for frame in 0..fps * 3 {
+                    let x = match mode {
+                        0 => 500.0,
+                        1 => 500.0 + (frame % 2) as f64 * 4.0,
+                        _ => 500.0 + frame as f64,
+                    };
+                    assert!(!gesture.sample(1.0 / fps as f64, x));
+                }
+            }
+        }
+    }
+    #[test]
+    fn nearby_greeting_respects_cooldown_distance_and_busy_states() {
+        let mut world = World::default();
+        let mut pet = Pet::new(15, Skin::Claude, Vec2::new(500.0, 1040.0));
+        pet.state = State::Idle;
+        let gesture = |pet: &mut Pet, world: &mut World, far: bool| {
+            let mut waved = false;
+            for frame in 0..120 {
+                let t = frame as f64 / 120.0;
+                world.cursor = Vec2::new(
+                    pet.pos.x
+                        + if far { 500.0 } else { 80.0 }
+                        + 35.0 * (t * std::f64::consts::TAU * 2.5).sin(),
+                    pet.pos.y - 35.0,
+                );
+                pet.update_reactions(1.0 / 120.0, world);
+                waved |= pet.state == State::Wave;
+            }
+            waved
+        };
+        assert!(!gesture(&mut pet, &mut world, true));
+        assert!(gesture(&mut pet, &mut world, false));
+        pet.state = State::Idle;
+        assert!(!gesture(&mut pet, &mut world, false));
+        pet.cursor_greeting_cooldown = 0.0;
+        pet.reaction_cooldown = 0.0;
+        pet.state = State::Sleep;
+        assert!(!gesture(&mut pet, &mut world, false));
+        pet.state = State::Idle;
+        pet.auto_reactions = false;
+        assert!(!gesture(&mut pet, &mut world, false));
+        pet.auto_reactions = true;
+        pet.behavior_manual_lock = 5.0;
+        assert!(!gesture(&mut pet, &mut world, false));
+        pet.behavior_manual_lock = 0.0;
+        pet.activity_intensity = 0;
+        assert!(!gesture(&mut pet, &mut world, false));
+    }
     #[test]
     fn adaptive_window_hop_reaches_high_platforms_and_respects_ceiling() {
         let mut pet = Pet::new(9, Skin::Claude, Vec2::new(400.0, 1100.0));
