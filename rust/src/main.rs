@@ -743,7 +743,7 @@ mod native {
                 text.as_ptr(),
                 title.as_ptr(),
                 if question {
-                    MB_YESNO | MB_ICONQUESTION
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2
                 } else {
                     MB_OK | MB_ICONINFORMATION
                 },

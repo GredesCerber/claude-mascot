@@ -71,7 +71,7 @@ impl Default for MenuState {
             hide_fullscreen: false,
             autostart: false,
             auto_updates: true,
-            auto_install_updates: true,
+            auto_install_updates: false,
             chase: false,
             scale: 1.0,
             target_fps: crate::timing::DEFAULT_FPS,

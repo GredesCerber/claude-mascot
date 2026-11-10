@@ -2,7 +2,7 @@
 use super::{hash_file, launch, validate_digest, wide, ApplyPlan};
 use std::os::windows::{fs::OpenOptionsExt, process::CommandExt};
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::OpenOptions,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -153,6 +153,24 @@ fn system_installer() -> Result<PathBuf, String> {
     Ok(PathBuf::from(String::from_utf16_lossy(&buf[..len])).join("msiexec.exe"))
 }
 
+/// Rust canonical paths use the extended Win32 prefix, which msiexec's command
+/// line parser rejects (1619), even though read-only MSI database APIs accept it.
+fn installer_argument(path: &Path) -> OsString {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let unc: Vec<u16> = "\\\\?\\UNC\\".encode_utf16().collect();
+    let prefix: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+    if units.starts_with(&unc) {
+        let mut normal: Vec<u16> = "\\\\".encode_utf16().collect();
+        normal.extend_from_slice(&units[unc.len()..]);
+        OsString::from_wide(&normal)
+    } else if units.starts_with(&prefix) {
+        OsString::from_wide(&units[prefix.len()..])
+    } else {
+        path.as_os_str().to_owned()
+    }
+}
+
 pub(super) fn install_and_restart(
     plan: &ApplyPlan,
     package: &Path,
@@ -183,16 +201,18 @@ pub(super) fn install_and_restart(
             Some(expected_exe),
         )?;
         let installer = system_installer()?;
+        let package_arg = installer_argument(package);
+        let log_arg = installer_argument(&log);
         let mut exit = 1618;
         for attempt in 0..4 {
             let status = Command::new(&installer)
                 .args([
                     OsStr::new("/i"),
-                    package.as_os_str(),
+                    package_arg.as_os_str(),
                     OsStr::new("/qn"),
                     OsStr::new("/norestart"),
                     OsStr::new("/L*v"),
-                    log.as_os_str(),
+                    log_arg.as_os_str(),
                 ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -243,6 +263,21 @@ pub(super) fn install_and_restart(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installer_command_accepts_drive_unc_spaces_and_unicode_paths() {
+        assert_eq!(
+            installer_argument(Path::new(r"\\?\C:\Users\Имя с пробелом\new.msi")),
+            OsStr::new(r"C:\Users\Имя с пробелом\new.msi")
+        );
+        assert_eq!(
+            installer_argument(Path::new(r"\\?\UNC\server\share\new.msi")),
+            OsStr::new(r"\\server\share\new.msi")
+        );
+        assert_eq!(
+            installer_argument(Path::new(r"C:\normal\new.msi")),
+            OsStr::new(r"C:\normal\new.msi")
+        );
+    }
     #[test]
     fn refuses_wrong_product_version_and_machine_scope() {
         let good = (

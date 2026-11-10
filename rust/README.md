@@ -1,7 +1,7 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
-Version 0.10.1 keeps **Claude only** and includes
+Version 0.10.2 keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
 It includes varied window/landing selection, deliberate approaches to window edges,
@@ -29,8 +29,8 @@ Use the per-user MSI for shortcuts, upgrades and removal through Windows
 Settings or the Start Menu uninstall shortcut. See [MSI packaging](docs/msi.md).
 MSI installs download verified installer updates, apply them through Windows
 Installer and restart the pet. Automatic checking and installation can be disabled
-in Settings. New installs enable both; existing settings opt into automatic
-installation using the new checkbox. Without it, one confirmation installs the
+in Settings. Checking is enabled by default; silent installation requires the
+new checkbox. Without it, one confirmation installs the
 update directly, without opening a release webpage. See [updates](docs/updates.md).
 
 Alternatively, extract the portable ZIP and run `claude-mascot.exe`.

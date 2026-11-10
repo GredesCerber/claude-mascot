@@ -95,7 +95,7 @@ impl Default for PreferencesState {
             desktop_perches: true,
             paused: false,
             auto_updates: true,
-            auto_install_updates: true,
+            auto_install_updates: false,
         }
     }
 }
