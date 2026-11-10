@@ -1140,15 +1140,25 @@ pub fn snapshot() -> World {
             Some(enum_monitor),
             (&mut monitors as *mut Vec<Monitor>) as LPARAM,
         );
+        let taskbars = visible_taskbars();
         world.work_areas = monitors
             .iter()
             .map(|m| {
-                Rect::new(
+                let full = Rect::new(
+                    m.full.left as f64,
+                    m.full.top as f64,
+                    (m.full.right - m.full.left) as f64,
+                    (m.full.bottom - m.full.top) as f64,
+                );
+                let work = Rect::new(
                     m.work.left as f64,
                     m.work.top as f64,
                     (m.work.right - m.work.left) as f64,
                     (m.work.bottom - m.work.top) as f64,
-                )
+                );
+                taskbars
+                    .iter()
+                    .fold(work, |work, &bar| clip_bottom_taskbar(work, full, bar))
             })
             .collect();
         if world.work_areas.is_empty() {
@@ -1173,6 +1183,47 @@ pub fn snapshot() -> World {
         world.video_window = None;
         world
     }
+}
+
+// Auto-hide taskbars do not reliably change rcWork. Their visible geometry
+// is the physical floor while they slide into view; never change shell settings.
+fn clip_bottom_taskbar(mut work: Rect, full: Rect, bar: Rect) -> Rect {
+    let visible_height = bar.bottom().min(full.bottom()) - bar.y.max(full.y);
+    let overlap = bar.right().min(full.right()) - bar.x.max(full.x);
+    if bar.is_valid()
+        && visible_height > 4.0
+        && overlap >= full.w * 0.5
+        && bar.y >= full.bottom() - full.h * 0.3
+        && bar.y > work.y + 100.0
+        && bar.y < work.bottom()
+    {
+        work.h = bar.y - work.y;
+    }
+    work
+}
+unsafe fn visible_taskbars() -> Vec<Rect> {
+    let mut bars = Vec::with_capacity(4);
+    for class in ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+        let class = wide(class);
+        let mut previous = null_mut();
+        for _ in 0..16 {
+            let hwnd = FindWindowExW(null_mut(), previous, class.as_ptr(), null());
+            if hwnd.is_null() || hwnd == previous {
+                break;
+            }
+            previous = hwnd;
+            let mut rect: RECT = zeroed();
+            if IsWindowVisible(hwnd) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
+                bars.push(Rect::new(
+                    rect.left as f64,
+                    rect.top as f64,
+                    (rect.right - rect.left) as f64,
+                    (rect.bottom - rect.top) as f64,
+                ));
+            }
+        }
+    }
+    bars
 }
 
 struct Monitor {
@@ -1508,5 +1559,31 @@ mod tests {
             assert_eq!(command_state(selected_scene.raw(), 45) & MF_CHECKED, 0);
             assert_eq!(command_state(selected_scene.raw(), 46) & MF_CHECKED, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod taskbar_floor_tests {
+    use super::*;
+    #[test]
+    fn visible_bottom_taskbar_clips_only_its_monitor_and_ignores_hidden_sliver() {
+        let monitor = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        assert_eq!(
+            clip_bottom_taskbar(monitor, monitor, Rect::new(0.0, 1078.0, 1920.0, 48.0)),
+            monitor
+        );
+        assert_eq!(
+            clip_bottom_taskbar(monitor, monitor, Rect::new(0.0, 1032.0, 1920.0, 48.0)).bottom(),
+            1032.0
+        );
+        let other = Rect::new(-1920.0, 0.0, 1920.0, 1080.0);
+        assert_eq!(
+            clip_bottom_taskbar(other, other, Rect::new(0.0, 1032.0, 1920.0, 48.0)),
+            other
+        );
+        assert_eq!(
+            clip_bottom_taskbar(monitor, monitor, Rect::new(0.0, 0.0, 48.0, 1080.0)),
+            monitor
+        );
     }
 }

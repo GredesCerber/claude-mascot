@@ -132,6 +132,8 @@ pub struct Pet {
     /// Front-surface climbing uses a back view; edge climbing hugs the rim.
     pub climb_front: bool,
     pub(crate) climb_face_fraction: f64,
+    previous_floor_area: Option<Rect>,
+    floor_bounce_cooldown: f64,
     /// Short lived point of interest for the renderer (for example, a newly opened file manager).
     pub attention_target: Option<Vec2>,
     /// Enables gentle reactions to visible desktop activity.
@@ -271,6 +273,8 @@ impl Pet {
             gaze: Vec2::default(),
             climb_front: false,
             climb_face_fraction: 0.5,
+            previous_floor_area: None,
+            floor_bounce_cooldown: 0.0,
             attention_target: None,
             auto_reactions: true,
             activity: None,
@@ -378,6 +382,7 @@ impl Pet {
             return;
         }
         self.prune_shake();
+        self.update_floor_motion(dt, world);
 
         if (self.social.is_some() || self.social_motion.is_some())
             && self.exploration_route.is_some()
@@ -1249,6 +1254,71 @@ impl Pet {
             best = Some((floor, None));
         }
         best
+    }
+
+    fn update_floor_motion(&mut self, dt: f64, world: &World) {
+        self.floor_bounce_cooldown = (self.floor_bounce_cooldown - dt).max(0.0);
+        let area = world.area_at(self.pos);
+        let previous = self.previous_floor_area.replace(area);
+        let Some(old) = previous else {
+            return;
+        };
+        let rise = old.bottom() - area.bottom();
+        let same_monitor = (old.x - area.x).abs() < 0.5
+            && (old.y - area.y).abs() < 0.5
+            && (old.w - area.w).abs() < 0.5;
+        if !same_monitor
+            || !area.is_valid()
+            || rise.abs() > 160.0
+            || self.dragging
+            || self.release_pending
+            || self.surface.is_some()
+            || self.surface_id.is_some()
+            || self.social.is_some()
+            || self.social_motion.is_some()
+        {
+            return;
+        }
+        // An animated bar may rise through several snapshots. Keep the upward
+        // velocity when it catches the feet, rather than relaunching every tick.
+        if rise > 0.0
+            && self.floor_bounce_cooldown > 0.0
+            && self.state == State::Jump
+            && self.vel.y < 0.0
+            && self.pos.y > area.bottom()
+        {
+            self.pos.y = area.bottom();
+            return;
+        }
+        if rise.abs() < 0.5
+            || (self.pos.y - old.bottom()).abs() > 3.0
+            || self.floor_bounce_cooldown > 0.0
+            || self.activity.is_some()
+            || self.chase
+            || !matches!(
+                self.state,
+                State::Idle
+                    | State::Walk
+                    | State::Run
+                    | State::Sit
+                    | State::Happy
+                    | State::LookAround
+            )
+        {
+            return;
+        }
+        if rise > 0.0 {
+            self.pos.y = area.bottom();
+            let bounce_height = 24.0 * self.display_scale.clamp(0.5, 2.0);
+            self.vel.y = -(2.0 * GRAVITY * bounce_height).sqrt();
+            self.squash = 0.3;
+            self.floor_bounce_cooldown = 0.8;
+            self.set_state(State::Jump, 0.0);
+        } else {
+            // When the bar retracts, gravity takes over from the old height.
+            self.vel.y = 0.0;
+            self.set_state(State::Fall, 0.0);
+        }
     }
 
     fn floor_y(&self, world: &World) -> f64 {
