@@ -9,6 +9,9 @@ use std::sync::{
     OnceLock,
 };
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
@@ -252,6 +255,9 @@ impl PreferencesWindow {
             return Err(last_error("CreateWindowExW preferences"));
         }
         state.hwnd = hwnd;
+        unsafe {
+            apply_titlebar_theme(hwnd);
+        }
         state.dpi = unsafe { GetDpiForWindow(hwnd) as f64 / 96.0 }.max(1.0);
         state.font = unsafe { make_font(state.dpi, FW_NORMAL) };
         state.bold_font = unsafe { make_font(state.dpi, FW_BOLD as i32) };
@@ -1119,6 +1125,23 @@ fn compact_number(value: f64) -> String {
         format!("{value:.1}")
     }
 }
+unsafe fn apply_titlebar_theme(hwnd: HWND) {
+    // Keep the native caption buttons, snap layouts and window dragging.
+    // Older Windows versions may reject the optional caption colors.
+    for (attribute, value) in [
+        (DWMWA_USE_IMMERSIVE_DARK_MODE, 1u32),
+        (DWMWA_CAPTION_COLOR, colorref(DARK_RGB)),
+        (DWMWA_TEXT_COLOR, colorref(CREAM_RGB)),
+    ] {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute as u32,
+            (&value as *const u32).cast::<c_void>(),
+            size_of::<u32>() as u32,
+        );
+    }
+}
+
 fn colorref(rgb: u32) -> u32 {
     ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff)
 }
@@ -1136,6 +1159,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
     let s = &mut *ptr;
     match msg {
+        WM_THEMECHANGED | WM_SETTINGCHANGE => {
+            apply_titlebar_theme(hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_CLOSE => {
             ShowWindow(hwnd, SW_HIDE);
             0
