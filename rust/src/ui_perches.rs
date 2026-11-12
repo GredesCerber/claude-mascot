@@ -8,6 +8,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+const SNAPSHOT_TTL: Duration = Duration::from_millis(1500);
+
 #[derive(Default)]
 struct Cache {
     revision: usize,
@@ -74,9 +76,7 @@ impl UiPerchMonitor {
         }
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.revision != self.revision.load(Ordering::Acquire)
-            || !cache
-                .time
-                .is_some_and(|t| t.elapsed() <= Duration::from_millis(1500))
+            || !cache.time.is_some_and(|t| t.elapsed() <= SNAPSHOT_TTL)
         {
             return vec![];
         }
@@ -127,10 +127,31 @@ fn visible(s: &UiSurface, w: &World, owner: usize) -> bool {
 struct Tracker {
     previous: Vec<(UiSurface, u64)>,
     next: u64,
+    last_confirmed: Option<Instant>,
 }
 impl Tracker {
     fn clear(&mut self) {
         self.previous.clear();
+        self.last_confirmed = None;
+    }
+    fn finish_collection(
+        &mut self,
+        current: Vec<UiSurface>,
+        started: Instant,
+        finished: Instant,
+    ) -> Option<Vec<UiSurface>> {
+        if finished.saturating_duration_since(started) > SNAPSHOT_TTL {
+            self.clear();
+            return None;
+        }
+        if self
+            .last_confirmed
+            .is_some_and(|at| finished.saturating_duration_since(at) > SNAPSHOT_TTL)
+        {
+            self.clear();
+        }
+        self.last_confirmed = Some(finished);
+        Some(self.observe(current))
     }
     fn observe(&mut self, current: Vec<UiSurface>) -> Vec<UiSurface> {
         let mut next_previous = Vec::new();
@@ -188,6 +209,7 @@ fn worker(
         }
         let target = owner.load(Ordering::Acquire);
         if enabled.load(Ordering::Acquire) && target != 0 {
+            let started = Instant::now();
             let current = automation
                 .as_ref()
                 .and_then(|a| unsafe { collect(a, target).ok() })
@@ -196,11 +218,15 @@ fn worker(
                 && revision.load(Ordering::Acquire) == rev
                 && owner.load(Ordering::Acquire) == target
             {
-                let stable = tracker.observe(current);
-                *cache.lock().unwrap_or_else(|e| e.into_inner()) = Cache {
-                    revision: rev,
-                    time: Some(Instant::now()),
-                    surfaces: stable,
+                let finished = Instant::now();
+                let result = tracker.finish_collection(current, started, finished);
+                *cache.lock().unwrap_or_else(|e| e.into_inner()) = match result {
+                    Some(stable) => Cache {
+                        revision: rev,
+                        time: Some(finished),
+                        surfaces: stable,
+                    },
+                    None => Cache::default(),
                 };
             }
         } else {
@@ -374,5 +400,53 @@ mod tests {
         assert_ne!(tracker.observe(vec![moved.clone()])[0].id, original);
         moved.rect.y += 100.;
         assert!(tracker.observe(vec![moved]).is_empty());
+    }
+    #[test]
+    fn stale_or_slow_collection_never_revives_old_identity() {
+        let mut tracker = Tracker::default();
+        let surface = UiSurface {
+            owner: 1,
+            id: 8,
+            rect: Rect::new(20., 20., 120., 30.),
+        };
+        let t = Instant::now();
+        assert!(tracker
+            .finish_collection(vec![surface.clone()], t, t)
+            .unwrap()
+            .is_empty());
+        let old = tracker
+            .finish_collection(
+                vec![surface.clone()],
+                t + Duration::from_millis(500),
+                t + Duration::from_millis(500),
+            )
+            .unwrap()[0]
+            .id;
+        let expired = t + Duration::from_millis(2100);
+        assert!(tracker
+            .finish_collection(vec![surface.clone()], expired, expired)
+            .unwrap()
+            .is_empty());
+        let new_id = tracker
+            .finish_collection(vec![surface.clone()], expired, expired)
+            .unwrap()[0]
+            .id;
+        assert_ne!(old, new_id);
+        let started = expired + Duration::from_millis(500);
+        let finished = started + SNAPSHOT_TTL + Duration::from_millis(1);
+        assert!(tracker
+            .finish_collection(vec![surface.clone()], started, finished)
+            .is_none());
+        assert!(tracker
+            .finish_collection(vec![surface.clone()], finished, finished)
+            .unwrap()
+            .is_empty());
+        assert_ne!(
+            tracker
+                .finish_collection(vec![surface], finished, finished)
+                .unwrap()[0]
+                .id,
+            new_id
+        );
     }
 }

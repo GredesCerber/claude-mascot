@@ -660,6 +660,7 @@ impl Pet {
                     }
                     let window_id = w.id;
                     let rect = w.rect;
+                    self.ui_surface = None;
                     self.surface = Some(i);
                     self.surface_id = Some(window_id);
                     self.surface_prev = Some(rect);
@@ -2809,6 +2810,25 @@ mod responsive_engine_tests {
         pet.update_ui_surface(&world);
         assert_eq!(pet.state, State::Fall);
         assert_eq!(pet.pos, Vec2::new(160., 400.));
+    }
+    #[test]
+    fn manual_climb_transfers_ui_support_to_window() {
+        let mut world = support_world(Rect::new(0., 0., 1000., 1000.), 200.);
+        world.ui_surfaces.push(crate::UiSurface {
+            owner: 9,
+            id: 3,
+            rect: Rect::new(400., 250., 200., 30.),
+        });
+        let mut pet = Pet::new(1, Skin::Claude, Vec2::new(500., 250.));
+        pet.state = State::Idle;
+        pet.ui_surface = Some(world.ui_surfaces[0].clone());
+        pet.command(Command::Climb, &world);
+        assert_eq!(pet.state, State::Climb);
+        assert!(pet.ui_surface.is_none());
+        assert_eq!(pet.surface_id, Some(9));
+        pet.update(1.0 / 240.0, &world);
+        assert_eq!(pet.state, State::Climb);
+        assert_eq!(pet.surface_id, Some(9));
     }
     #[test]
     fn falling_pet_lands_on_ui_perch() {
