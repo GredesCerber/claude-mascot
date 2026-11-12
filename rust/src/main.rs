@@ -888,17 +888,10 @@ mod native {
         let mut declined_update: Option<String> = None;
         let roster = settings.startup_pets(o.pets_explicit.then_some(o.pets));
         let mut entries = Vec::with_capacity(roster.len());
+        let positions = claude_mascot::company::positions(area, settings.scale, roster.len());
         for (index, saved) in roster.iter().enumerate() {
             let mut entry = spawn(
-                Pet::new(
-                    saved.id,
-                    Skin::Claude,
-                    Vec2::new(
-                        (area.x + area.w / 2.0 + index as f64 * 72.0)
-                            .clamp(area.x + 60.0, area.right() - 60.0),
-                        area.y + 60.0,
-                    ),
-                ),
+                Pet::new(saved.id, Skin::Claude, positions[index]),
                 &settings,
                 index == 0,
             )?;
@@ -1190,21 +1183,14 @@ mod native {
                         }
                         ReturnAll => {
                             let area = world.area_at(world.cursor);
-                            let spacing = 90.0 * settings.scale;
-                            let columns =
-                                ((area.w / spacing).floor() as usize).clamp(1, entries.len());
-                            let rows = entries.len().div_ceil(columns);
-                            let row_gap = (area.h / (rows + 1) as f64).min(spacing * 1.5);
-                            let count = entries.len();
-                            for (index, entry) in entries.iter_mut().enumerate() {
+                            let positions = claude_mascot::company::positions(
+                                area,
+                                settings.scale,
+                                entries.len(),
+                            );
+                            for (entry, position) in entries.iter_mut().zip(positions) {
                                 entry.drag = None;
-                                let row = index / columns;
-                                let in_row = (count - row * columns).min(columns);
-                                let x = area.x + area.w / 2.0 + (index % columns) as f64 * spacing
-                                    - (in_row - 1) as f64 * spacing / 2.0;
-                                entry
-                                    .pet
-                                    .drag_to(Vec2::new(x, area.y + row_gap * (row + 1) as f64));
+                                entry.pet.drag_to(position);
                                 entry.pet.release(Vec2::default());
                             }
                             // Rescue is a relocation, not a swept physical impact.
@@ -1478,17 +1464,11 @@ mod native {
             if let Some(company) = load_company {
                 let area = world.area_at(world.cursor);
                 let mut replacement = Vec::with_capacity(company.pets.len());
+                let positions =
+                    claude_mascot::company::positions(area, settings.scale, company.pets.len());
                 for (index, saved) in company.pets.iter().enumerate() {
                     let mut entry = spawn(
-                        Pet::new(
-                            saved.id,
-                            Skin::Claude,
-                            Vec2::new(
-                                (area.x + area.w * 0.5 + index as f64 * 72.0)
-                                    .clamp(area.x + 60.0, area.right() - 60.0),
-                                area.y + 60.0,
-                            ),
-                        ),
+                        Pet::new(saved.id, Skin::Claude, positions[index]),
                         &settings,
                         false,
                     )?;
