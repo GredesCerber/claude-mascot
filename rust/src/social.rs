@@ -131,6 +131,16 @@ impl Default for Cooldown {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Approach {
+    a: u64,
+    b: u64,
+    kind: SocialKind,
+    support: Rect,
+    target_x: f64,
+    elapsed: f64,
+}
+
 /// Fixed-size social scheduler. Pet identity is always resolved by stable id.
 pub struct SocialCoordinator {
     pub enabled: bool,
@@ -140,6 +150,7 @@ pub struct SocialCoordinator {
     age: f64,
     pairs: [Option<Pair>; 4],
     tower: Option<TowerGroup>,
+    approach: Option<Approach>,
     tower_invitation_at: f64,
     cooldowns: [Cooldown; CAP],
     request: Option<(Option<u64>, Option<SocialKind>)>,
@@ -162,6 +173,7 @@ impl SocialCoordinator {
             age: 0.0,
             pairs: [None; 4],
             tower: None,
+            approach: None,
             tower_invitation_at: 20.0,
             cooldowns: [Cooldown::default(); CAP],
             request: None,
@@ -282,6 +294,7 @@ impl SocialCoordinator {
             }
             self.refusal = None;
         }
+        self.advance_approach(&mut refs, count, world, step);
         self.advance_pairs(&mut refs, count, world, step);
         self.advance_tower(&mut refs, count, world, step);
         if step == 0.0 {
@@ -1161,7 +1174,7 @@ impl SocialCoordinator {
     }
 
     fn tick(&mut self, refs: &mut [Option<&mut Pet>; CAP], n: usize, world: &World) {
-        if self.tower.is_some() {
+        if self.tower.is_some() || self.approach.is_some() {
             return;
         }
         if let Some((target, Some(SocialKind::Tower))) = self.request {
@@ -1209,13 +1222,7 @@ impl SocialCoordinator {
                         continue;
                     }
                     let d = (a.pos.x - b.pos.x).hypot(a.pos.y - b.pos.y);
-                    if !distance_allowed(requested_kind, d)
-                        || (a.pos.y - b.pos.y).abs() > 20.0
-                        || !same_support(a, b, world)
-                    {
-                        continue;
-                    }
-                    if requested_kind == Some(SocialKind::HighFive) && d > 96.0 {
+                    if (a.pos.y - b.pos.y).abs() > 20.0 || !same_support(a, b, world) {
                         continue;
                     }
                     let candidate = (d, b.id, j);
@@ -1236,12 +1243,23 @@ impl SocialCoordinator {
                                 .hypot(a.pos.y - refs[j].as_deref().unwrap().pos.y),
                         )
                     });
-                    if kind == SocialKind::HighFive
-                        && (a.pos.x - refs[j].as_deref().unwrap().pos.x).abs() > 96.0
-                    {
-                        kind = SocialKind::Greeting
+                    let distance = (a.pos.x - refs[j].as_deref().unwrap().pos.x).abs();
+                    if requested_kind.is_none() && distance > MAX_DISTANCE {
+                        kind = SocialKind::Greeting;
                     }
-                    if self.start(i, j, kind, refs, world) {
+                    let scale = a
+                        .display_scale
+                        .max(refs[j].as_deref().unwrap().display_scale)
+                        .clamp(0.5, 2.0);
+                    let (_, mut max) = social_distance_range(kind, scale);
+                    if kind == SocialKind::HighFive {
+                        max = max.min(96.0 * scale);
+                    }
+                    if distance <= max {
+                        if self.start(i, j, kind, refs, world) {
+                            self.request = None;
+                        }
+                    } else if self.begin_approach(i, j, kind, refs, n, world) {
                         self.request = None;
                     }
                     return;
@@ -1301,6 +1319,151 @@ impl SocialCoordinator {
             }
         }
     }
+    fn begin_approach(
+        &mut self,
+        i: usize,
+        j: usize,
+        kind: SocialKind,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+    ) -> bool {
+        let a = refs[i].as_deref().unwrap();
+        let b = refs[j].as_deref().unwrap();
+        let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.0);
+        let (min, mut max) = social_distance_range(kind, scale);
+        if kind == SocialKind::HighFive {
+            max = max.min(96.0 * scale);
+        }
+        if !max.is_finite() || max < min + 4.0 {
+            return false;
+        }
+        let target_x = b.pos.x + (a.pos.x - b.pos.x).signum() * (min + max) * 0.5;
+        let support = support_rect(a, world);
+        let approach = Approach {
+            a: a.id,
+            b: b.id,
+            kind,
+            support,
+            target_x,
+            elapsed: 0.0,
+        };
+        if (a.pos.x - target_x).abs() > 1500.0
+            || target_x < support.x + 40.0 * scale
+            || target_x > support.right() - 40.0 * scale
+            || !approach_path_clear(refs, n, approach, a.pos.x)
+        {
+            return false;
+        }
+        for (index, role, partner) in [
+            (i, SocialRole::Initiator, approach.b),
+            (j, SocialRole::Partner, approach.a),
+        ] {
+            let pet = refs[index].as_deref_mut().unwrap();
+            pet.social = Some(SocialActivity {
+                kind,
+                role,
+                partner_id: partner,
+                elapsed: 0.0,
+                partner_offset: Vec2::default(),
+            });
+            pet.vel = Vec2::default();
+            pet.state = State::Social;
+            pet.state_time = 0.0;
+        }
+        refs[i].as_deref_mut().unwrap().social_motion = Some(SocialMotion::Run {
+            target_x,
+            speed: 150.0,
+        });
+        refs[i]
+            .as_deref_mut()
+            .unwrap()
+            .speak(crate::dialogue::SpeechEvent::SocialInvite, 2.0);
+        self.approach = Some(approach);
+        true
+    }
+    fn clear_approach(
+        &mut self,
+        a: Approach,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+    ) {
+        for (id, other) in [(a.a, a.b), (a.b, a.a)] {
+            if let Some(i) = find(refs, n, id) {
+                let p = refs[i].as_deref_mut().unwrap();
+                if p.social
+                    .is_some_and(|s| s.partner_id == other && s.kind == a.kind)
+                {
+                    p.social = None;
+                    p.social_motion = None;
+                    if matches!(p.state, State::Social | State::Run) {
+                        p.set_social_end(world);
+                    }
+                }
+            }
+        }
+    }
+    fn advance_approach(
+        &mut self,
+        refs: &mut [Option<&mut Pet>; CAP],
+        n: usize,
+        world: &World,
+        dt: f64,
+    ) {
+        let Some(mut a) = self.approach else { return };
+        a.elapsed += dt;
+        let positions = find(refs, n, a.a).zip(find(refs, n, a.b));
+        let valid = positions.is_some_and(|(i, j)| {
+            let p = refs[i].as_deref().unwrap();
+            let q = refs[j].as_deref().unwrap();
+            p.social
+                .is_some_and(|s| s.kind == a.kind && s.partner_id == a.b)
+                && q.social
+                    .is_some_and(|s| s.kind == a.kind && s.partner_id == a.a)
+                && matches!(p.social_motion, Some(SocialMotion::Run { .. }))
+                && matches!(p.state, State::Social | State::Run)
+                && q.state == State::Social
+                && !p.dragging
+                && !q.dragging
+                && !p.chase
+                && !q.chase
+                && p.socially_supported(world)
+                && q.socially_supported(world)
+                && support_rect_matches(p, a.support, world)
+                && support_rect_matches(q, a.support, world)
+        });
+        let blocked = positions.is_some_and(|(i, _)| {
+            !approach_path_clear(refs, n, a, refs[i].as_deref().unwrap().pos.x)
+        });
+        if !valid || a.elapsed > 12.0 || blocked || self.request.is_some() {
+            self.approach = None;
+            self.clear_approach(a, refs, n, world);
+            if valid && (a.elapsed > 12.0 || blocked) && self.request.is_none() {
+                if let Some(i) = find(refs, n, a.a) {
+                    refs[i]
+                        .as_deref_mut()
+                        .unwrap()
+                        .speak(crate::dialogue::SpeechEvent::SocialNoRoom, 2.5);
+                }
+            }
+            return;
+        }
+        let (i, j) = positions.unwrap();
+        if (refs[i].as_deref().unwrap().pos.x - a.target_x).abs() <= 9.0 {
+            self.approach = None;
+            self.clear_approach(a, refs, n, world);
+            if !self.start(i, j, a.kind, refs, world) {
+                refs[i]
+                    .as_deref_mut()
+                    .unwrap()
+                    .speak(crate::dialogue::SpeechEvent::SocialNoRoom, 2.5);
+            }
+        } else {
+            self.approach = Some(a);
+        }
+    }
+
     fn frequency_factor(&self) -> f64 {
         50.0 / f64::from(if self.frequency == 0 {
             50
@@ -1567,6 +1730,9 @@ impl SocialCoordinator {
         }
     }
     fn cancel_all(&mut self, refs: &mut [Option<&mut Pet>; CAP], n: usize, world: &World) {
+        if let Some(a) = self.approach.take() {
+            self.clear_approach(a, refs, n, world);
+        }
         for i in 0..self.pairs.len() {
             if let Some(p) = self.pairs[i].take() {
                 self.finish_pair(p, refs, n, world, false);
@@ -1579,6 +1745,20 @@ impl SocialCoordinator {
 }
 fn find(refs: &[Option<&mut Pet>; CAP], n: usize, id: u64) -> Option<usize> {
     (0..n).find(|&i| refs[i].as_deref().is_some_and(|p| p.id == id))
+}
+fn approach_path_clear(refs: &[Option<&mut Pet>; CAP], n: usize, a: Approach, from: f64) -> bool {
+    let Some(actor) = find(refs, n, a.a).and_then(|i| refs[i].as_deref()) else {
+        return false;
+    };
+    let lo = from.min(a.target_x);
+    let hi = from.max(a.target_x);
+    (0..n).filter_map(|i| refs[i].as_deref()).all(|p| {
+        p.id == a.a
+            || p.id == a.b
+            || (p.pos.y - actor.pos.y).abs() > 90.0 * p.display_scale.max(actor.display_scale)
+            || p.pos.x < lo - 42.0 * (p.display_scale + actor.display_scale)
+            || p.pos.x > hi + 42.0 * (p.display_scale + actor.display_scale)
+    })
 }
 fn active_marker(p: &Pet, pair: Pair, id: u64, other: u64) -> bool {
     p.social.is_some_and(|s| {

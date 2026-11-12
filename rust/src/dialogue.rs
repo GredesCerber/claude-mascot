@@ -463,11 +463,20 @@ impl Dialogue {
         self.rng % 50 < frequency as u64
     }
     pub fn event(&mut self, event: SpeechEvent, now: f64) -> Option<&'static str> {
-        self.select(event as usize, event.lines(), now, event.ambient())
+        let refusal = matches!(
+            event,
+            SpeechEvent::SocialBusy
+                | SpeechEvent::SocialSelfBusy
+                | SpeechEvent::SocialTooFar
+                | SpeechEvent::SocialNoRoom
+                | SpeechEvent::TowerLowCeiling
+                | SpeechEvent::TowerNoRoom
+        );
+        self.select(event as usize, event.lines(), now, event.ambient(), refusal)
     }
     pub fn activity(&mut self, id: ActivityId, now: f64) -> Option<&'static str> {
         let bank = crate::activity_dialogue::ACTIVITY_LINES.get(id.index())?;
-        self.select(EVENT_COUNT + id.index(), bank, now, false)
+        self.select(EVENT_COUNT + id.index(), bank, now, false, false)
     }
     fn select(
         &mut self,
@@ -475,10 +484,11 @@ impl Dialogue {
         bank: &'static [&'static str],
         now: f64,
         ambient: bool,
+        explicit_refusal: bool,
     ) -> Option<&'static str> {
         if !now.is_finite()
             || bank.is_empty()
-            || (self.last_key == Some(key) && now - self.last_time < 1.2)
+            || (!explicit_refusal && self.last_key == Some(key) && now - self.last_time < 1.2)
             || (ambient && now < self.ambient_after)
         {
             return None;
