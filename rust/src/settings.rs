@@ -48,6 +48,14 @@ impl Frequencies {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompanySet {
+    pub name: String,
+    pub pets: Vec<PetAppearance>,
+    #[serde(default)]
+    pub names: std::collections::BTreeMap<u64, String>,
+}
+
 /// Release channel shared by native Windows builds and portable simulation.
 pub const DEFAULT_UPDATE_REPOSITORY: &str = match option_env!("MASCOT_UPDATE_REPO") {
     Some(repository) => repository,
@@ -74,6 +82,8 @@ pub struct Settings {
     pub personal_space_max: f64,
     pub body_color: u32,
     pub pet_appearances: Vec<PetAppearance>,
+    pub pet_names: std::collections::BTreeMap<u64, String>,
+    pub company_sets: Vec<CompanySet>,
     /// Frequency of optional activities, from quiet (0) to lively (100).
     pub activity_intensity: u8,
     pub frequencies: Frequencies,
@@ -103,6 +113,8 @@ impl Default for Settings {
             personal_space_max: 96.0,
             body_color: crate::palette::DEFAULT_BODY_COLOR,
             pet_appearances: Vec::new(),
+            pet_names: Default::default(),
+            company_sets: Vec::new(),
             activity_intensity: 50,
             frequencies: Frequencies::default(),
             paused: false,
@@ -146,6 +158,8 @@ impl Settings {
             .take(8)
             .map(|(id, color)| PetAppearance { id, color })
             .collect();
+        self.pet_names
+            .retain(|id, _| self.pet_appearances.iter().any(|p| p.id == *id));
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -192,6 +206,37 @@ impl Settings {
                 "Saved pets must have unique positive ids and valid RGB colors (up to eight pets)"
                     .into(),
             );
+        }
+        fn valid_name(name: &str) -> bool {
+            !name.trim().is_empty()
+                && name.chars().count() <= 64
+                && !name.chars().any(char::is_control)
+        }
+        let valid_pets = |pets: &[PetAppearance]| {
+            let mut seen = std::collections::BTreeSet::new();
+            !pets.is_empty()
+                && pets.len() <= 8
+                && pets.iter().all(|p| {
+                    p.id > 0 && p.id < u64::MAX - 8 && p.color <= 0xFFFFFF && seen.insert(p.id)
+                })
+        };
+        if value.pet_names.len() > 8
+            || value
+                .pet_names
+                .iter()
+                .any(|(id, n)| !ids.contains(id) || !valid_name(n))
+            || value.company_sets.len() > 8
+            || value.company_sets.iter().any(|set| {
+                !valid_name(&set.name)
+                    || !valid_pets(&set.pets)
+                    || set.names.len() > 8
+                    || set
+                        .names
+                        .iter()
+                        .any(|(id, n)| !set.pets.iter().any(|p| p.id == *id) || !valid_name(n))
+            })
+        {
+            return Err("Invalid pet names or saved companies".into());
         }
         // Pre-0.7.1 builds saved the upstream channel even in our Windows port.
         // Move that known legacy default to this build's channel, preserving
@@ -668,5 +713,29 @@ mod frequency_tests {
         assert_eq!(restored.frequencies, custom);
         assert!(custom.valid());
         assert!(!Frequencies::uniform(101).valid());
+    }
+}
+#[cfg(test)]
+mod company_set_tests {
+    use super::*;
+    #[test]
+    fn saves_and_reloads_named_company_with_individual_colors() {
+        let path = std::env::temp_dir().join(format!("mascot-company-{}.json", std::process::id()));
+        let mut s = Settings::default();
+        s.remember_pets([(3, 0x123456), (9, 0xabcdef)]);
+        s.pet_names.insert(3, "Первый".into());
+        s.company_sets.push(CompanySet {
+            name: "Друзья".into(),
+            pets: s.pet_appearances.clone(),
+            names: s.pet_names.clone(),
+        });
+        s.save(&path).unwrap();
+        let restored = Settings::load(&path).unwrap();
+        assert_eq!(restored.company_sets[0].pets, s.pet_appearances);
+        assert_eq!(restored.company_sets[0].names.get(&3).unwrap(), "Первый");
+        s.company_sets[0].pets[1].id = 3;
+        s.save(&path).unwrap();
+        assert!(Settings::load(&path).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }

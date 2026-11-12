@@ -777,6 +777,21 @@ mod native {
         claude_mascot::preferences::PreferencesState {
             selected_pet_id: pet.id,
             pet_ids: entries.iter().map(|e| e.pet.id).collect(),
+            pet_names: entries
+                .iter()
+                .map(|e| {
+                    settings
+                        .pet_names
+                        .get(&e.pet.id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("Клод №{}", e.pet.id))
+                })
+                .collect(),
+            company_names: settings
+                .company_sets
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
             body_color: pet.body_color,
             fps: settings.target_fps,
             scale: settings.scale,
@@ -1079,6 +1094,7 @@ mod native {
             let mut rebuild = false;
             let mut save = false;
             let mut distinct_colors = false;
+            let mut load_company = None;
             if let Some(panel) = preferences.as_mut() {
                 use claude_mascot::preferences::PreferencesEvent::*;
                 for event in panel.poll() {
@@ -1108,6 +1124,37 @@ mod native {
                                 save = true;
                             }
                         }
+                        RenamePet(name) => {
+                            settings.pet_names.insert(entries[selected].pet.id, name);
+                            save = true;
+                        }
+                        SaveCompany(name) => {
+                            let company = settings::CompanySet {
+                                name: name.clone(),
+                                pets: entries
+                                    .iter()
+                                    .map(|e| settings::PetAppearance {
+                                        id: e.pet.id,
+                                        color: e.pet.body_color,
+                                    })
+                                    .collect(),
+                                names: settings.pet_names.clone(),
+                            };
+                            if let Some(existing) = settings
+                                .company_sets
+                                .iter_mut()
+                                .find(|set| set.name == name)
+                            {
+                                *existing = company;
+                                save = true;
+                            } else if settings.company_sets.len() < 8 {
+                                settings.company_sets.push(company);
+                                save = true;
+                            }
+                        }
+                        LoadCompany(index) => {
+                            load_company = settings.company_sets.get(index).cloned();
+                        }
                         AddPet => {
                             if entries.len() < 8 {
                                 spawn_skins.push(Skin::Claude);
@@ -1122,13 +1169,21 @@ mod native {
                         }
                         ReturnAll => {
                             let area = world.area_at(world.cursor);
+                            let spacing = 90.0 * settings.scale;
+                            let columns =
+                                ((area.w / spacing).floor() as usize).clamp(1, entries.len());
+                            let rows = entries.len().div_ceil(columns);
+                            let row_gap = (area.h / (rows + 1) as f64).min(spacing * 1.5);
+                            let count = entries.len();
                             for (index, entry) in entries.iter_mut().enumerate() {
                                 entry.drag = None;
-                                entry.pet.drag_to(Vec2::new(
-                                    (area.x + area.w * 0.5 + index as f64 * 36.0)
-                                        .clamp(area.x + 30.0, area.right() - 30.0),
-                                    area.y + 80.0,
-                                ));
+                                let row = index / columns;
+                                let in_row = (count - row * columns).min(columns);
+                                let x = area.x + area.w / 2.0 + (index % columns) as f64 * spacing
+                                    - (in_row - 1) as f64 * spacing / 2.0;
+                                entry
+                                    .pet
+                                    .drag_to(Vec2::new(x, area.y + row_gap * (row + 1) as f64));
                                 entry.pet.release(Vec2::default());
                             }
                         }
@@ -1385,6 +1440,41 @@ mod native {
                     }
                     _ => {}
                 }
+            }
+            if let Some(company) = load_company {
+                let area = world.area_at(world.cursor);
+                let mut replacement = Vec::with_capacity(company.pets.len());
+                for (index, saved) in company.pets.iter().enumerate() {
+                    let mut entry = spawn(
+                        Pet::new(
+                            saved.id,
+                            Skin::Claude,
+                            Vec2::new(
+                                (area.x + area.w * 0.5 + index as f64 * 72.0)
+                                    .clamp(area.x + 60.0, area.right() - 60.0),
+                                area.y + 60.0,
+                            ),
+                        ),
+                        &settings,
+                        false,
+                    )?;
+                    entry.pet.body_color = saved.color;
+                    if o.inspect {
+                        entry.host.expose_for_inspection()?;
+                    }
+                    replacement.push(entry);
+                }
+                entries = replacement;
+                entries[0].host = host(&settings, true)?;
+                if o.inspect {
+                    entries[0].host.expose_for_inspection()?;
+                }
+                selected_pet_id = entries[0].pet.id;
+                next_id = entries.iter().map(|e| e.pet.id).max().unwrap_or(0) + 1;
+                settings.pet_names = company.names;
+                remove.clear();
+                spawn_skins.clear();
+                save = true;
             }
             remove.sort_unstable();
             remove.dedup();

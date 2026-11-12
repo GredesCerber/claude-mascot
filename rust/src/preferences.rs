@@ -33,6 +33,12 @@ const ID_NAV_BASE: i32 = 3000;
 const FIXED: usize = usize::MAX;
 const ID_FREQ_BASE: i32 = 2000;
 const ID_PRESET_BASE: i32 = 2010;
+const ID_RENAME_PET: i32 = 2023;
+const ID_NAME_EDIT: i32 = 2024;
+const ID_SET_NAME: i32 = 2025;
+const ID_SAVE_SET: i32 = 2026;
+const ID_LOAD_SET: i32 = 2027;
+const ID_SET_COMBO: i32 = 2028;
 const ID_ADD_PET: i32 = 2020;
 const ID_REMOVE_PET: i32 = 2021;
 const ID_RETURN_ALL: i32 = 2022;
@@ -77,6 +83,8 @@ const FW_NORMAL: i32 = 400;
 pub struct PreferencesState {
     pub selected_pet_id: u64,
     pub pet_ids: Vec<u64>,
+    pub pet_names: Vec<String>,
+    pub company_names: Vec<String>,
     /// RGB in the low 24 bits, matching the application's color setting.
     pub body_color: u32,
     pub fps: u32,
@@ -101,6 +109,8 @@ impl Default for PreferencesState {
         Self {
             selected_pet_id: 1,
             pet_ids: vec![1],
+            pet_names: vec!["Клод №1".into()],
+            company_names: Vec::new(),
             body_color: 0xD97757,
             fps: 60,
             scale: 1.0,
@@ -129,6 +139,9 @@ pub enum PreferencesEvent {
     SetScale(f64),
     SetIntensity(u8),
     SetFrequencies(Frequencies),
+    RenamePet(String),
+    SaveCompany(String),
+    LoadCompany(usize),
     AddPet,
     RemovePet,
     ReturnAll,
@@ -187,6 +200,8 @@ struct WindowState {
     client_height: i32,
     pet_combo: HWND,
     pet_items: Vec<u64>,
+    pet_labels: Vec<String>,
+    company_labels: Vec<String>,
     fps_combo: HWND,
     scale_combo: HWND,
     intensity: HWND,
@@ -229,6 +244,8 @@ impl WindowState {
             client_height: 0,
             pet_combo: null_mut(),
             pet_items: Vec::new(),
+            pet_labels: Vec::new(),
+            company_labels: Vec::new(),
             fps_combo: null_mut(),
             scale_combo: null_mut(),
             intensity: null_mut(),
@@ -775,7 +792,38 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     button(s, "Добавить", ID_ADD_PET, 20, 150, 160)?;
     button(s, "Убрать выбранного", ID_REMOVE_PET, 200, 150, 200)?;
     button(s, "Вернуть всех на экран", ID_RETURN_ALL, 20, 190, 240)?;
-    y = 250;
+    label(s, "Имя выбранного", 20, 235, 150)?;
+    add_child(
+        s,
+        "EDIT",
+        "",
+        ID_NAME_EDIT,
+        WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
+        WS_EX_CLIENTEDGE,
+        175,
+        230,
+        200,
+        28,
+    );
+    button(s, "Переименовать", ID_RENAME_PET, 390, 230, 160)?;
+    label(s, "Название набора", 20, 278, 150)?;
+    add_child(
+        s,
+        "EDIT",
+        "",
+        ID_SET_NAME,
+        WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
+        WS_EX_CLIENTEDGE,
+        175,
+        273,
+        200,
+        28,
+    );
+    button(s, "Сохранить", ID_SAVE_SET, 390, 273, 160)?;
+    let sets = combo(s, ID_SET_COMBO, 20, 316, 350)?;
+    let _ = sets;
+    button(s, "Загрузить", ID_LOAD_SET, 390, 316, 160)?;
+    y = 370;
     heading(s, "Расстояние между питомцами", 20, y, 400)?;
     y += 30;
     label(s, "Минимальный свободный зазор (px)", 20, y, 300)?;
@@ -819,7 +867,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         0,
         0,
         20,
-        354,
+        474,
         590,
         22,
     );
@@ -893,7 +941,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
             ID_REACTIONS => (1, 510),
             ID_ACTIVITIES => (1, 547),
             ID_PAUSED => (1, 584),
-            ID_SOCIAL => (3, 390),
+            ID_SOCIAL => (3, 510),
             ID_DESKTOP => (2, 230),
             ID_UI_PERCHES => (2, 267),
             ID_AUTO_UPDATES => (6, 190),
@@ -1047,12 +1095,27 @@ unsafe fn filter_activities(s: &mut WindowState, query: &str) {
 
 unsafe fn sync_controls(s: &mut WindowState, force: bool) {
     let focused = GetFocus();
-    if force || (focused != s.pet_combo && s.pet_items != s.data.pet_ids) {
+    if force
+        || (focused != s.pet_combo
+            && (s.pet_items != s.data.pet_ids || s.pet_labels != s.data.pet_names))
+    {
         SendMessageW(s.pet_combo, CB_RESETCONTENT, 0, 0);
-        for id in &s.data.pet_ids {
-            combo_item(s.pet_combo, &format!("Клод №{id}"));
+        for name in &s.data.pet_names {
+            combo_item(s.pet_combo, name);
         }
         s.pet_items.clone_from(&s.data.pet_ids);
+        s.pet_labels.clone_from(&s.data.pet_names);
+    }
+    if s.company_labels != s.data.company_names {
+        let sets = GetDlgItem(s.hwnd, ID_SET_COMBO);
+        SendMessageW(sets, CB_RESETCONTENT, 0, 0);
+        for name in &s.data.company_names {
+            combo_item(sets, name);
+        }
+        s.company_labels.clone_from(&s.data.company_names);
+        if !s.company_labels.is_empty() {
+            SendMessageW(sets, CB_SETCURSEL, 0, 0);
+        }
     }
     if force || focused != s.pet_combo {
         let selected = s
@@ -1421,6 +1484,35 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         }
     }
     match (id, code) {
+        (ID_RENAME_PET, BN_CLICKED) | (ID_SAVE_SET, BN_CLICKED) => {
+            let edit = GetDlgItem(
+                s.hwnd,
+                if id == ID_RENAME_PET {
+                    ID_NAME_EDIT
+                } else {
+                    ID_SET_NAME
+                },
+            );
+            let mut value = [0u16; 129];
+            let n = GetWindowTextW(edit, value.as_mut_ptr(), value.len() as i32);
+            let name = String::from_utf16_lossy(&value[..n.max(0) as usize])
+                .trim()
+                .to_owned();
+            if !name.is_empty() && name.chars().count() <= 64 && !name.chars().any(char::is_control)
+            {
+                s.events.push(if id == ID_RENAME_PET {
+                    PreferencesEvent::RenamePet(name)
+                } else {
+                    PreferencesEvent::SaveCompany(name)
+                });
+            }
+        }
+        (ID_LOAD_SET, BN_CLICKED) => {
+            let index = SendMessageW(GetDlgItem(s.hwnd, ID_SET_COMBO), CB_GETCURSEL, 0, 0);
+            if index >= 0 {
+                s.events.push(PreferencesEvent::LoadCompany(index as usize));
+            }
+        }
         (ID_ADD_PET, BN_CLICKED) => s.events.push(PreferencesEvent::AddPet),
         (ID_REMOVE_PET, BN_CLICKED) => s.events.push(PreferencesEvent::RemovePet),
         (ID_RETURN_ALL, BN_CLICKED) => s.events.push(PreferencesEvent::ReturnAll),
@@ -1776,6 +1868,45 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn names_and_companies_dispatch_control_values() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            set_text(GetDlgItem(panel.hwnd, ID_NAME_EDIT), "Рыжик");
+            handle_command(
+                &mut panel.state,
+                ID_RENAME_PET as usize,
+                GetDlgItem(panel.hwnd, ID_RENAME_PET) as isize,
+            );
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::RenamePet("Рыжик".into()))
+            );
+            set_text(GetDlgItem(panel.hwnd, ID_SET_NAME), "Друзья");
+            handle_command(
+                &mut panel.state,
+                ID_SAVE_SET as usize,
+                GetDlgItem(panel.hwnd, ID_SAVE_SET) as isize,
+            );
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::SaveCompany("Друзья".into()))
+            );
+            panel.sync(PreferencesState {
+                company_names: vec!["Друзья".into()],
+                ..PreferencesState::default()
+            });
+            handle_command(
+                &mut panel.state,
+                ID_LOAD_SET as usize,
+                GetDlgItem(panel.hwnd, ID_LOAD_SET) as isize,
+            );
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::LoadCompany(0))
+            );
+        }
+    }
     #[test]
     fn distinct_colors_button_dispatches_only_on_click() {
         let mut panel = PreferencesWindow::new().unwrap();

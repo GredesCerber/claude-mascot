@@ -6,3 +6,7 @@
 - Native preferences events update the model and save settings. Changes are in `preferences.rs`, `settings.rs`, `main.rs`, `engine.rs`, `engine_exploration.rs`, and `dialogue.rs`. Engine overlaps the perches worker.
 - `cargo fmt` and `cargo clippy --all-targets -- -D warnings` passed. Full `cargo test` was running, with lib (120 passed, 1 ignored), binary (3 passed), and numerous integration suites including speech RNG passing. Run the full suite after integration and check the final result; a linker collision occurred only when two test invocations overlapped.
 - No desktop automation or user config changes. User's pre-existing install/uninstall edits were not staged.
+
+## Second changeset
+
+Names are kept in `Settings.pet_names` keyed by ID; up to eight `CompanySet` records retain a name, roster IDs, colors and names. The Friends page provides rename, save/replace by name and load; loading rebuilds native hosts and makes the first loaded pet the tray owner. Empty names, control characters, names over 64 characters, duplicate IDs and invalid colors are rejected at load; sets are limited to eight. The Return All grid accounts for scale, available work-area width and number of pets. Three frequency regression tests cover independent exploration, disabled automatic cursor pursuit with manual chase, and speech RNG isolation. UI event and serialized set tests pass. The combo has no delete-set button: an existing set can be overwritten by saving under the same name. The ninth distinct set is not added; UI currently does not explain this limit.
