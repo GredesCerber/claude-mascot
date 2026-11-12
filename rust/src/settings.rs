@@ -10,6 +10,44 @@ pub struct PetAppearance {
     pub color: u32,
 }
 
+/// Relative automatic behavior rates. 50 preserves the normal rate, 0 disables it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Frequencies {
+    pub wandering: u8,
+    pub social: u8,
+    pub exploration: u8,
+    pub cursor: u8,
+    pub speech: u8,
+}
+impl Default for Frequencies {
+    fn default() -> Self {
+        Self::uniform(50)
+    }
+}
+impl Frequencies {
+    pub const fn uniform(value: u8) -> Self {
+        Self {
+            wandering: value,
+            social: value,
+            exploration: value,
+            cursor: value,
+            speech: value,
+        }
+    }
+    pub fn valid(self) -> bool {
+        [
+            self.wandering,
+            self.social,
+            self.exploration,
+            self.cursor,
+            self.speech,
+        ]
+        .into_iter()
+        .all(|v| v <= 100)
+    }
+}
+
 /// Release channel shared by native Windows builds and portable simulation.
 pub const DEFAULT_UPDATE_REPOSITORY: &str = match option_env!("MASCOT_UPDATE_REPO") {
     Some(repository) => repository,
@@ -30,6 +68,7 @@ pub struct Settings {
     pub auto_activities: bool,
     pub auto_reactions: bool,
     pub desktop_perches: bool,
+    pub ui_perches: bool,
     /// Free space between visible body edges, in scale-1 pixels.
     pub personal_space_min: f64,
     pub personal_space_max: f64,
@@ -37,6 +76,7 @@ pub struct Settings {
     pub pet_appearances: Vec<PetAppearance>,
     /// Frequency of optional activities, from quiet (0) to lively (100).
     pub activity_intensity: u8,
+    pub frequencies: Frequencies,
     pub paused: bool,
     pub auto_updates: bool,
     /// Download/install without a prompt only after explicit opt-in.
@@ -58,11 +98,13 @@ impl Default for Settings {
             auto_activities: true,
             auto_reactions: true,
             desktop_perches: true,
+            ui_perches: false,
             personal_space_min: 24.0,
             personal_space_max: 96.0,
             body_color: crate::palette::DEFAULT_BODY_COLOR,
             pet_appearances: Vec::new(),
             activity_intensity: 50,
+            frequencies: Frequencies::default(),
             paused: false,
             auto_updates: true,
             auto_install_updates: false,
@@ -134,7 +176,10 @@ impl Settings {
         if !valid_personal_space(value.personal_space_min, value.personal_space_max) {
             return Err("Personal space must be 8..256 minimum, up to 512 maximum, with a range of at least 8 pixels".into());
         }
-        if value.body_color > 0xFFFFFF || value.activity_intensity > 100 {
+        if value.body_color > 0xFFFFFF
+            || value.activity_intensity > 100
+            || !value.frequencies.valid()
+        {
             return Err("Color must be a 24-bit RGB value; intensity must be 0..100".into());
         }
         let mut ids = std::collections::BTreeSet::new();
@@ -592,5 +637,36 @@ mod pet_appearance_tests {
         let colors: std::collections::BTreeSet<_> =
             (0..8).map(crate::palette::distinct_color).collect();
         assert_eq!(colors.len(), 8);
+    }
+}
+
+#[cfg(test)]
+mod frequency_tests {
+    use super::*;
+    #[test]
+    fn legacy_and_custom_frequencies_round_trip() {
+        let legacy: Settings = serde_json::from_str(
+            r#"{"activity_intensity":75,"pet_appearances":[{"id":3,"color":1193046}]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.frequencies, Frequencies::uniform(50));
+        assert!(!legacy.ui_perches);
+        assert_eq!(legacy.startup_pets(None)[0].color, 0x123456);
+        let custom = Frequencies {
+            wandering: 0,
+            social: 25,
+            exploration: 50,
+            cursor: 75,
+            speech: 100,
+        };
+        let settings = Settings {
+            frequencies: custom,
+            ..legacy
+        };
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.frequencies, custom);
+        assert!(custom.valid());
+        assert!(!Frequencies::uniform(101).valid());
     }
 }

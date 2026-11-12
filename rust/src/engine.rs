@@ -104,6 +104,7 @@ pub struct Pet {
     pub skin: Skin,
     pub body_color: u32,
     pub activity_intensity: u8,
+    pub frequencies: crate::settings::Frequencies,
     pub pos: Vec2,
     pub vel: Vec2,
     pub state: State,
@@ -252,6 +253,7 @@ impl Pet {
             skin,
             body_color: crate::palette::DEFAULT_BODY_COLOR,
             activity_intensity: 50,
+            frequencies: crate::settings::Frequencies::default(),
             pos,
             vel: Vec2::default(),
             state: State::Fall,
@@ -1179,8 +1181,11 @@ impl Pet {
                     && self.behavior_velocity.is_some_and(|v| v.abs() <= 3.0)
                     && !world.windows.is_empty();
                 if settled
-                    && self
-                        .random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0)
+                    && self.random_chance(
+                        dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0
+                            * self.frequencies.exploration as f64
+                            / 50.0,
+                    )
                     && self.try_start_exploration(world)
                 {
                     return;
@@ -1190,6 +1195,7 @@ impl Pet {
             }
             let scheduled_decision = self.state_duration > 0.0
                 && self.activity_intensity > 0
+                && self.frequencies.wandering > 0
                 && self.social_motion.is_none()
                 && self.behavior_velocity_ttl <= 0.0;
             if scheduled_decision && self.state_time < self.state_duration {
@@ -1197,8 +1203,27 @@ impl Pet {
                 return;
             }
             let decision_due = scheduled_decision
-                || self.random_chance(dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0);
-            if decision_due && !self.try_start_exploration(world) {
+                || (self.frequencies.wandering > 0
+                    && self.random_chance(
+                        dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0
+                            * self.frequencies.wandering as f64
+                            / 50.0,
+                    ));
+            let explore_due =
+                if self.frequencies.wandering == 50 && self.frequencies.exploration == 50 {
+                    decision_due
+                } else {
+                    self.frequencies.exploration > 0
+                        && self.random_chance(
+                            dt * 0.16 * self.activity_intensity.min(100) as f64 / 50.0
+                                * self.frequencies.exploration as f64
+                                / 50.0,
+                        )
+                };
+            if explore_due && self.try_start_exploration(world) {
+                return;
+            }
+            if decision_due {
                 if scheduled_decision {
                     self.facing = if self.random() < 0.5 { -1.0 } else { 1.0 };
                 }
@@ -2091,10 +2116,16 @@ impl Pet {
             && eligible
             && self.cursor_play_cooldown <= 0.0
             && self.activity_intensity > 0
+            && self.frequencies.cursor > 0
             && self.behavior_manual_lock <= 0.0
             && self.social_motion.is_none()
             && !world.fullscreen_active()
-            && self.random_chance(dt / 90.0 * (self.activity_intensity.min(100) as f64 / 50.0))
+            && self.random_chance(
+                dt / 90.0
+                    * (self.activity_intensity.min(100) as f64 / 50.0)
+                    * self.frequencies.cursor as f64
+                    / 50.0,
+            )
         {
             self.auto_pursuit = true;
             self.pursuit_stationary = 0.0;
@@ -2428,19 +2459,23 @@ impl Pet {
         self.dialogue = Dialogue::new(seed);
     }
     pub fn speak(&mut self, event: SpeechEvent, duration: f64) {
-        if let Some(text) = self.dialogue.event(event, self.time) {
-            self.bubble = Some(text.to_owned());
-            self.bubble_time = if duration.is_finite() {
-                duration.clamp(0.6, 4.0)
-            } else {
-                2.0
-            };
+        if self.dialogue.allow_frequency(self.frequencies.speech) {
+            if let Some(text) = self.dialogue.event(event, self.time) {
+                self.bubble = Some(text.to_owned());
+                self.bubble_time = if duration.is_finite() {
+                    duration.clamp(0.6, 4.0)
+                } else {
+                    2.0
+                };
+            }
         }
     }
     fn say_activity(&mut self, id: crate::activities::ActivityId, duration: f64) {
-        if let Some(text) = self.dialogue.activity(id, self.time) {
-            self.bubble = Some(text.to_owned());
-            self.bubble_time = duration.clamp(0.6, 4.0);
+        if self.dialogue.allow_frequency(self.frequencies.speech) {
+            if let Some(text) = self.dialogue.activity(id, self.time) {
+                self.bubble = Some(text.to_owned());
+                self.bubble_time = duration.clamp(0.6, 4.0);
+            }
         }
     }
     fn speed(&self) -> f64 {

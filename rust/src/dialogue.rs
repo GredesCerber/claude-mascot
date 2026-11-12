@@ -400,6 +400,7 @@ pub struct Dialogue {
     last_key: Option<usize>,
     last_time: f64,
     ambient_after: f64,
+    frequency: u8,
 }
 impl Dialogue {
     pub fn new(pet_id: u64) -> Self {
@@ -413,7 +414,21 @@ impl Dialogue {
             last_key: None,
             last_time: f64::NEG_INFINITY,
             ambient_after: 0.0,
+            frequency: 50,
         }
+    }
+    pub fn allow_frequency(&mut self, frequency: u8) -> bool {
+        self.frequency = frequency;
+        if frequency >= 50 {
+            return true;
+        }
+        if frequency == 0 {
+            return false;
+        }
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        self.rng % 50 < frequency as u64
     }
     pub fn event(&mut self, event: SpeechEvent, now: f64) -> Option<&'static str> {
         self.select(event as usize, event.lines(), now, event.ambient())
@@ -455,7 +470,7 @@ impl Dialogue {
         self.recent_at = (self.recent_at + 1) % 4;
         self.last_key = Some(key);
         self.last_time = now;
-        self.ambient_after = now + 4.0;
+        self.ambient_after = now + 200.0 / self.frequency.max(1) as f64;
         Some(text)
     }
 }

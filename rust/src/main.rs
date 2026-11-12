@@ -781,6 +781,7 @@ mod native {
             fps: settings.target_fps,
             scale: settings.scale,
             intensity: settings.activity_intensity,
+            frequencies: settings.frequencies,
             min_gap: settings.personal_space_min,
             max_gap: settings.personal_space_max,
             show_mood: settings.show_mood,
@@ -789,6 +790,7 @@ mod native {
             auto_activities: settings.auto_activities,
             social_enabled: settings.social_enabled,
             desktop_perches: settings.desktop_perches,
+            ui_perches: settings.ui_perches,
             paused: settings.paused,
             auto_updates: settings.auto_updates,
             auto_install_updates: settings.auto_install_updates,
@@ -1099,6 +1101,40 @@ mod native {
                             settings.activity_intensity = value.min(100);
                             save = true;
                         }
+                        SetFrequencies(value) => {
+                            if value.valid() {
+                                settings.frequencies = value;
+                                save = true;
+                            }
+                        }
+                        AddPet => {
+                            if entries.len() < 8 {
+                                spawn_skins.push(Skin::Claude);
+                                save = true;
+                            }
+                        }
+                        RemovePet => {
+                            if entries.len() > 1 {
+                                remove.push(selected);
+                                save = true;
+                            }
+                        }
+                        ReturnAll => {
+                            let area = world.area_at(world.cursor);
+                            for (index, entry) in entries.iter_mut().enumerate() {
+                                entry.drag = None;
+                                entry.pet.drag_to(Vec2::new(
+                                    (area.x + area.w * 0.5 + index as f64 * 36.0)
+                                        .clamp(area.x + 30.0, area.right() - 30.0),
+                                    area.y + 80.0,
+                                ));
+                                entry.pet.release(Vec2::default());
+                            }
+                        }
+                        ToggleUiPerches(value) => {
+                            settings.ui_perches = value;
+                            save = true;
+                        }
                         SetSpacing(min, max) => {
                             if settings::valid_personal_space(min, max) {
                                 settings.personal_space_min = min;
@@ -1393,6 +1429,9 @@ mod native {
                         &settings,
                         false,
                     )?);
+                    entries.last_mut().unwrap().pet.body_color =
+                        claude_mascot::palette::distinct_color(entries.len() - 1);
+                    selected_pet_id = next_id;
                     next_id += 1;
                     if o.inspect {
                         entries.last().unwrap().host.expose_for_inspection()?;
@@ -1472,6 +1511,7 @@ mod native {
                 entry.pet.auto_reactions = settings.auto_reactions;
                 entry.pet.display_scale = settings.scale;
                 entry.pet.activity_intensity = settings.activity_intensity;
+                entry.pet.frequencies = settings.frequencies;
             }
             social.update(0.0, entries.iter_mut().map(|entry| &mut entry.pet), &world);
             let hidden = settings.hide_fullscreen && world.fullscreen_active();

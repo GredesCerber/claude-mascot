@@ -1,6 +1,7 @@
 //! Modeless native preferences window. It owns only controls and a small event
 //! queue; the application frame loop remains the sole message pump.
 use crate::activities::CATALOG;
+use crate::settings::Frequencies;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
@@ -30,6 +31,11 @@ const TITLE: &[u16] = &[
 ];
 const ID_NAV_BASE: i32 = 3000;
 const FIXED: usize = usize::MAX;
+const ID_FREQ_BASE: i32 = 2000;
+const ID_PRESET_BASE: i32 = 2010;
+const ID_ADD_PET: i32 = 2020;
+const ID_REMOVE_PET: i32 = 2021;
+const ID_RETURN_ALL: i32 = 2022;
 const ID_PET: i32 = 100;
 const ID_FPS: i32 = 101;
 const ID_SCALE: i32 = 102;
@@ -42,6 +48,7 @@ const ID_REACTIONS: i32 = 112;
 const ID_ACTIVITIES: i32 = 113;
 const ID_SOCIAL: i32 = 114;
 const ID_DESKTOP: i32 = 115;
+const ID_UI_PERCHES: i32 = 119;
 const ID_PAUSED: i32 = 116;
 const ID_AUTO_UPDATES: i32 = 117;
 const ID_AUTO_INSTALL: i32 = 118;
@@ -75,6 +82,7 @@ pub struct PreferencesState {
     pub fps: u32,
     pub scale: f64,
     pub intensity: u8,
+    pub frequencies: Frequencies,
     pub min_gap: f64,
     pub max_gap: f64,
     pub show_mood: bool,
@@ -83,6 +91,7 @@ pub struct PreferencesState {
     pub auto_activities: bool,
     pub social_enabled: bool,
     pub desktop_perches: bool,
+    pub ui_perches: bool,
     pub paused: bool,
     pub auto_updates: bool,
     pub auto_install_updates: bool,
@@ -96,6 +105,7 @@ impl Default for PreferencesState {
             fps: 60,
             scale: 1.0,
             intensity: 50,
+            frequencies: Frequencies::default(),
             min_gap: 24.0,
             max_gap: 96.0,
             show_mood: true,
@@ -104,6 +114,7 @@ impl Default for PreferencesState {
             auto_activities: true,
             social_enabled: true,
             desktop_perches: true,
+            ui_perches: false,
             paused: false,
             auto_updates: true,
             auto_install_updates: false,
@@ -117,6 +128,10 @@ pub enum PreferencesEvent {
     SetFps(u32),
     SetScale(f64),
     SetIntensity(u8),
+    SetFrequencies(Frequencies),
+    AddPet,
+    RemovePet,
+    ReturnAll,
     SetSpacing(f64, f64),
     ToggleMood(bool),
     ToggleBubbles(bool),
@@ -124,6 +139,7 @@ pub enum PreferencesEvent {
     ToggleActivities(bool),
     ToggleSocial(bool),
     ToggleDesktop(bool),
+    ToggleUiPerches(bool),
     TogglePaused(bool),
     ToggleAutoUpdates(bool),
     ToggleAutoInstall(bool),
@@ -703,6 +719,34 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     }
     SendMessageW(s.intensity, TBM_SETRANGEMIN, 1, 0);
     SendMessageW(s.intensity, TBM_SETRANGEMAX, 1, 100);
+    for (index, title) in ["Спокойные", "Живые", "Хаос"].iter().enumerate() {
+        button(
+            s,
+            title,
+            ID_PRESET_BASE + index as i32,
+            20 + index as i32 * 180,
+            230,
+            165,
+        )?;
+    }
+    for (index, title) in [
+        "Прогулки",
+        "Игры с друзьями",
+        "Исследование и лазание",
+        "Погоня за курсором",
+        "Речь",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let row = 280 + index as i32 * 42;
+        label(s, title, 20, row, 280)?;
+        let control = combo(s, ID_FREQ_BASE + index as i32, 320, row, 220)?;
+        for item in ["Выключено", "Редко", "Обычно", "Часто", "Очень часто"]
+        {
+            combo_item(control, item);
+        }
+    }
     s.build_page = 4;
     y = 150;
     heading(s, "Производительность", 20, 112, 400)?;
@@ -727,6 +771,11 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     )?;
     s.build_page = 3;
     y = 112;
+    heading(s, "Компания", 20, y, 400)?;
+    button(s, "Добавить", ID_ADD_PET, 20, 150, 160)?;
+    button(s, "Убрать выбранного", ID_REMOVE_PET, 200, 150, 200)?;
+    button(s, "Вернуть всех на экран", ID_RETURN_ALL, 20, 190, 240)?;
+    y = 250;
     heading(s, "Расстояние между питомцами", 20, y, 400)?;
     y += 30;
     label(s, "Минимальный свободный зазор (px)", 20, y, 300)?;
@@ -770,7 +819,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         0,
         0,
         20,
-        216,
+        354,
         590,
         22,
     );
@@ -830,6 +879,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         (ID_ACTIVITIES, "Автоматические занятия"),
         (ID_SOCIAL, "Взаимодействия между питомцами"),
         (ID_DESKTOP, "Прыжки на ярлыки"),
+        (ID_UI_PERCHES, "Опоры на элементах окон"),
         (ID_PAUSED, "Пауза"),
         (ID_AUTO_UPDATES, "Проверять обновления автоматически"),
         (
@@ -840,11 +890,12 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         let (page, top) = match id {
             ID_MOOD => (0, 270),
             ID_BUBBLES => (0, 307),
-            ID_REACTIONS => (1, 220),
-            ID_ACTIVITIES => (1, 257),
-            ID_PAUSED => (1, 294),
-            ID_SOCIAL => (3, 250),
+            ID_REACTIONS => (1, 510),
+            ID_ACTIVITIES => (1, 547),
+            ID_PAUSED => (1, 584),
+            ID_SOCIAL => (3, 390),
             ID_DESKTOP => (2, 230),
+            ID_UI_PERCHES => (2, 267),
             ID_AUTO_UPDATES => (6, 190),
             _ => (6, 227),
         };
@@ -1047,6 +1098,34 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
         s.intensity_value,
         &format!("{}%", s.data.intensity.min(100)),
     );
+    for (index, value) in [
+        s.data.frequencies.wandering,
+        s.data.frequencies.social,
+        s.data.frequencies.exploration,
+        s.data.frequencies.cursor,
+        s.data.frequencies.speech,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let control = GetDlgItem(s.hwnd, ID_FREQ_BASE + index as i32);
+        if force || focused != control {
+            SendMessageW(
+                control,
+                CB_SETCURSEL,
+                ((*value as usize + 12) / 25).min(4),
+                0,
+            );
+        }
+    }
+    EnableWindow(
+        GetDlgItem(s.hwnd, ID_ADD_PET),
+        (s.data.pet_ids.len() < 8) as i32,
+    );
+    EnableWindow(
+        GetDlgItem(s.hwnd, ID_REMOVE_PET),
+        (s.data.pet_ids.len() > 1) as i32,
+    );
     for (id, value) in [
         (ID_MOOD, s.data.show_mood),
         (ID_BUBBLES, s.data.show_bubbles),
@@ -1054,6 +1133,7 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
         (ID_ACTIVITIES, s.data.auto_activities),
         (ID_SOCIAL, s.data.social_enabled),
         (ID_DESKTOP, s.data.desktop_perches),
+        (ID_UI_PERCHES, s.data.ui_perches),
         (ID_PAUSED, s.data.paused),
         (ID_AUTO_UPDATES, s.data.auto_updates),
         (ID_AUTO_INSTALL, s.data.auto_install_updates),
@@ -1341,6 +1421,28 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         }
     }
     match (id, code) {
+        (ID_ADD_PET, BN_CLICKED) => s.events.push(PreferencesEvent::AddPet),
+        (ID_REMOVE_PET, BN_CLICKED) => s.events.push(PreferencesEvent::RemovePet),
+        (ID_RETURN_ALL, BN_CLICKED) => s.events.push(PreferencesEvent::ReturnAll),
+        (id, BN_CLICKED) if (ID_PRESET_BASE..ID_PRESET_BASE + 3).contains(&id) => {
+            s.data.frequencies =
+                Frequencies::uniform([25, 75, 100][(id - ID_PRESET_BASE) as usize]);
+            s.events
+                .push(PreferencesEvent::SetFrequencies(s.data.frequencies));
+            sync_controls(s, true);
+        }
+        (id, CBN_SELCHANGE) if (ID_FREQ_BASE..ID_FREQ_BASE + 5).contains(&id) => {
+            let value = (SendMessageW(control, CB_GETCURSEL, 0, 0).clamp(0, 4) * 25) as u8;
+            match id - ID_FREQ_BASE {
+                0 => s.data.frequencies.wandering = value,
+                1 => s.data.frequencies.social = value,
+                2 => s.data.frequencies.exploration = value,
+                3 => s.data.frequencies.cursor = value,
+                _ => s.data.frequencies.speech = value,
+            }
+            s.events
+                .push(PreferencesEvent::SetFrequencies(s.data.frequencies));
+        }
         (ID_PAUSE_ALL, BN_CLICKED) => {
             s.data.paused = !s.data.paused;
             s.events.push(PreferencesEvent::TogglePaused(s.data.paused));
@@ -1418,6 +1520,7 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
                 || id == ID_ACTIVITIES
                 || id == ID_SOCIAL
                 || id == ID_DESKTOP
+                || id == ID_UI_PERCHES
                 || id == ID_PAUSED
                 || id == ID_AUTO_UPDATES
                 || id == ID_AUTO_INSTALL =>
@@ -1443,6 +1546,10 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
                 ID_SOCIAL => {
                     s.data.social_enabled = value;
                     s.events.push(PreferencesEvent::ToggleSocial(value));
+                }
+                ID_UI_PERCHES => {
+                    s.data.ui_perches = value;
+                    s.events.push(PreferencesEvent::ToggleUiPerches(value));
                 }
                 ID_DESKTOP => {
                     s.data.desktop_perches = value;

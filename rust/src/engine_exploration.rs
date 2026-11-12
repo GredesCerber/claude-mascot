@@ -87,6 +87,7 @@ impl Pet {
                 && self.behavior_velocity.is_some_and(|v| v.abs() > 3.0))
             || !self.auto_activities
             || self.activity_intensity == 0
+            || self.frequencies.exploration == 0
             || self.dragging
             || self.chase
             || self.social.is_some()
@@ -225,6 +226,7 @@ impl Pet {
             || route.age > route.budget
             || !self.auto_activities
             || self.activity_intensity == 0
+            || self.frequencies.exploration == 0
             || self.dragging
             || self.chase
             || self.social.is_some()
