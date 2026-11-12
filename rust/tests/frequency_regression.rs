@@ -5,6 +5,7 @@ use claude_mascot::{
 };
 fn world() -> World {
     World {
+        ui_surfaces: Vec::new(),
         windows: vec![WindowInfo {
             id: 207,
             rect: Rect::new(100.0, 400.0, 800.0, 180.0),

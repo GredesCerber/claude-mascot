@@ -865,8 +865,11 @@ mod native {
         let mut renderer = Renderer::new()?;
         let desktop = claude_mascot::desktop::DesktopMonitor::new();
         desktop.set_enabled(settings.desktop_perches);
+        let ui_perches = claude_mascot::ui_perches::UiPerchMonitor::new();
+        ui_perches.set_enabled(settings.ui_perches);
         let mut world = platform::snapshot();
         desktop.apply(&mut world);
+        world.ui_surfaces = ui_perches.snapshot(&world);
         let area = world.area_at(world.cursor);
         let media = claude_mascot::media::MediaMonitor::new();
         let updates = UpdateService::new_deferred(
@@ -980,6 +983,7 @@ mod native {
             if now.duration_since(world_at) >= interval {
                 world = platform::snapshot();
                 desktop.apply(&mut world);
+                world.ui_surfaces = ui_perches.snapshot(&world);
                 media.apply(&mut world);
                 world_at = now;
                 snapshots += 1;
@@ -1189,6 +1193,8 @@ mod native {
                         }
                         ToggleUiPerches(value) => {
                             settings.ui_perches = value;
+                            ui_perches.set_enabled(value);
+                            world.ui_surfaces = ui_perches.snapshot(&world);
                             save = true;
                         }
                         SetSpacing(min, max) => {
@@ -1236,6 +1242,7 @@ mod native {
                             desktop.set_enabled(value);
                             world = platform::snapshot();
                             desktop.apply(&mut world);
+                            world.ui_surfaces = ui_perches.snapshot(&world);
                             save = true;
                         }
                         ChooseColor => commands.push((selected, 188)),
@@ -1330,6 +1337,7 @@ mod native {
                         // Refresh immediately so removed icon supports disappear on the next step.
                         world = platform::snapshot();
                         desktop.apply(&mut world);
+                        world.ui_surfaces = ui_perches.snapshot(&world);
                         save = true;
                     }
                     85..=87 => {
