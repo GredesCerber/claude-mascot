@@ -1190,6 +1190,15 @@ mod native {
                                     .drag_to(Vec2::new(x, area.y + row_gap * (row + 1) as f64));
                                 entry.pet.release(Vec2::default());
                             }
+                            // Rescue is a relocation, not a swept physical impact.
+                            contacts = claude_mascot::contacts::ContactCoordinator::new();
+                            social = claude_mascot::social::SocialCoordinator::new();
+                            social.enabled = settings.social_enabled;
+                            social.frequency = settings.frequencies.social;
+                            behavior = BehaviorCoordinator::new(behavior_settings(
+                                settings.personal_space_min,
+                                settings.personal_space_max,
+                            ));
                         }
                         ToggleUiPerches(value) => {
                             settings.ui_perches = value;
@@ -1480,6 +1489,15 @@ mod native {
                 selected_pet_id = entries[0].pet.id;
                 next_id = entries.iter().map(|e| e.pet.id).max().unwrap_or(0) + 1;
                 settings.pet_names = company.names;
+                // Loaded identities must not inherit old trajectories or contacts.
+                contacts = claude_mascot::contacts::ContactCoordinator::new();
+                social = claude_mascot::social::SocialCoordinator::new();
+                social.enabled = settings.social_enabled;
+                social.frequency = settings.frequencies.social;
+                behavior = BehaviorCoordinator::new(behavior_settings(
+                    settings.personal_space_min,
+                    settings.personal_space_max,
+                ));
                 remove.clear();
                 spawn_skins.clear();
                 save = true;
