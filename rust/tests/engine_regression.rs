@@ -4,6 +4,7 @@ use claude_mascot::{Rect, Vec2, WindowInfo, World};
 fn world() -> World {
     World {
         windows: vec![],
+        ui_surfaces: vec![],
         work_areas: vec![Rect::new(0.0, 0.0, 1000.0, 700.0)],
         cursor: Vec2::new(500.0, 300.0),
         idle_seconds: 0.0,

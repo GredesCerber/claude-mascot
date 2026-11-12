@@ -169,6 +169,7 @@ pub struct Pet {
     pub(crate) state_duration: f64,
     pub(crate) prior_windows: Vec<(usize, Rect)>,
     pub(crate) surface_prev: Option<Rect>,
+    ui_surface: Option<crate::UiSurface>,
     pub(crate) surface_id: Option<usize>,
     pub(crate) shake_samples: VecDeque<(f64, Vec2)>,
     pub(crate) hold_offset: Vec2,
@@ -310,6 +311,7 @@ impl Pet {
             state_duration: 0.0,
             prior_windows: Vec::new(),
             surface_prev: None,
+            ui_surface: None,
             surface_id: None,
             shake_samples: VecDeque::new(),
             hold_offset: Vec2::default(),
@@ -453,6 +455,7 @@ impl Pet {
 
         self.update_reactions(dt, world);
 
+        self.update_ui_surface(world);
         self.update_window_motion(world);
         self.update_idle_sleep(world);
         self.update_idle_animation(dt, world);
@@ -511,7 +514,9 @@ impl Pet {
             // Sleeping pets still stand on the desktop floor. The early
             // return below skips update_motion, so keep floor support in sync
             // when the taskbar or monitor work area changes.
-            if let Some(i) = self.current_surface_index(world) {
+            if self.ui_surface.is_some() {
+                // UI support was refreshed before this early return.
+            } else if let Some(i) = self.current_surface_index(world) {
                 self.follow_surface(i, world);
             } else {
                 self.surface = None;
@@ -1046,7 +1051,28 @@ impl Pet {
                 }
             }
             if self.vel.y >= 0.0 {
-                if let Some((ground_y, surface)) = self.find_landing(old.y, world) {
+                let ordinary = self.find_landing(old.y, world);
+                let ui = world
+                    .ui_surfaces
+                    .iter()
+                    .filter(|s| {
+                        old.y <= s.rect.y + 2.0
+                            && self.pos.y >= s.rect.y
+                            && self.pos.x - BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
+                                >= s.rect.x
+                            && self.pos.x + BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
+                                <= s.rect.right()
+                            && world
+                                .windows
+                                .iter()
+                                .find(|w| w.id == s.owner)
+                                .is_some_and(|w| s.rect.y - w.rect.y >= self.head_clearance())
+                    })
+                    .min_by(|a, b| a.rect.y.total_cmp(&b.rect.y));
+                let ui = ui.filter(|s| ordinary.is_none_or(|(y, _)| s.rect.y < y));
+                let landing = ui.map(|s| (s.rect.y, None)).or(ordinary);
+                if let Some((ground_y, surface)) = landing {
+                    self.ui_surface = ui.cloned();
                     if matches!(self.social_motion, Some(SocialMotion::Leap { .. })) {
                         self.social_motion = None;
                         self.social = None;
@@ -1068,6 +1094,7 @@ impl Pet {
                         self.surface = None;
                         self.surface_id = None;
                         self.surface_prev = None;
+                        self.ui_surface = None;
                         self.set_state(State::Thrown, 0.0);
                         if thrown {
                             // A hard thrown landing rolls over its leading edge.
@@ -1103,7 +1130,9 @@ impl Pet {
             return;
         }
 
-        if let Some(i) = self.current_surface_index(world) {
+        if self.ui_surface.is_some() {
+            // Position follows the validated UI surface in update_ui_surface.
+        } else if let Some(i) = self.current_surface_index(world) {
             self.surface = Some(i);
             self.follow_surface(i, world);
         } else {
@@ -1366,6 +1395,9 @@ impl Pet {
 
     fn platform_under(&self, x: f64, world: &World) -> bool {
         let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+        if let Some(s) = &self.ui_surface {
+            return x + half > s.rect.x && x - half < s.rect.right();
+        }
         if let Some(i) = self.current_surface_index(world) {
             return world.windows.get(i).is_some_and(|w| {
                 valid_rect(w.rect) && x + half > w.rect.x && x - half < w.rect.right()
@@ -1393,6 +1425,37 @@ impl Pet {
             self.surface_prev = None;
             self.set_state(State::Fall, 0.0);
         }
+    }
+
+    fn update_ui_surface(&mut self, world: &World) {
+        let Some(old) = self.ui_surface.take() else {
+            return;
+        };
+        if self.dragging || self.is_airborne() {
+            return;
+        }
+        let current = world
+            .ui_surfaces
+            .iter()
+            .find(|s| s.owner == old.owner && s.id == old.id);
+        if let Some(current) = current {
+            let dx = current.rect.x - old.rect.x;
+            let dy = current.rect.y - old.rect.y;
+            let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+            let next_x = self.pos.x + dx;
+            if dx.abs() <= 20.0
+                && dy.abs() <= 20.0
+                && current.rect.is_valid()
+                && next_x - half >= current.rect.x
+                && next_x + half <= current.rect.right()
+            {
+                self.pos.x += dx;
+                self.pos.y += dy;
+                self.ui_surface = Some(current.clone());
+                return;
+            }
+        }
+        self.detach_lost_support();
     }
 
     fn update_window_motion(&mut self, world: &World) {
@@ -1688,6 +1751,14 @@ impl Pet {
     }
 
     fn has_support(&self, world: &World) -> bool {
+        if let Some(s) = &self.ui_surface {
+            return (self.pos.y - s.rect.y).abs() <= 3.0
+                && self.overlaps_x(s.rect)
+                && world
+                    .ui_surfaces
+                    .iter()
+                    .any(|v| v.owner == s.owner && v.id == s.id);
+        }
         if let Some(i) = self.current_surface_index(world) {
             return world.windows.get(i).is_some_and(|w| {
                 valid_rect(w.rect)
@@ -1699,7 +1770,7 @@ impl Pet {
     }
 
     pub(crate) fn socially_supported(&self, world: &World) -> bool {
-        !self.dragging && self.has_support(world)
+        !self.dragging && self.ui_surface.is_none() && self.has_support(world)
     }
 
     pub(crate) fn behavior_support_key(&self, world: &World) -> Option<(Option<usize>, u64, i64)> {
@@ -2443,6 +2514,9 @@ impl Pet {
             .extend(world.windows.iter().map(|window| (window.id, window.rect)));
     }
     fn set_state(&mut self, state: State, duration: f64) {
+        if matches!(state, State::Jump | State::Fall | State::Thrown) {
+            self.ui_surface = None;
+        }
         if self.state == State::Activity && state != State::Activity {
             self.activity = None;
         }
@@ -2698,6 +2772,68 @@ fn direction_reversals(samples: &VecDeque<(f64, Vec2)>) -> usize {
 #[cfg(test)]
 mod responsive_engine_tests {
     use super::*;
+
+    #[test]
+    fn ui_perch_follows_then_falls_when_removed() {
+        let mut world = World::default();
+        world.ui_surfaces.push(crate::UiSurface {
+            owner: 1,
+            id: 3,
+            rect: Rect::new(100., 400., 200., 30.),
+        });
+        let mut pet = Pet::new(1, Skin::Claude, Vec2::new(160., 400.));
+        pet.state = State::Sit;
+        pet.ui_surface = Some(world.ui_surfaces[0].clone());
+        world.ui_surfaces[0].rect.x += 8.;
+        world.ui_surfaces[0].rect.y += 4.;
+        pet.update_ui_surface(&world);
+        assert_eq!(pet.pos, Vec2::new(168., 404.));
+        world.ui_surfaces.clear();
+        pet.update_ui_surface(&world);
+        assert_eq!(pet.state, State::Fall);
+        assert_eq!(pet.pos, Vec2::new(168., 404.));
+        assert!(pet.ui_surface.is_none());
+    }
+    #[test]
+    fn shrinking_ui_perch_drops_pet_without_teleport() {
+        let mut world = World::default();
+        world.ui_surfaces.push(crate::UiSurface {
+            owner: 1,
+            id: 3,
+            rect: Rect::new(100., 400., 200., 30.),
+        });
+        let mut pet = Pet::new(1, Skin::Claude, Vec2::new(160., 400.));
+        pet.state = State::Idle;
+        pet.ui_surface = Some(world.ui_surfaces[0].clone());
+        world.ui_surfaces[0].rect.w = 50.;
+        pet.update_ui_surface(&world);
+        assert_eq!(pet.state, State::Fall);
+        assert_eq!(pet.pos, Vec2::new(160., 400.));
+    }
+    #[test]
+    fn falling_pet_lands_on_ui_perch() {
+        let mut world = World::default();
+        world.windows.push(crate::WindowInfo {
+            id: 1,
+            rect: Rect::new(0., 0., 800., 800.),
+            title: String::new(),
+            active: true,
+            fullscreen: false,
+            is_file_manager: false,
+            is_desktop_icon: false,
+        });
+        world.ui_surfaces.push(crate::UiSurface {
+            owner: 1,
+            id: 3,
+            rect: Rect::new(100., 400., 200., 30.),
+        });
+        let mut pet = Pet::new(1, Skin::Claude, Vec2::new(160., 395.));
+        pet.state = State::Fall;
+        pet.vel.y = 300.;
+        pet.update_motion(0.05, &world);
+        assert_eq!(pet.pos.y, 400.);
+        assert_eq!(pet.ui_surface.as_ref().map(|s| s.id), Some(3));
+    }
 
     fn support_world(area: Rect, platform_y: f64) -> World {
         World {

@@ -82,10 +82,18 @@ pub struct WindowInfo {
     pub is_desktop_icon: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiSurface {
+    pub owner: usize,
+    pub id: u64,
+    pub rect: Rect,
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     /// Visible foreign windows, bottom to top in stacking order.
     pub windows: Vec<WindowInfo>,
+    pub ui_surfaces: Vec<UiSurface>,
     pub work_areas: Vec<Rect>,
     pub cursor: Vec2,
     pub idle_seconds: f64,
@@ -96,6 +104,7 @@ impl Default for World {
     fn default() -> Self {
         Self {
             windows: vec![],
+            ui_surfaces: vec![],
             work_areas: vec![Rect::new(0.0, 0.0, 1920.0, 1040.0)],
             cursor: Vec2::default(),
             idle_seconds: 0.0,
@@ -148,3 +157,6 @@ mod tests {
         assert_eq!(w.area_at(Vec2::new(100.0, 200.0)).x, -1920.0);
     }
 }
+
+#[cfg(windows)]
+pub mod ui_perches;
