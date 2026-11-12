@@ -14,6 +14,8 @@ enum Phase {
     },
     Crouch(JumpPlan),
     Flight(JumpPlan),
+    UiCrouch(UiJumpPlan),
+    UiFlight(UiJumpPlan),
     Climbing(ClimbPlan),
     Rollover(ClimbPlan),
     /// Brief crouch below a floating window before hopping to its side edge.
@@ -21,6 +23,17 @@ enum Phase {
     /// Physical standing hop; the hands grab the edge once within reach.
     HopFlight(ClimbPlan),
 }
+#[derive(Clone, Copy, Debug)]
+struct UiJumpPlan {
+    owner: usize,
+    id: u64,
+    owner_rect: Rect,
+    target_rect: Rect,
+    start: Vec2,
+    velocity: Vec2,
+    duration: f64,
+}
+
 /// Climbing speed used by `Pet::update_climb`, for route time budgets.
 const CLIMB_SPEED: f64 = 65.0;
 /// Default ownership limit for short routes.
@@ -100,6 +113,9 @@ impl Pet {
             return false;
         }
         let choice = self.random();
+        if choice < 0.08 && self.try_start_ui_jump(world) {
+            return true;
+        }
         if choice < 0.17 {
             if self.random() < 0.6 {
                 let roll = self.random();
@@ -132,6 +148,42 @@ impl Pet {
             }
         }
         false
+    }
+
+    fn try_start_ui_jump(&mut self, world: &World) -> bool {
+        if self.ui_surface.is_some()
+            || self.current_surface_index(world).is_some()
+            || (self.pos.y - self.floor_y(world)).abs() > 3.0
+        {
+            return false;
+        }
+        let candidates: Vec<_> = world
+            .ui_surfaces
+            .iter()
+            .filter_map(|surface| ui_plan(self, world, surface))
+            .collect();
+        if candidates.is_empty() {
+            return false;
+        }
+        let plan = candidates
+            [((self.random() * candidates.len() as f64) as usize).min(candidates.len() - 1)];
+        self.exploration_route = Some(ExploreRoute {
+            phase: Phase::UiCrouch(plan),
+            age: 0.0,
+            budget: ROUTE_BUDGET,
+            prepared: 0.0,
+            source: None,
+            destination: None,
+            scene: ui_scene_hash(world),
+            scale: self.display_scale,
+        });
+        self.behavior_velocity = None;
+        self.behavior_velocity_ttl = 0.0;
+        self.vel = Vec2::default();
+        self.facing = if plan.velocity.x < 0.0 { -1.0 } else { 1.0 };
+        self.set_state(State::Crouch, 0.22);
+        self.explore_cooldown = 18.0 + self.random() * 12.0;
+        true
     }
 
     pub(super) fn try_start_window_jump(&mut self, world: &World) -> bool {
@@ -330,6 +382,47 @@ impl Pet {
                 self.exploration_route = Some(route);
                 true
             }
+            Phase::UiCrouch(plan) => {
+                let target = world.ui_surfaces.iter().find(|s| {
+                    s.owner == plan.owner && s.id == plan.id && s.rect == plan.target_rect
+                });
+                if self.state != State::Crouch
+                    || (self.pos.x - plan.start.x).abs() > 0.01
+                    || (self.pos.y - plan.start.y).abs() > 0.01
+                    || !self.has_support(world)
+                    || target.is_none()
+                    || (ui_scene_hash(world) != route.scene
+                        && target.and_then(|s| ui_plan(self, world, s)).is_none())
+                {
+                    self.abort_exploration(world);
+                    return false;
+                }
+                route.scene = ui_scene_hash(world);
+                route.prepared += dt;
+                if route.prepared + 1e-9 >= 0.22 {
+                    self.vel = plan.velocity;
+                    self.set_state(State::Jump, 0.0);
+                    route.phase = Phase::UiFlight(plan);
+                }
+                self.exploration_route = Some(route);
+                true
+            }
+            Phase::UiFlight(plan) => {
+                let target_alive = world.ui_surfaces.iter().any(|s| {
+                    s.owner == plan.owner && s.id == plan.id && s.rect == plan.target_rect
+                });
+                if !matches!(self.state, State::Jump | State::Fall)
+                    || !target_alive
+                    || (ui_scene_hash(world) != route.scene
+                        && !ui_arc_clear(plan, world, self.display_scale))
+                {
+                    self.exploration_route = None;
+                    return false;
+                }
+                route.scene = ui_scene_hash(world);
+                self.exploration_route = Some(route);
+                false
+            }
             Phase::HopCrouch(plan) => {
                 // Re-validate the edge every tick; any change cancels on the floor.
                 let Some(plan) = exploration_climb::refresh_climb(self, world, plan)
@@ -504,6 +597,109 @@ impl Pet {
         self.vel = Vec2::default();
     }
 }
+// Conservative initial route: the whole ballistic corridor stays inside the
+// active owner, with enough space for the pet's full body at every sample.
+fn ui_plan(pet: &Pet, world: &World, target: &crate::UiSurface) -> Option<UiJumpPlan> {
+    let owner = world
+        .windows
+        .iter()
+        .find(|w| w.id == target.owner && w.active && !w.fullscreen && !w.is_desktop_icon)?;
+    let scale = pet.display_scale.clamp(0.5, 2.0);
+    let half = BODY_HALF_WIDTH * scale;
+    let head = pet.head_clearance();
+    let floor = pet.floor_y(world);
+    if !target.rect.is_valid()
+        || target.rect.w < 2.0 * half
+        || owner.rect.bottom() < floor - 1.0
+        || (pet.pos.y - floor).abs() > 3.0
+        || target.rect.y >= floor - 25.0
+        || pet.pos.x - half < owner.rect.x
+        || pet.pos.x + half > owner.rect.right()
+    {
+        return None;
+    }
+    let target_x = (target.rect.x + target.rect.w * 0.5)
+        .clamp(target.rect.x + half, target.rect.right() - half);
+    let rise = pet.pos.y - target.rect.y + head;
+    let vy = -(2.0 * GRAVITY * rise).sqrt();
+    if !vy.is_finite() || -vy > 2050.0 {
+        return None;
+    }
+    let disc = vy * vy + 2.0 * GRAVITY * (target.rect.y - pet.pos.y);
+    if disc < 0.0 {
+        return None;
+    }
+    let duration = (-vy + disc.sqrt()) / GRAVITY;
+    let vx = (target_x - pet.pos.x) / duration;
+    if !vx.is_finite() || vx.abs() > 360.0 * scale.sqrt() {
+        return None;
+    }
+    let plan = UiJumpPlan {
+        owner: target.owner,
+        id: target.id,
+        owner_rect: owner.rect,
+        target_rect: target.rect,
+        start: pet.pos,
+        velocity: Vec2::new(vx, vy),
+        duration,
+    };
+    ui_arc_clear(plan, world, pet.display_scale).then_some(plan)
+}
+fn ui_arc_clear(plan: UiJumpPlan, world: &World, scale: f64) -> bool {
+    let Some(index) = world
+        .windows
+        .iter()
+        .position(|w| w.id == plan.owner && w.active && !w.fullscreen && w.rect == plan.owner_rect)
+    else {
+        return false;
+    };
+    let half = BODY_HALF_WIDTH * scale.clamp(0.5, 2.0);
+    let head = 55.0 * scale.clamp(0.5, 2.0) + 8.0;
+    let mut previous_y = plan.start.y;
+    for step in 0..=96 {
+        let t = plan.duration * f64::from(step) / 96.0;
+        let x = plan.start.x + plan.velocity.x * t;
+        let y = plan.start.y + plan.velocity.y * t + 0.5 * GRAVITY * t * t;
+        let body = Rect::new(x - half, y - head, half * 2.0, head);
+        let owner = plan.owner_rect;
+        if body.x < owner.x
+            || body.right() > owner.right()
+            || body.y < owner.y
+            || body.bottom() > owner.bottom() + 0.01
+            || !world.work_areas.iter().any(|a| {
+                a.is_valid()
+                    && body.x >= a.x
+                    && body.right() <= a.right()
+                    && body.y >= a.y
+                    && body.bottom() <= a.bottom() + 0.01
+            })
+            || world.windows[index + 1..].iter().any(|w| {
+                !w.is_desktop_icon
+                    && w.rect.is_valid()
+                    && body.x < w.rect.right()
+                    && body.right() > w.rect.x
+                    && body.y < w.rect.bottom()
+                    && body.bottom() > w.rect.y
+            })
+        {
+            return false;
+        }
+        // Do not plan through a different known landing surface on descent.
+        if y > previous_y
+            && world.ui_surfaces.iter().any(|s| {
+                (s.owner != plan.owner || s.id != plan.id)
+                    && previous_y <= s.rect.y
+                    && y >= s.rect.y
+                    && x + half > s.rect.x
+                    && x - half < s.rect.right()
+            })
+        {
+            return false;
+        }
+        previous_y = y;
+    }
+    true
+}
 fn destination_exists(plan: JumpPlan, expected: Option<Rect>, world: &World) -> bool {
     if let Some(id) = plan.window_id {
         world
@@ -518,6 +714,21 @@ fn destination_exists(plan: JumpPlan, expected: Option<Rect>, world: &World) -> 
                 && plan.target.x <= a.right()
         })
     }
+}
+fn ui_scene_hash(world: &World) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    scene_hash(world).hash(&mut h);
+    for w in &world.windows {
+        w.active.hash(&mut h);
+    }
+    for s in &world.ui_surfaces {
+        s.owner.hash(&mut h);
+        s.id.hash(&mut h);
+        for x in [s.rect.x, s.rect.y, s.rect.w, s.rect.h] {
+            x.to_bits().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 fn scene_hash(world: &World) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -567,6 +778,68 @@ mod tests {
         p.auto_reactions = false;
         p.auto_activity_cooldown = 1e6;
         p
+    }
+    fn ui_world() -> World {
+        let mut w = world();
+        w.windows[0].rect = Rect::new(300.0, 200.0, 800.0, 800.0);
+        w.windows[0].active = true;
+        w.ui_surfaces.push(crate::UiSurface {
+            owner: 77,
+            id: 7,
+            rect: Rect::new(720.0, 700.0, 180.0, 40.0),
+        });
+        w
+    }
+    #[test]
+    fn ui_jump_crouches_then_physically_lands() {
+        let w = ui_world();
+        let mut p = pet(Vec2::new(680.0, 1000.0));
+        assert!(p.try_start_ui_jump(&w));
+        let mut airborne = false;
+        for _ in 0..2000 {
+            p.update(DT, &w);
+            airborne |= matches!(p.state, State::Jump | State::Fall);
+            if p.ui_surface.as_ref().is_some_and(|s| s.id == 7) {
+                break;
+            }
+        }
+        assert!(airborne);
+        assert_eq!(p.ui_surface.as_ref().map(|s| s.id), Some(7));
+        assert!((p.pos.y - 700.0).abs() < 0.01);
+    }
+    #[test]
+    fn ui_jump_cancels_when_destination_disappears() {
+        let mut w = ui_world();
+        let mut p = pet(Vec2::new(680.0, 1000.0));
+        assert!(p.try_start_ui_jump(&w));
+        w.ui_surfaces.clear();
+        p.update(DT, &w);
+        assert!(p.exploration_route.is_none());
+        assert_eq!(p.state, State::Idle);
+        assert_eq!(p.pos.y, 1000.0);
+        w = ui_world();
+        assert!(p.try_start_ui_jump(&w));
+        for _ in 0..100 {
+            p.update(DT, &w);
+            if p.state == State::Jump {
+                break;
+            }
+        }
+        assert_eq!(p.state, State::Jump);
+        w.ui_surfaces.clear();
+        let before = p.pos;
+        p.update(DT, &w);
+        assert!(p.exploration_route.is_none());
+        assert!(p.pos.y < before.y);
+        assert!(p.ui_surface.is_none());
+    }
+    #[test]
+    fn ui_jump_rejects_occluded_corridor() {
+        let mut w = ui_world();
+        w.windows
+            .push(window(88, Rect::new(650.0, 600.0, 200.0, 400.0)));
+        let mut p = pet(Vec2::new(680.0, 1000.0));
+        assert!(!p.try_start_ui_jump(&w));
     }
     #[test]
     fn face_route_climbs_inside_window_and_arrives_without_side_snap() {
