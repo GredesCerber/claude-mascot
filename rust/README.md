@@ -1,7 +1,14 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
-Version 0.13.0 keeps **Claude only** and includes
+Version 0.13.0 adds individual automatic-behavior frequencies and presets,
+named pets and saved companies, safe return-to-screen placement, explicit
+social refusals and approaches, and integrated five-pet regression scenarios.
+Optional experimental UI perches support stable edit fields and separators in
+the active window; they are disabled by default, read geometry only, and do not
+support chat messages or virtualized rows. Provider-specific live testing remains.
+
+The app keeps **Claude only** and includes
 a separate native settings window, recoloring, personal space, collision
 impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight.
 It includes varied window/landing selection, deliberate approaches to window edges,

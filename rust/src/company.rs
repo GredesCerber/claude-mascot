@@ -7,7 +7,7 @@ pub fn positions(area: Rect, scale: f64, count: usize) -> Vec<Vec2> {
         return Vec::new();
     }
     let width = 80.0 * scale;
-    let height = 60.0 * scale;
+    let height = (60.0 * scale).max(55.0 * scale + 8.0);
     let columns = ((area.w / width).floor() as usize).clamp(1, count);
     let rows = count.div_ceil(columns);
     let x_step = width.min(area.w / columns as f64);
@@ -39,7 +39,7 @@ mod tests {
                     assert_eq!(positions.len(), count);
                     for (i, p) in positions.iter().enumerate() {
                         assert!(p.x - 38.0 * scale >= area.x && p.x + 38.0 * scale <= area.right());
-                        assert!(p.y - 55.0 * scale >= area.y && p.y <= area.bottom());
+                        assert!(p.y - (55.0 * scale + 8.0) >= area.y && p.y <= area.bottom());
                         for q in &positions[..i] {
                             assert!(
                                 (p.x - q.x).abs() >= 76.0 * scale
