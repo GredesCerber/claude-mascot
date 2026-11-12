@@ -39,6 +39,7 @@ const ID_SET_NAME: i32 = 2025;
 const ID_SAVE_SET: i32 = 2026;
 const ID_LOAD_SET: i32 = 2027;
 const ID_SET_COMBO: i32 = 2028;
+const ID_DELETE_SET: i32 = 2029;
 const ID_ADD_PET: i32 = 2020;
 const ID_REMOVE_PET: i32 = 2021;
 const ID_RETURN_ALL: i32 = 2022;
@@ -142,6 +143,7 @@ pub enum PreferencesEvent {
     RenamePet(String),
     SaveCompany(String),
     LoadCompany(usize),
+    DeleteCompany(usize),
     AddPet,
     RemovePet,
     ReturnAll,
@@ -180,6 +182,7 @@ struct WindowState {
     activity_status: HWND,
     spacing_status: HWND,
     friends_status: HWND,
+    company_status: HWND,
     hwnd: HWND,
     children: Vec<Child>,
     events: Vec<PreferencesEvent>,
@@ -224,6 +227,7 @@ impl WindowState {
             activity_status: null_mut(),
             spacing_status: null_mut(),
             friends_status: null_mut(),
+            company_status: null_mut(),
             hwnd: null_mut(),
             children: Vec::new(),
             events: Vec::new(),
@@ -356,6 +360,11 @@ impl PreferencesWindow {
             // its first normal-show request suppressed. Follow with SW_SHOW.
             ShowWindow(self.hwnd, SW_SHOW);
             SetForegroundWindow(self.hwnd);
+        }
+    }
+    pub fn company_message(&mut self, message: &str) {
+        unsafe {
+            set_text(self.state.company_status, message);
         }
     }
     /// Drain actions emitted by native controls since the previous frame.
@@ -823,7 +832,12 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     let sets = combo(s, ID_SET_COMBO, 20, 316, 350)?;
     let _ = sets;
     button(s, "Загрузить", ID_LOAD_SET, 390, 316, 160)?;
-    y = 370;
+    button(s, "Удалить набор", ID_DELETE_SET, 390, 355, 160)?;
+    s.company_status = add_child(s, "STATIC", "", 0, 0, 0, 20, 355, 350, 42);
+    if s.company_status.is_null() {
+        return Err(last_error("CreateWindowExW company status"));
+    }
+    y = 415;
     heading(s, "Расстояние между питомцами", 20, y, 400)?;
     y += 30;
     label(s, "Минимальный свободный зазор (px)", 20, y, 300)?;
@@ -867,7 +881,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         0,
         0,
         20,
-        474,
+        519,
         590,
         22,
     );
@@ -941,7 +955,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
             ID_REACTIONS => (1, 510),
             ID_ACTIVITIES => (1, 547),
             ID_PAUSED => (1, 584),
-            ID_SOCIAL => (3, 510),
+            ID_SOCIAL => (3, 555),
             ID_DESKTOP => (2, 230),
             ID_UI_PERCHES => (2, 267),
             ID_AUTO_UPDATES => (6, 190),
@@ -1117,6 +1131,9 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
             SendMessageW(sets, CB_SETCURSEL, 0, 0);
         }
     }
+    let has_selection = SendMessageW(GetDlgItem(s.hwnd, ID_SET_COMBO), CB_GETCURSEL, 0, 0) >= 0;
+    EnableWindow(GetDlgItem(s.hwnd, ID_LOAD_SET), has_selection as i32);
+    EnableWindow(GetDlgItem(s.hwnd, ID_DELETE_SET), has_selection as i32);
     if force || focused != s.pet_combo {
         let selected = s
             .data
@@ -1498,8 +1515,22 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
             let name = String::from_utf16_lossy(&value[..n.max(0) as usize])
                 .trim()
                 .to_owned();
-            if !name.is_empty() && name.chars().count() <= 64 && !name.chars().any(char::is_control)
+            if name.is_empty() {
+                set_text(s.company_status, "Введите имя.");
+            } else if name.chars().count() > 64 || name.chars().any(char::is_control) {
+                set_text(
+                    s.company_status,
+                    "Имя: до 64 символов, без управляющих знаков.",
+                );
+            } else if id == ID_SAVE_SET
+                && s.data.company_names.len() >= 8
+                && !s.data.company_names.contains(&name)
             {
+                set_text(
+                    s.company_status,
+                    "До 8 наборов. Удалите или замените существующий.",
+                );
+            } else {
                 s.events.push(if id == ID_RENAME_PET {
                     PreferencesEvent::RenamePet(name)
                 } else {
@@ -1507,11 +1538,22 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
                 });
             }
         }
-        (ID_LOAD_SET, BN_CLICKED) => {
+        (ID_LOAD_SET, BN_CLICKED) | (ID_DELETE_SET, BN_CLICKED) => {
             let index = SendMessageW(GetDlgItem(s.hwnd, ID_SET_COMBO), CB_GETCURSEL, 0, 0);
-            if index >= 0 {
-                s.events.push(PreferencesEvent::LoadCompany(index as usize));
+            if index >= 0 && (index as usize) < s.data.company_names.len() {
+                s.events.push(if id == ID_LOAD_SET {
+                    PreferencesEvent::LoadCompany(index as usize)
+                } else {
+                    PreferencesEvent::DeleteCompany(index as usize)
+                });
+            } else {
+                set_text(s.company_status, "Выберите сохранённый набор.");
             }
+        }
+        (ID_SET_COMBO, CBN_SELCHANGE) => {
+            let valid = SendMessageW(control, CB_GETCURSEL, 0, 0) >= 0;
+            EnableWindow(GetDlgItem(s.hwnd, ID_LOAD_SET), valid as i32);
+            EnableWindow(GetDlgItem(s.hwnd, ID_DELETE_SET), valid as i32);
         }
         (ID_ADD_PET, BN_CLICKED) => s.events.push(PreferencesEvent::AddPet),
         (ID_REMOVE_PET, BN_CLICKED) => s.events.push(PreferencesEvent::RemovePet),
@@ -1868,6 +1910,48 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn company_limit_validation_and_delete_dispatch() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            let save = GetDlgItem(panel.hwnd, ID_SAVE_SET);
+            let delete = GetDlgItem(panel.hwnd, ID_DELETE_SET);
+            panel.sync(PreferencesState::default());
+            assert_eq!(
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(delete),
+                0
+            );
+            set_text(GetDlgItem(panel.hwnd, ID_SET_NAME), "   ");
+            handle_command(&mut panel.state, ID_SAVE_SET as usize, save as isize);
+            assert!(panel.state.events.is_empty());
+            let mut message = [0u16; 128];
+            assert!(GetWindowTextW(panel.state.company_status, message.as_mut_ptr(), 128) > 0);
+            panel.sync(PreferencesState {
+                company_names: (0..8).map(|i| format!("Набор {i}")).collect(),
+                ..PreferencesState::default()
+            });
+            assert_ne!(
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(delete),
+                0
+            );
+            set_text(GetDlgItem(panel.hwnd, ID_SET_NAME), "Девятый");
+            handle_command(&mut panel.state, ID_SAVE_SET as usize, save as isize);
+            assert!(panel.state.events.is_empty());
+            let n = GetWindowTextW(panel.state.company_status, message.as_mut_ptr(), 128);
+            assert!(String::from_utf16_lossy(&message[..n as usize]).contains('8'));
+            set_text(GetDlgItem(panel.hwnd, ID_SET_NAME), "Набор 0");
+            handle_command(&mut panel.state, ID_SAVE_SET as usize, save as isize);
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::SaveCompany("Набор 0".into()))
+            );
+            handle_command(&mut panel.state, ID_DELETE_SET as usize, delete as isize);
+            assert_eq!(
+                panel.state.events.pop(),
+                Some(PreferencesEvent::DeleteCompany(0))
+            );
+        }
+    }
     #[test]
     fn names_and_companies_dispatch_control_values() {
         let mut panel = PreferencesWindow::new().unwrap();

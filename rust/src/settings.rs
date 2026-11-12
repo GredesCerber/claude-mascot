@@ -733,6 +733,13 @@ mod company_set_tests {
         let restored = Settings::load(&path).unwrap();
         assert_eq!(restored.company_sets[0].pets, s.pet_appearances);
         assert_eq!(restored.company_sets[0].names.get(&3).unwrap(), "Первый");
+        let mut deleted = restored.clone();
+        deleted.company_sets.remove(0);
+        deleted.save(&path).unwrap();
+        let after_delete = Settings::load(&path).unwrap();
+        assert!(after_delete.company_sets.is_empty());
+        assert_eq!(after_delete.pet_appearances, s.pet_appearances);
+        assert_eq!(after_delete.pet_names, s.pet_names);
         s.company_sets[0].pets[1].id = 3;
         s.save(&path).unwrap();
         assert!(Settings::load(&path).is_err());

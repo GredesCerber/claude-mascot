@@ -1130,6 +1130,7 @@ mod native {
                         }
                         RenamePet(name) => {
                             settings.pet_names.insert(entries[selected].pet.id, name);
+                            panel.company_message("Имя питомца изменено.");
                             save = true;
                         }
                         SaveCompany(name) => {
@@ -1150,14 +1151,30 @@ mod native {
                                 .find(|set| set.name == name)
                             {
                                 *existing = company;
+                                panel.company_message("Набор обновлён.");
                                 save = true;
                             } else if settings.company_sets.len() < 8 {
                                 settings.company_sets.push(company);
+                                panel.company_message("Набор сохранён.");
                                 save = true;
+                            } else {
+                                panel.company_message("Можно сохранить до 8 наборов.");
                             }
                         }
                         LoadCompany(index) => {
                             load_company = settings.company_sets.get(index).cloned();
+                            if load_company.is_none() {
+                                panel.company_message("Набор больше не существует.");
+                            }
+                        }
+                        DeleteCompany(index) => {
+                            if index < settings.company_sets.len() {
+                                settings.company_sets.remove(index);
+                                panel.company_message("Набор удалён.");
+                                save = true;
+                            } else {
+                                panel.company_message("Набор больше не существует.");
+                            }
                         }
                         AddPet => {
                             if entries.len() < 8 {
@@ -1498,6 +1515,9 @@ mod native {
                     settings.personal_space_min,
                     settings.personal_space_max,
                 ));
+                if let Some(panel) = preferences.as_mut() {
+                    panel.company_message("Набор загружен.");
+                }
                 remove.clear();
                 spawn_skins.clear();
                 save = true;
