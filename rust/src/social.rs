@@ -134,6 +134,8 @@ impl Default for Cooldown {
 /// Fixed-size social scheduler. Pet identity is always resolved by stable id.
 pub struct SocialCoordinator {
     pub enabled: bool,
+    /// Autonomous social frequency: 0 disables starts; 50 preserves the default.
+    pub frequency: u8,
     accumulator: f64,
     age: f64,
     pairs: [Option<Pair>; 4],
@@ -142,6 +144,7 @@ pub struct SocialCoordinator {
     cooldowns: [Cooldown; CAP],
     request: Option<(Option<u64>, Option<SocialKind>)>,
     request_age: f64,
+    refusal: Option<crate::dialogue::SpeechEvent>,
     last_kind: Option<SocialKind>,
     pub stats: SocialStats,
 }
@@ -154,6 +157,7 @@ impl SocialCoordinator {
     pub fn new() -> Self {
         Self {
             enabled: true,
+            frequency: 50,
             accumulator: 0.0,
             age: 0.0,
             pairs: [None; 4],
@@ -162,6 +166,7 @@ impl SocialCoordinator {
             cooldowns: [Cooldown::default(); CAP],
             request: None,
             request_age: 0.0,
+            refusal: None,
             last_kind: None,
             stats: SocialStats::default(),
         }
@@ -170,23 +175,27 @@ impl SocialCoordinator {
     pub fn request(&mut self, kind: Option<SocialKind>) {
         self.request = Some((None, kind));
         self.request_age = 0.0;
+        self.refusal = None;
     }
     /// Request a specific interaction with a selected pet and its nearest eligible friend.
     pub fn request_for(&mut self, pet_id: u64, kind: Option<SocialKind>) {
         self.request = Some((Some(pet_id), kind));
         self.request_age = 0.0;
+        self.refusal = None;
     }
 
     /// Convenience request used by the desktop menu.
     pub fn request_tag(&mut self, pet_id: Option<u64>) {
         self.request = Some((pet_id, Some(SocialKind::Tag)));
         self.request_age = 0.0;
+        self.refusal = None;
     }
 
     /// Convenience request used by the desktop menu.
     pub fn request_tower(&mut self, pet_id: Option<u64>) {
         self.request = Some((pet_id, Some(SocialKind::Tower)));
         self.request_age = 0.0;
+        self.refusal = None;
     }
 
     pub fn update<'a>(
@@ -244,7 +253,34 @@ impl SocialCoordinator {
                 })
             })
         {
-            self.request = None;
+            if let Some((target, _)) = self.request.take() {
+                let speaker = target.and_then(|id| find(&refs, count, id)).or_else(|| {
+                    (0..count).find(|&i| refs[i].as_deref().is_some_and(|p| p.skin == Skin::Claude))
+                });
+                if let Some(i) = speaker {
+                    let event = self.refusal.unwrap_or_else(|| {
+                        let initiator = refs[i].as_deref().unwrap();
+                        let has_free_friend = (0..count)
+                            .any(|j| j != i && free_eligible(&refs, j, world, self, true));
+                        let same_platform = (0..count).any(|j| {
+                            j != i
+                                && free_eligible(&refs, j, world, self, true)
+                                && same_support(initiator, refs[j].as_deref().unwrap(), world)
+                        });
+                        if !free_eligible(&refs, i, world, self, true) {
+                            crate::dialogue::SpeechEvent::SocialSelfBusy
+                        } else if !has_free_friend {
+                            crate::dialogue::SpeechEvent::SocialBusy
+                        } else if !same_platform {
+                            crate::dialogue::SpeechEvent::SocialTooFar
+                        } else {
+                            crate::dialogue::SpeechEvent::SocialNoRoom
+                        }
+                    });
+                    refs[i].as_deref_mut().unwrap().speak(event, 2.5);
+                }
+            }
+            self.refusal = None;
         }
         self.advance_pairs(&mut refs, count, world, step);
         self.advance_tower(&mut refs, count, world, step);
@@ -329,6 +365,7 @@ impl SocialCoordinator {
                                 refs[ci].as_deref().unwrap(),
                                 pair.support,
                             )
+                            .filter(|target| leapfrog_landing_clear(refs, n, id, other, *target))
                             .and_then(|target| {
                                 crate::leapfrog::plan(
                                     refs[ji].as_deref().unwrap(),
@@ -651,9 +688,14 @@ impl SocialCoordinator {
                 find(refs, n, id).filter(|&i| tower_eligible(refs, i, world, self, manual))
             })
             .or_else(|| {
-                (0..n)
-                    .filter(|&i| tower_eligible(refs, i, world, self, manual))
-                    .min_by_key(|&i| refs[i].as_deref().unwrap().id)
+                target
+                    .is_none()
+                    .then(|| {
+                        (0..n)
+                            .filter(|&i| tower_eligible(refs, i, world, self, manual))
+                            .min_by_key(|&i| refs[i].as_deref().unwrap().id)
+                    })
+                    .flatten()
             });
         let Some(mut base_i) = base_i else {
             return false;
@@ -741,11 +783,12 @@ impl SocialCoordinator {
             || support.y - area.y < height + 100.0
             || dismount_room < 80.0 * max_scale + 35.0
         {
-            if support.y - area.y < height + 100.0 {
-                if let Some(i) = find(refs, n, target.unwrap_or(base_id)) {
-                    let p = refs[i].as_deref_mut().unwrap();
-                    p.speak(crate::dialogue::SpeechEvent::TowerLowCeiling, 3.0);
-                }
+            if manual {
+                self.refusal = Some(if support.y - area.y < height + 100.0 {
+                    crate::dialogue::SpeechEvent::TowerLowCeiling
+                } else {
+                    crate::dialogue::SpeechEvent::TowerNoRoom
+                });
             }
             return false;
         }
@@ -773,9 +816,8 @@ impl SocialCoordinator {
             horizontal_started: false,
         };
         if !tower_path_fits(refs, n, &group) {
-            if let Some(i) = find(refs, n, target.unwrap_or(chosen[0])) {
-                let p = refs[i].as_deref_mut().unwrap();
-                p.speak(crate::dialogue::SpeechEvent::TowerNoRoom, 2.5);
+            if manual {
+                self.refusal = Some(crate::dialogue::SpeechEvent::TowerNoRoom);
             }
             return false;
         }
@@ -1128,14 +1170,15 @@ impl SocialCoordinator {
             }
             return;
         }
-        if self.age < INITIAL_DELAY && self.request.is_none() {
+        if self.request.is_none() && (self.frequency == 0 || self.age < INITIAL_DELAY) {
             return;
         }
         // A group invitation must not depend on the generic pair gate finding
         // two walkers first. Resting friends can join without being paired off.
         if self.request.is_none() && self.age >= self.tower_invitation_at {
-            self.tower_invitation_at =
-                self.age + 35.0 + (self.stats.started.wrapping_mul(17) % 46) as f64;
+            self.tower_invitation_at = self.age
+                + (35.0 + (self.stats.started.wrapping_mul(17) % 46) as f64)
+                    * self.frequency_factor();
             let available = (0..n)
                 .filter(|&i| tower_eligible(refs, i, world, self, false))
                 .count();
@@ -1258,6 +1301,14 @@ impl SocialCoordinator {
             }
         }
     }
+    fn frequency_factor(&self) -> f64 {
+        50.0 / f64::from(if self.frequency == 0 {
+            50
+        } else {
+            self.frequency.min(100)
+        })
+    }
+
     fn start(
         &mut self,
         i: usize,
@@ -1277,6 +1328,15 @@ impl SocialCoordinator {
             world,
         ) {
             return false;
+        }
+        if kind == SocialKind::Leapfrog {
+            let a = refs[i].as_deref().unwrap();
+            let b = refs[j].as_deref().unwrap();
+            let clear = leapfrog_target(a, b, support_rect(a, world))
+                .is_some_and(|target| leapfrog_landing_clear(refs, CAP, a.id, b.id, target));
+            if !clear {
+                return false;
+            }
         }
         let slot = self.pairs.iter().position(Option::is_none);
         let Some(slot) = slot else { return false };
@@ -1397,15 +1457,16 @@ impl SocialCoordinator {
         let intensity = (refs[i].as_deref().unwrap().activity_intensity as f64
             + refs[j].as_deref().unwrap().activity_intensity as f64)
             * 0.5;
+        let frequency_factor = self.frequency_factor();
         cooldown(
             &mut self.cooldowns,
             a_id,
-            (12.0 + (a_id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0),
+            (12.0 + (a_id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0) * frequency_factor,
         );
         cooldown(
             &mut self.cooldowns,
             b_id,
-            (12.0 + (b_id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0),
+            (12.0 + (b_id % 19) as f64) * (1.5 - intensity.min(100.0) / 100.0) * frequency_factor,
         );
         self.last_kind = Some(kind);
         self.stats.started += 1;
@@ -1469,6 +1530,14 @@ impl SocialCoordinator {
                             pet.set_social_end(world);
                         }
                     }
+                }
+            }
+        }
+        if completed && matches!(p.kind, SocialKind::Tag | SocialKind::Leapfrog) {
+            if let Some(i) = find(refs, n, p.a) {
+                let pet = refs[i].as_deref_mut().unwrap();
+                if pet.bubble.is_none() && pet.socially_supported(world) {
+                    pet.speak(crate::dialogue::SpeechEvent::PlayLaugh, 2.0);
                 }
             }
         }
@@ -1813,6 +1882,27 @@ fn support_exists(expected: Rect, world: &World, at: Vec2) -> bool {
     }
     let area = world.area_at(at);
     same(Rect::new(area.x, area.bottom() - 1.0, area.w, 1.0))
+}
+
+// Other pets are not part of the two-body arc planner. Reserve enough room at
+// the landing to avoid launching directly into an uninvolved friend.
+fn leapfrog_landing_clear(
+    refs: &[Option<&mut Pet>; CAP],
+    n: usize,
+    jumper_id: u64,
+    croucher_id: u64,
+    target: Vec2,
+) -> bool {
+    let Some(jumper) = find(refs, n, jumper_id).and_then(|i| refs[i].as_deref()) else {
+        return false;
+    };
+    (0..n).filter_map(|i| refs[i].as_deref()).all(|pet| {
+        pet.id == jumper_id
+            || pet.id == croucher_id
+            || (pet.pos.y - target.y).abs() > 90.0 * pet.display_scale.max(jumper.display_scale)
+            || (pet.pos.x - target.x).abs()
+                >= 42.0 * (pet.display_scale + jumper.display_scale) + 12.0
+    })
 }
 
 fn leapfrog_target(jumper: &Pet, croucher: &Pet, support: Rect) -> Option<Vec2> {

@@ -412,3 +412,59 @@ fn leapfrog_completes_two_to_ten_bouncy_jumps_and_can_turn_at_a_ledge() {
         }
     }
 }
+
+#[test]
+fn failed_manual_invitation_explains_busy_friends_once() {
+    let w = world();
+    let mut pets = pair();
+    pets[1].dragging = true;
+    let mut c = SocialCoordinator::new();
+    c.request_for(1, Some(SocialKind::Tag));
+    for _ in 0..61 {
+        c.update(0.05, pets.iter_mut(), &w);
+    }
+    let bubble = pets[0]
+        .bubble
+        .as_deref()
+        .expect("failed invitation should be explained");
+    assert!(claude_mascot::dialogue::SpeechEvent::SocialBusy
+        .lines()
+        .contains(&bubble));
+    assert_eq!(c.stats.started, 0);
+    pets[0].bubble = None;
+    for _ in 0..61 {
+        c.update(0.05, pets.iter_mut(), &w);
+    }
+    assert!(
+        pets[0].bubble.is_none(),
+        "one request must not repeat its refusal"
+    );
+}
+
+#[test]
+fn zero_social_frequency_preserves_manual_requests() {
+    let w = world();
+    let mut pets = pair();
+    let mut c = SocialCoordinator::new();
+    c.frequency = 0;
+    step(&mut c, &mut pets, &w, 30 * 240);
+    assert_eq!(c.stats.started, 0);
+    c.request_for(1, Some(SocialKind::Greeting));
+    c.update(0.0, pets.iter_mut(), &w);
+    assert_eq!(c.stats.started, 1);
+}
+
+#[test]
+fn busy_selected_pet_does_not_start_a_tower_without_him() {
+    let w = world();
+    let mut pets = pair();
+    let mut third = Pet::new(3, Skin::Claude, Vec2::new(460.0, 700.0));
+    third.state = State::Idle;
+    pets.push(third);
+    pets[0].state = State::Sleep;
+    let mut c = SocialCoordinator::new();
+    c.request_tower(Some(1));
+    c.update(0.0, pets.iter_mut(), &w);
+    assert_eq!(c.stats.started, 0);
+    assert!(pets.iter().all(|p| p.social.is_none()));
+}
