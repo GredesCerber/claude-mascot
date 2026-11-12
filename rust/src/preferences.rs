@@ -674,7 +674,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         "Внешний вид",
         "Поведение",
         "Опоры",
-        "Друзья",
+        "Компания",
         "Производительность",
         "Занятия",
         "Обновления",
@@ -995,8 +995,8 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         590,
     )?;
     s.build_page = 3;
-    s.friends_status = add_child(s, "STATIC", "", 0, 0, 0, 20, 285, 590, 22);
-    y = 324;
+    s.friends_status = add_child(s, "STATIC", "", 0, 0, 0, 20, 600, 590, 22);
+    y = 644;
     heading(s, "Совместные игры", 20, y, 400)?;
     y += 30;
     for (idx, (text, action)) in [
@@ -1025,7 +1025,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         )?;
     }
     s.build_page = 1;
-    y = 350;
+    y = 648;
     heading(s, "Действия питомца", 20, y, 300)?;
     y += 30;
     for (idx, (text, action)) in [
@@ -1114,8 +1114,14 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
             && (s.pet_items != s.data.pet_ids || s.pet_labels != s.data.pet_names))
     {
         SendMessageW(s.pet_combo, CB_RESETCONTENT, 0, 0);
-        for name in &s.data.pet_names {
-            combo_item(s.pet_combo, name);
+        for (index, id) in s.data.pet_ids.iter().enumerate() {
+            let name = s
+                .data
+                .pet_names
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| format!("Клод №{id}"));
+            combo_item(s.pet_combo, &name);
         }
         s.pet_items.clone_from(&s.data.pet_ids);
         s.pet_labels.clone_from(&s.data.pet_names);
@@ -1910,6 +1916,36 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expanded_behavior_and_company_controls_do_not_overlap() {
+        let panel = PreferencesWindow::new().unwrap();
+        for page in [1, 3] {
+            let children: Vec<_> = panel
+                .state
+                .children
+                .iter()
+                .filter(|child| child.page == page)
+                .collect();
+            for (i, first) in children.iter().enumerate() {
+                for second in &children[i + 1..] {
+                    unsafe {
+                        let mut a: RECT = std::mem::zeroed();
+                        let mut b: RECT = std::mem::zeroed();
+                        GetWindowRect(first.hwnd, &mut a);
+                        GetWindowRect(second.hwnd, &mut b);
+                        let overlap_w = a.right.min(b.right) - a.left.max(b.left);
+                        let overlap_h = a.bottom.min(b.bottom) - a.top.max(b.top);
+                        assert!(
+                            overlap_w <= 1 || overlap_h <= 1,
+                            "page {page}: controls {} and {} overlap by {overlap_w}×{overlap_h}",
+                            GetDlgCtrlID(first.hwnd),
+                            GetDlgCtrlID(second.hwnd)
+                        );
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn company_limit_validation_and_delete_dispatch() {
         let mut panel = PreferencesWindow::new().unwrap();

@@ -14,3 +14,7 @@ Names are kept in `Settings.pet_names` keyed by ID; up to eight `CompanySet` rec
 ## Company controls follow-up
 
 The Friends page now deletes a selected company and reports save, replace, load, delete and rename results inline. Empty or invalid names and the eight-set limit have inline explanations; save with an existing name still replaces it. Load and Delete are disabled with no selection. The previous paragraph's deletion and silent-limit limitations are resolved. Tests cover limit, replacement, delete event, disabled state and persistence after deletion; `cargo clippy --all-targets -- -D warnings` passed.
+
+## Integration completion
+
+Main now assigns social.frequency at startup and on updates, connects ui_perches and drops obsolete unsupported text. Follow-up f70c373 adds deletion and inline status for saved sets, including limit/empty-name feedback. The integrator separated the expanded page sections and added an overlap regression; rescue and company reload reset contact/social/behavior histories. Earlier missing-feature notes describe initial handoff commits only.

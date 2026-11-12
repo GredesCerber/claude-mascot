@@ -105,6 +105,18 @@ pub const ALL_EVENTS: [SpeechEvent; EVENT_COUNT] = [
     SpeechEvent::PlayLaugh,
 ];
 impl SpeechEvent {
+    pub(crate) fn explicit_feedback(self) -> bool {
+        matches!(
+            self,
+            SpeechEvent::SocialBusy
+                | SpeechEvent::SocialSelfBusy
+                | SpeechEvent::SocialTooFar
+                | SpeechEvent::SocialNoRoom
+                | SpeechEvent::TowerLowCeiling
+                | SpeechEvent::TowerNoRoom
+        )
+    }
+
     pub fn lines(self) -> &'static [&'static str] {
         match self {
             Self::Wake => &[
@@ -463,15 +475,7 @@ impl Dialogue {
         self.rng % 50 < frequency as u64
     }
     pub fn event(&mut self, event: SpeechEvent, now: f64) -> Option<&'static str> {
-        let refusal = matches!(
-            event,
-            SpeechEvent::SocialBusy
-                | SpeechEvent::SocialSelfBusy
-                | SpeechEvent::SocialTooFar
-                | SpeechEvent::SocialNoRoom
-                | SpeechEvent::TowerLowCeiling
-                | SpeechEvent::TowerNoRoom
-        );
+        let refusal = event.explicit_feedback();
         self.select(event as usize, event.lines(), now, event.ambient(), refusal)
     }
     pub fn activity(&mut self, id: ActivityId, now: f64) -> Option<&'static str> {

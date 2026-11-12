@@ -2533,7 +2533,7 @@ impl Pet {
         self.dialogue = Dialogue::new(seed);
     }
     pub fn speak(&mut self, event: SpeechEvent, duration: f64) {
-        if self.dialogue.allow_frequency(self.frequencies.speech) {
+        if event.explicit_feedback() || self.dialogue.allow_frequency(self.frequencies.speech) {
             if let Some(text) = self.dialogue.event(event, self.time) {
                 self.bubble = Some(text.to_owned());
                 self.bubble_time = if duration.is_finite() {
