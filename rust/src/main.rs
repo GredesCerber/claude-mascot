@@ -904,6 +904,7 @@ mod native {
         }
         let mut social = claude_mascot::social::SocialCoordinator::new();
         social.enabled = settings.social_enabled;
+        social.frequency = settings.frequencies.social;
         let mut behavior = BehaviorCoordinator::new(behavior_settings(
             settings.personal_space_min,
             settings.personal_space_max,
@@ -1502,6 +1503,7 @@ mod native {
                 }
             }
             social.enabled = settings.social_enabled;
+            social.frequency = settings.frequencies.social;
             behavior.set_settings(behavior_settings(
                 settings.personal_space_min,
                 settings.personal_space_max,
