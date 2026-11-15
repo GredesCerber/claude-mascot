@@ -833,6 +833,7 @@ mod native {
             .find(|p| p.id == pet.id)
             .map_or(settings.body_color, |p| p.color);
         pet.activity_intensity = settings.activity_intensity;
+        pet.frequencies = settings.frequencies;
         Ok(Entry {
             pet,
             host: host(settings, tray)?,
@@ -1546,8 +1547,13 @@ mod native {
                         &settings,
                         false,
                     )?);
-                    entries.last_mut().unwrap().pet.body_color =
-                        claude_mascot::palette::distinct_color(entries.len() - 1);
+                    let color = claude_mascot::palette::unused_color(
+                        entries[..entries.len() - 1]
+                            .iter()
+                            .map(|e| e.pet.body_color),
+                        entries.len() - 1,
+                    );
+                    entries.last_mut().unwrap().pet.body_color = color;
                     selected_pet_id = next_id;
                     next_id += 1;
                     if o.inspect {

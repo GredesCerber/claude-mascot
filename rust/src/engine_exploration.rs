@@ -609,6 +609,7 @@ fn ui_plan(pet: &Pet, world: &World, target: &crate::UiSurface) -> Option<UiJump
     let head = pet.head_clearance();
     let floor = pet.floor_y(world);
     if !target.rect.is_valid()
+        || target.rect.contains(world.cursor)
         || target.rect.w < 2.0 * half
         || owner.rect.bottom() < floor - 1.0
         || (pet.pos.y - floor).abs() > 3.0
@@ -806,6 +807,29 @@ mod tests {
         assert!(airborne);
         assert_eq!(p.ui_surface.as_ref().map(|s| s.id), Some(7));
         assert!((p.pos.y - 700.0).abs() < 0.01);
+    }
+    #[test]
+    fn ui_jump_avoids_input_under_cursor_even_if_pointer_arrives_in_flight() {
+        let mut w = ui_world();
+        let mut p = pet(Vec2::new(680.0, 1000.0));
+        w.cursor = Vec2::new(800.0, 720.0);
+        assert!(!p.try_start_ui_jump(&w));
+        w.cursor = Vec2::new(0.0, 0.0);
+        assert!(p.try_start_ui_jump(&w));
+        for _ in 0..100 {
+            p.update(DT, &w);
+            if p.state == State::Jump {
+                break;
+            }
+        }
+        assert_eq!(p.state, State::Jump);
+        w.cursor = Vec2::new(800.0, 720.0);
+        p.activity_intensity = 0;
+        for _ in 0..2000 {
+            p.update(DT, &w);
+            assert!(p.ui_surface.is_none());
+        }
+        assert!((p.pos.y - 1000.0).abs() < 0.01);
     }
     #[test]
     fn ui_jump_cancels_when_destination_disappears() {

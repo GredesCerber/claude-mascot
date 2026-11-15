@@ -1058,6 +1058,7 @@ impl Pet {
                     .iter()
                     .filter(|s| {
                         old.y <= s.rect.y + 2.0
+                            && !s.rect.contains(world.cursor)
                             && self.pos.y >= s.rect.y
                             && self.pos.x - BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
                                 >= s.rect.x
@@ -1453,10 +1454,70 @@ impl Pet {
                 self.pos.x += dx;
                 self.pos.y += dy;
                 self.ui_surface = Some(current.clone());
+                self.yield_ui_surface_to_cursor(world);
                 return;
             }
         }
         self.detach_lost_support();
+    }
+
+    fn yield_ui_surface_to_cursor(&mut self, world: &World) {
+        let Some(surface) = self.ui_surface.as_ref() else {
+            return;
+        };
+        if !surface.rect.contains(world.cursor)
+            || self.behavior_manual_lock > 0.0
+            || self.dragging
+            || self.chase
+            || self.social.is_some()
+            || self.activity.is_some()
+            || !matches!(
+                self.state,
+                State::Idle
+                    | State::Walk
+                    | State::Run
+                    | State::Sit
+                    | State::LookAround
+                    | State::Land
+            )
+        {
+            return;
+        }
+        let scale = self.display_scale.clamp(0.5, 2.0);
+        let area = world.area_at(self.pos);
+        let half = BODY_HALF_WIDTH * scale;
+        let preferred = if world.cursor.x >= self.pos.x {
+            -1.0
+        } else {
+            1.0
+        };
+        let fits = |direction: f64| {
+            let x = if direction < 0.0 {
+                surface.rect.x - half - 8.0 * scale
+            } else {
+                surface.rect.right() + half + 8.0 * scale
+            };
+            x >= area.x + half && x <= area.right() - half
+        };
+        let direction = if fits(preferred) || !fits(-preferred) {
+            preferred
+        } else {
+            -preferred
+        };
+        let rise = (self.pos.y - area.y - self.head_clearance())
+            .max(0.0)
+            .min(70.0 * scale);
+        self.ui_surface = None;
+        self.surface = None;
+        self.surface_id = None;
+        self.surface_prev = None;
+        self.exploration_route = None;
+        self.behavior_velocity = None;
+        self.behavior_velocity_ttl = 0.0;
+        self.facing = direction;
+        self.vel = Vec2::new(direction * 220.0 * scale, -(2.0 * GRAVITY * rise).sqrt());
+        self.explore_cooldown = self.explore_cooldown.max(8.0);
+        self.set_state(if rise > 1.0 { State::Jump } else { State::Fall }, 0.0);
     }
 
     fn update_window_motion(&mut self, world: &World) {
@@ -2774,6 +2835,77 @@ fn direction_reversals(samples: &VecDeque<(f64, Vec2)>) -> usize {
 mod responsive_engine_tests {
     use super::*;
 
+    fn cursor_perch_world() -> World {
+        World {
+            windows: vec![WindowInfo {
+                id: 1,
+                rect: Rect::new(0.0, 100.0, 1000.0, 940.0),
+                title: String::new(),
+                active: true,
+                fullscreen: false,
+                is_file_manager: false,
+                is_desktop_icon: false,
+            }],
+            ui_surfaces: vec![crate::UiSurface {
+                owner: 1,
+                id: 42,
+                rect: Rect::new(200.0, 600.0, 400.0, 80.0),
+            }],
+            cursor: Vec2::new(900.0, 900.0),
+            ..World::default()
+        }
+    }
+    #[test]
+    fn ui_perch_is_freed_for_input_without_teleport_or_changing_cursor() {
+        for scale in [0.75, 1.0, 1.5] {
+            let mut world = cursor_perch_world();
+            let mut pet = Pet::new(71, Skin::Claude, Vec2::new(400.0, 600.0));
+            pet.state = State::Sit;
+            pet.display_scale = scale;
+            pet.ui_surface = Some(world.ui_surfaces[0].clone());
+            world.cursor = Vec2::new(420.0, 640.0);
+            let before = pet.pos;
+            let cursor = world.cursor;
+            pet.update_ui_surface(&world);
+            assert_eq!(pet.pos, before);
+            assert!(pet.ui_surface.is_none());
+            assert_eq!(pet.state, State::Jump);
+            assert!(pet.vel.x < 0.0 && pet.vel.y < 0.0);
+            pet.auto_activities = false;
+            pet.auto_reactions = false;
+            pet.activity_intensity = 0;
+            for _ in 0..720 {
+                pet.update(1.0 / 240.0, &world);
+            }
+            assert!(pet.ui_surface.is_none());
+            assert!((pet.pos.y - world.area_at(pet.pos).bottom()).abs() < 1.0);
+            assert_eq!(world.cursor, cursor);
+        }
+    }
+    #[test]
+    fn cursor_courtesy_respects_manual_hold_sleep_and_screen_edge() {
+        let mut world = cursor_perch_world();
+        let mut pet = Pet::new(1, Skin::Claude, Vec2::new(400.0, 600.0));
+        pet.state = State::Sleep;
+        pet.ui_surface = Some(world.ui_surfaces[0].clone());
+        world.cursor = Vec2::new(420.0, 640.0);
+        pet.update_ui_surface(&world);
+        assert_eq!(pet.state, State::Sleep);
+        pet.state = State::Sit;
+        pet.behavior_manual_lock = 3.0;
+        pet.update_ui_surface(&world);
+        assert!(pet.ui_surface.is_some());
+        pet.behavior_manual_lock = 0.0;
+        world.ui_surfaces[0].rect = Rect::new(0.0, 600.0, 200.0, 80.0);
+        pet.pos.x = 100.0;
+        pet.ui_surface = Some(world.ui_surfaces[0].clone());
+        world.cursor = Vec2::new(110.0, 640.0);
+        pet.update_ui_surface(&world);
+        assert!(
+            pet.vel.x > 0.0,
+            "choose the side with available screen space"
+        );
+    }
     #[test]
     fn ui_perch_follows_then_falls_when_removed() {
         let mut world = World::default();

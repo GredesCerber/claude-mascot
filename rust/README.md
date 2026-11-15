@@ -1,6 +1,8 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
+Version 0.13.1 frees internal input-field perches when the pointer enters, avoids occupied palette colors for new friends, and applies saved frequencies immediately at spawn.
+
 Version 0.13.0 adds individual automatic-behavior frequencies and presets,
 named pets and saved companies, safe return-to-screen placement, explicit
 social refusals and approaches, and integrated five-pet regression scenarios.

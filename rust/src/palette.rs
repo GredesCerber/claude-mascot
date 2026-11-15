@@ -15,6 +15,15 @@ pub fn distinct_color(index: usize) -> u32 {
     PRESETS[index % PRESETS.len()].2
 }
 
+/// Prefer an unused preset when adding a friend to an existing company.
+pub fn unused_color(colors: impl IntoIterator<Item = u32>, start: usize) -> u32 {
+    let used: Vec<_> = colors.into_iter().take(8).map(|c| c & 0xFFFFFF).collect();
+    (0..PRESETS.len())
+        .map(|offset| distinct_color(start.wrapping_add(offset)))
+        .find(|color| !used.contains(color))
+        .unwrap_or_else(|| distinct_color(start))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub body: u32,
@@ -70,5 +79,28 @@ mod tests {
         assert_eq!(blue.body, 0xFF609BD5);
         assert!(blue.shadow & 0xFFFFFF < blue.body & 0xFFFFFF);
         assert!(blue.highlight & 0xFFFFFF > blue.body & 0xFFFFFF);
+    }
+}
+
+#[cfg(test)]
+mod unused_color_tests {
+    use super::*;
+    #[test]
+    fn adding_after_removal_or_custom_recoloring_uses_a_free_preset() {
+        for (missing, preset) in PRESETS.iter().enumerate() {
+            let used: Vec<_> = PRESETS
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != missing)
+                .map(|(_, p)| p.2)
+                .collect();
+            for start in 0..PRESETS.len() {
+                assert_eq!(unused_color(used.clone(), start), preset.2);
+            }
+        }
+        assert_eq!(
+            unused_color([0x123456, distinct_color(2)], 2),
+            distinct_color(3)
+        );
     }
 }
