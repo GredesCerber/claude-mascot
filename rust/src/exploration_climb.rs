@@ -14,7 +14,7 @@ const MAX_GRAB_HOP: f64 = 480.0;
 
 fn pet_scale(pet: &Pet) -> f64 {
     if pet.display_scale.is_finite() {
-        pet.display_scale.clamp(0.5, 2.0)
+        pet.display_scale.clamp(0.5, 3.0)
     } else {
         1.0
     }

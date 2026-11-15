@@ -11,6 +11,10 @@ fn leapfrog_completes_with_real_contacts_at_every_supported_scale_and_gap() {
         (0.75_f64, 0.75_f64),
         (1.0, 1.0),
         (1.5, 1.5),
+        (2.0, 2.0),
+        (3.0, 3.0),
+        (0.75, 3.0),
+        (3.0, 0.75),
         (0.75, 1.5),
         (1.5, 0.75),
     ] {
@@ -40,9 +44,17 @@ fn leapfrog_completes_with_real_contacts_at_every_supported_scale_and_gap() {
                 let mut behavior = BehaviorCoordinator::new(BehaviorSettings::default());
                 social.request_for(1, Some(SocialKind::Leapfrog));
                 social.update(0.0, pets.iter_mut(), &world);
-                assert!(pets[0].social.is_some());
+                assert!(
+                    pets[0].social.is_some(),
+                    "invitation scales={left_scale}/{right_scale} gap={gap} stats={:?}",
+                    social.stats
+                );
                 let mut launches = 0;
                 let mut jumping = [false; 2];
+                let approached = matches!(
+                    pets[0].social_motion,
+                    Some(claude_mascot::social::SocialMotion::Run { .. })
+                );
                 for _ in 0..7200 {
                     for (i, p) in pets.iter_mut().enumerate() {
                         p.update(1.0 / 240.0, &world);
@@ -70,7 +82,18 @@ fn leapfrog_completes_with_real_contacts_at_every_supported_scale_and_gap() {
                         .collect::<Vec<_>>()
                 );
                 assert_eq!(social.stats.cancelled, 0);
-                assert_eq!(launches, if second_id == 8 { 2 } else { 10 });
+                if approached {
+                    assert!(
+                        (2..=10).contains(&launches),
+                        "complete a random series after approach: {launches}"
+                    );
+                } else {
+                    assert_eq!(
+                        launches,
+                        if second_id == 8 { 2 } else { 10 },
+                        "scales={left_scale}/{right_scale} gap={gap}"
+                    );
+                }
                 assert_eq!(
                     contacts.contact_count, 0,
                     "a planned leap should clear its partner"

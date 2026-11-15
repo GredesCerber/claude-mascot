@@ -4,6 +4,10 @@ use crate::timing::{valid_fps, DEFAULT_FPS};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub fn valid_scale(scale: f64) -> bool {
+    scale.is_finite() && (0.75..=3.0).contains(&scale)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PetAppearance {
     pub id: u64,
@@ -181,8 +185,8 @@ impl Settings {
         if value.version != 1 {
             return Err(format!("Unsupported settings version {}", value.version));
         }
-        if ![0.75, 1.0, 1.5].contains(&value.scale) {
-            return Err("Scale must be 0.75, 1.0 or 1.5".into());
+        if !valid_scale(value.scale) {
+            return Err("Scale must be finite and between 0.75 and 3.0".into());
         }
         if !valid_fps(value.target_fps) {
             return Err("FPS must be an integer from 30 to 240".into());
@@ -575,6 +579,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn slider_sizes_round_trip_and_invalid_scales_are_rejected() {
+        let path = std::env::temp_dir().join(format!("mascot-size-{}.json", std::process::id()));
+        for scale in [0.75, 1.15, 2.0, 2.95, 3.0] {
+            let settings = Settings {
+                scale,
+                ..Settings::default()
+            };
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap().scale, scale);
+        }
+        for scale in [0.74, 3.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!valid_scale(scale));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn round_trip_and_replace() {
         let p =

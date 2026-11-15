@@ -311,7 +311,7 @@ impl Renderer {
     /// final output resolution so small fonts are never reduced by nearest-neighbor scaling.
     pub fn frame_scaled(&mut self, pet: &Pet, show_bubbles: bool, scale: f64) -> &Canvas {
         let scale = if scale.is_finite() {
-            scale.clamp(0.5, 2.0)
+            scale.clamp(0.5, 3.0)
         } else {
             1.0
         };
@@ -411,7 +411,7 @@ fn draw_bubble(
     if font.is_none() {
         return;
     }
-    let scale = scale.clamp(0.5, 2.0);
+    let scale = scale.clamp(0.5, 3.0);
     // At small UI scales preserve a readable minimum physical font size.
     let font_size = (16.0 * scale as f32).clamp(13.0, 40.0);
     let margin_x = (12.0 * scale).max(6.0);
@@ -570,7 +570,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let shared_laptop_owner = social_kind == Some(SocialKind::ShareLaptop)
         && social.is_some_and(|activity| activity.role == SocialRole::Initiator);
     let scene_scale = if p.display_scale.is_finite() {
-        p.display_scale.clamp(0.75, 1.5)
+        p.display_scale.clamp(0.75, 3.0)
     } else {
         1.0
     };
@@ -1871,7 +1871,13 @@ mod tests {
         let preview_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("work/text-preview");
         std::fs::create_dir_all(&preview_dir).unwrap();
 
-        for (scale, suffix) in [(0.5, "0_5x"), (1.0, "1x"), (1.5, "1_5x"), (2.0, "2x")] {
+        for (scale, suffix) in [
+            (0.5, "0_5x"),
+            (1.0, "1x"),
+            (1.5, "1_5x"),
+            (2.0, "2x"),
+            (3.0, "3x"),
+        ] {
             let frame = renderer.frame_scaled(&pet, true, scale);
             assert_eq!(frame.width, (WIDTH as f64 * scale).round() as usize);
             assert_eq!(frame.height, (HEIGHT as f64 * scale).round() as usize);

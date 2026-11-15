@@ -13,11 +13,11 @@ pub(crate) fn plan(jumper: &Pet, partner: &Pet, target: Vec2, world: &World) -> 
     let scale = jumper
         .display_scale
         .max(partner.display_scale)
-        .clamp(0.5, 2.0);
+        .clamp(0.5, 3.0);
     let direction = (target.x - jumper.pos.x).signum();
     let clearance = 67.0 * scale;
     let area = world.area_at(jumper.pos);
-    let maximum = (jumper.pos.y - area.y - 55.0 * jumper.display_scale.clamp(0.5, 2.0) - 8.0)
+    let maximum = (jumper.pos.y - area.y - 55.0 * jumper.display_scale.clamp(0.5, 3.0) - 8.0)
         .min(2050.0_f64.powi(2) / (2.0 * GRAVITY));
     let mut rise = 140.0 * scale;
     let exit_margin = 38.0 * (jumper.display_scale + partner.display_scale) + 8.0 * scale;

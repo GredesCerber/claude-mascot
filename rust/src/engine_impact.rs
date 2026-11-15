@@ -137,7 +137,7 @@ impl Pet {
             return false;
         }
         let scale = if self.display_scale.is_finite() {
-            self.display_scale.clamp(0.5, 2.0).sqrt()
+            self.display_scale.clamp(0.5, 3.0).sqrt()
         } else {
             1.0
         };
@@ -293,7 +293,7 @@ impl Pet {
             return;
         }
         // The rotated sprite is taller than its ordinary upright contact box.
-        let scale = self.display_scale.clamp(0.5, 2.0);
+        let scale = self.display_scale.clamp(0.5, 3.0);
         let clearance = if self.spin != 0.0 || self.dizzy_next {
             super::TUMBLE_HEADROOM * scale
         } else {

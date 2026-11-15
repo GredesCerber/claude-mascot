@@ -507,7 +507,7 @@ impl SocialCoordinator {
                     let pb = refs[bi.unwrap()].as_deref().unwrap();
                     // Catch before physical body contacts keep the actors apart.
                     let catch_distance =
-                        84.0 * pa.display_scale.max(pb.display_scale).clamp(0.5, 2.0);
+                        84.0 * pa.display_scale.max(pb.display_scale).clamp(0.5, 3.0);
                     if (pa.pos.x - pb.pos.x).abs() <= catch_distance && pair.phase <= 0.0 {
                         pair.chaser = if pair.chaser == pair.a {
                             pair.b
@@ -571,7 +571,7 @@ impl SocialCoordinator {
                         && (pa.pos.x - pb.pos.x).hypot(pa.pos.y - pb.pos.y)
                             <= social_distance_range(
                                 pair.kind,
-                                pa.display_scale.max(pb.display_scale).clamp(0.5, 2.0),
+                                pa.display_scale.max(pb.display_scale).clamp(0.5, 3.0),
                             )
                             .1 * 1.1
                 }
@@ -650,7 +650,7 @@ impl SocialCoordinator {
             (
                 pa.pos.x,
                 pb.pos.x,
-                pa.display_scale.max(pb.display_scale).clamp(0.5, 2.0),
+                pa.display_scale.max(pb.display_scale).clamp(0.5, 3.0),
             )
         };
         let direction = if bx >= ax { 1.0 } else { -1.0 };
@@ -780,7 +780,7 @@ impl SocialCoordinator {
             .iter()
             .filter_map(|id| {
                 find(refs, n, *id)
-                    .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0))
+                    .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 3.0))
             })
             .collect();
         let height: f64 = (1..len)
@@ -958,7 +958,7 @@ impl SocialCoordinator {
                                                     .as_deref()
                                                     .unwrap()
                                                     .display_scale
-                                                    .clamp(0.5, 2.0)
+                                                    .clamp(0.5, 3.0)
                                             })
                                             .unwrap_or(1.0);
                                         let upper = find(refs, n, g.ids[j + 1])
@@ -967,7 +967,7 @@ impl SocialCoordinator {
                                                     .as_deref()
                                                     .unwrap()
                                                     .display_scale
-                                                    .clamp(0.5, 2.0)
+                                                    .clamp(0.5, 3.0)
                                             })
                                             .unwrap_or(1.0);
                                         55.0 * lower.max(upper)
@@ -1011,9 +1011,9 @@ impl SocialCoordinator {
                     let just_launched = g.ids[g.dismounting + 1];
                     if find(refs, n, just_launched).is_some_and(|i| {
                         refs[i].as_deref().unwrap().pos.x - g.stack_x
-                            >= 80.0 * refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0)
+                            >= 80.0 * refs[i].as_deref().unwrap().display_scale.clamp(0.5, 3.0)
                             || g.stack_x - refs[i].as_deref().unwrap().pos.x
-                                >= 80.0 * refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0)
+                                >= 80.0 * refs[i].as_deref().unwrap().display_scale.clamp(0.5, 3.0)
                     }) {
                         g.clear_wait = 0.0;
                         self.launch_tower_top(g, refs, n);
@@ -1041,7 +1041,7 @@ impl SocialCoordinator {
                     .as_deref()
                     .unwrap()
                     .display_scale
-                    .clamp(0.5, 2.0);
+                    .clamp(0.5, 3.0);
                 let Some(top_i) = find(refs, n, g.ids[k]) else {
                     continue;
                 };
@@ -1055,7 +1055,7 @@ impl SocialCoordinator {
                     .as_deref()
                     .unwrap()
                     .display_scale
-                    .clamp(0.5, 2.0);
+                    .clamp(0.5, 3.0);
                 refs[top_i].as_deref_mut().unwrap().social_motion = Some(SocialMotion::Perch {
                     target: Vec2::new(owner_pos.x, owner_pos.y - 55.0 * scale.max(owner_scale)),
                     owner_id,
@@ -1072,7 +1072,7 @@ impl SocialCoordinator {
         let id = g.ids[g.dismounting];
         if let Some(i) = find(refs, n, id) {
             let p = refs[i].as_deref_mut().unwrap();
-            let scale = p.display_scale.clamp(0.5, 2.0);
+            let scale = p.display_scale.clamp(0.5, 3.0);
             p.social_motion = None;
             p.vel = Vec2::new(g.direction * 310.0, -330.0 * scale);
             p.state = State::Jump;
@@ -1250,16 +1250,15 @@ impl SocialCoordinator {
                     let scale = a
                         .display_scale
                         .max(refs[j].as_deref().unwrap().display_scale)
-                        .clamp(0.5, 2.0);
+                        .clamp(0.5, 3.0);
                     let (_, mut max) = social_distance_range(kind, scale);
                     if kind == SocialKind::HighFive {
                         max = max.min(96.0 * scale);
                     }
-                    if distance <= max {
-                        if self.start(i, j, kind, refs, world) {
-                            self.request = None;
-                        }
-                    } else if self.begin_approach(i, j, kind, refs, n, world) {
+                    if (distance <= max && self.start(i, j, kind, refs, world))
+                        || ((distance > max || kind == SocialKind::Leapfrog)
+                            && self.begin_approach(i, j, kind, refs, n, world))
+                    {
                         self.request = None;
                     }
                     return;
@@ -1286,7 +1285,11 @@ impl SocialCoordinator {
                 let requested = self.request.and_then(|(_, k)| k);
                 if !same_support(a, b, world)
                     || (a.pos.y - b.pos.y).abs() > 20.0
-                    || !distance_allowed(requested, (a.pos.x - b.pos.x).abs())
+                    || !distance_allowed(
+                        requested,
+                        (a.pos.x - b.pos.x).abs()
+                            / a.display_scale.max(b.display_scale).clamp(0.5, 3.0),
+                    )
                 {
                     continue;
                 }
@@ -1330,7 +1333,7 @@ impl SocialCoordinator {
     ) -> bool {
         let a = refs[i].as_deref().unwrap();
         let b = refs[j].as_deref().unwrap();
-        let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.0);
+        let scale = a.display_scale.max(b.display_scale).clamp(0.5, 3.0);
         let (min, mut max) = social_distance_range(kind, scale);
         if kind == SocialKind::HighFive {
             max = max.min(96.0 * scale);
@@ -1338,8 +1341,20 @@ impl SocialCoordinator {
         if !max.is_finite() || max < min + 4.0 {
             return false;
         }
-        let target_x = b.pos.x + (a.pos.x - b.pos.x).signum() * (min + max) * 0.5;
+        let separation = if kind == SocialKind::Leapfrog {
+            min + (max - min) * 0.4
+        } else {
+            (min + max) * 0.5
+        };
+        let target_x = b.pos.x + (a.pos.x - b.pos.x).signum() * separation;
         let support = support_rect(a, world);
+        if kind == SocialKind::Leapfrog {
+            let mut projected = a.clone();
+            projected.pos.x = target_x;
+            if (a.pos.x - target_x).abs() <= 9.0 || !can_start_kind(kind, &projected, b, world) {
+                return false;
+            }
+        }
         let approach = Approach {
             a: a.id,
             b: b.id,
@@ -1879,7 +1894,7 @@ fn choose(a: &Pet, b: &Pet, age: f64, previous: Option<SocialKind>, distance: f6
             _ => SocialKind::Comfort,
         }
     };
-    let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.0);
+    let scale = a.display_scale.max(b.display_scale).clamp(0.5, 3.0);
     let fits = |kind: SocialKind| {
         let (min, max) = social_distance_range(kind, scale);
         distance >= min && distance <= max
@@ -1964,7 +1979,7 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
         return false;
     }
     let support = support_rect(a, w);
-    let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.0);
+    let scale = a.display_scale.max(b.display_scale).clamp(0.5, 3.0);
     let d = (a.pos.x - b.pos.x).hypot(a.pos.y - b.pos.y);
     let range = social_distance_range(kind, scale);
     if d < range.0 || d > range.1 {
@@ -1980,7 +1995,7 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
         }
         SocialKind::Tower => {
             let work_area = w.area_at(Vec2::new(a.pos.x, support.y));
-            let scale = a.display_scale.max(b.display_scale).clamp(0.5, 2.5);
+            let scale = a.display_scale.max(b.display_scale).clamp(0.5, 3.0);
             let headroom = support.y - work_area.y;
             let dismount_room =
                 (a.pos.x - (support.x + 25.0)).max(support.right() - 25.0 - a.pos.x);
@@ -1994,7 +2009,7 @@ fn can_start_kind(kind: SocialKind, a: &Pet, b: &Pet, w: &World) -> bool {
         }
         SocialKind::Leapfrog => {
             support.y - w.area_at(a.pos).y
-                >= 180.0 * a.display_scale.max(b.display_scale).clamp(0.5, 2.0)
+                >= 180.0 * a.display_scale.max(b.display_scale).clamp(0.5, 3.0)
                 && support.w >= 320.0
                 && d >= 38.0 * (a.display_scale + b.display_scale) + 4.0 * scale
                 && leapfrog_target(a, b, support)
@@ -2089,7 +2104,7 @@ fn leapfrog_target(jumper: &Pet, croucher: &Pet, support: Rect) -> Option<Vec2> 
     let scale = jumper
         .display_scale
         .max(croucher.display_scale)
-        .clamp(0.5, 2.0);
+        .clamp(0.5, 3.0);
     let direction = if jumper.pos.x < croucher.pos.x {
         1.0
     } else {
@@ -2113,10 +2128,10 @@ fn tower_target_y(refs: &[Option<&mut Pet>; CAP], n: usize, g: &TowerGroup, k: u
     let rise = (0..k)
         .map(|j| {
             let a = find(refs, n, g.ids[j])
-                .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0))
+                .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 3.0))
                 .unwrap_or(1.0);
             let b = find(refs, n, g.ids[j + 1])
-                .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 2.0))
+                .map(|i| refs[i].as_deref().unwrap().display_scale.clamp(0.5, 3.0))
                 .unwrap_or(1.0);
             55.0 * a.max(b)
         })
@@ -2139,7 +2154,7 @@ fn tower_path_fits(refs: &[Option<&mut Pet>; CAP], n: usize, g: &TowerGroup) -> 
 }
 
 fn tower_launch(pet: &Pet, target: Vec2) -> Option<(f64, f64)> {
-    let scale = pet.display_scale.clamp(0.5, 2.0);
+    let scale = pet.display_scale.clamp(0.5, 3.0);
     let rise = (pet.pos.y - target.y + 65.0 * scale + 100.0 * scale).clamp(80.0, 900.0);
     let vy = (2.0 * GRAVITY * rise).sqrt().min(2050.0);
     let dy = target.y - pet.pos.y;

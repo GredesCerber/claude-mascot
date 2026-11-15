@@ -13,7 +13,7 @@ fn thrown(pos: Vec2) -> Pet {
 }
 #[test]
 fn straight_throw_bonks_without_needing_an_existing_spin() {
-    for scale in [0.75, 1.0, 1.5] {
+    for scale in [0.75, 1.0, 1.5, 2.0, 3.0] {
         let w = World {
             work_areas: vec![Rect::new(-800.0, -600.0, 1600.0, 1500.0)],
             ..World::default()
@@ -60,4 +60,23 @@ fn vertically_adjoining_monitor_is_an_open_passage() {
         assert!(p.vel.y < 0.0, "false ceiling at monitor seam");
     }
     panic!("never crossed the seam");
+}
+
+#[test]
+fn giant_pet_respects_body_width_at_walls_and_in_narrow_work_areas() {
+    for width in [100.0, 900.0] {
+        let w = World {
+            work_areas: vec![Rect::new(-800.0, 0.0, width, 1000.0)],
+            ..World::default()
+        };
+        let mut p = thrown(Vec2::new(-750.0, 500.0));
+        p.display_scale = 3.0;
+        p.vel.x = -1500.0;
+        for _ in 0..1600 {
+            p.update(DT, &w);
+            let inset = (24.0_f64 * 3.0).min(width / 2.0);
+            assert!(p.pos.x >= -800.0 + inset - 0.001);
+            assert!(p.pos.x <= -800.0 + width - inset + 0.001);
+        }
+    }
 }

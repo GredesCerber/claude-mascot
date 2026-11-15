@@ -768,6 +768,7 @@ mod native {
         settings: &Settings,
         entries: &[Entry],
         selected: u64,
+        autostart: bool,
     ) -> claude_mascot::preferences::PreferencesState {
         let pet = &entries
             .iter()
@@ -807,6 +808,8 @@ mod native {
             desktop_perches: settings.desktop_perches,
             ui_perches: settings.ui_perches,
             paused: settings.paused,
+            hide_fullscreen: settings.hide_fullscreen,
+            autostart,
             auto_updates: settings.auto_updates,
             auto_install_updates: settings.auto_install_updates,
         }
@@ -1108,9 +1111,16 @@ mod native {
                             save = true;
                         }
                         SetScale(scale) => {
-                            settings.scale = scale;
-                            rebuild = true;
-                            save = true;
+                            if settings::valid_scale(scale) && settings.scale != scale {
+                                // Resizing invalidates planned group arcs and swept contacts.
+                                social.enabled = false;
+                                social.update(0.0, entries.iter_mut().map(|e| &mut e.pet), &world);
+                                social.enabled = settings.social_enabled;
+                                contacts = claude_mascot::contacts::ContactCoordinator::new();
+                                settings.scale = scale;
+                                rebuild = true;
+                                save = true;
+                            }
                         }
                         SetIntensity(value) => {
                             settings.activity_intensity = value.min(100);
@@ -1236,6 +1246,14 @@ mod native {
                         ToggleSocial(value) => {
                             settings.social_enabled = value;
                             save = true;
+                        }
+                        ToggleHideFullscreen(value) => {
+                            settings.hide_fullscreen = value;
+                            save = true;
+                        }
+                        ToggleAutostart(value) => {
+                            settings::set_autostart(value)?;
+                            autostart = value;
                         }
                         TogglePaused(value) => {
                             settings.paused = value;
@@ -1580,7 +1598,7 @@ mod native {
                     }
                 }
                 if let Some(panel) = preferences.as_mut() {
-                    panel.show(panel_state(&settings, &entries, selected_pet_id));
+                    panel.show(panel_state(&settings, &entries, selected_pet_id, autostart));
                 }
                 open_preferences = false;
             }
@@ -1588,7 +1606,7 @@ mod native {
                 if panel.is_visible()
                     && (save || now.duration_since(preferences_at) >= Duration::from_millis(200))
                 {
-                    panel.sync(panel_state(&settings, &entries, selected_pet_id));
+                    panel.sync(panel_state(&settings, &entries, selected_pet_id, autostart));
                     preferences_at = now;
                 }
             }

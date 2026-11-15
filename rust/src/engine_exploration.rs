@@ -233,7 +233,7 @@ impl Pet {
         };
         let rect = world.windows[index].rect;
         let area = world.area_at(self.pos);
-        let scale = self.display_scale.clamp(0.5, 2.0);
+        let scale = self.display_scale.clamp(0.5, 3.0);
         if rect.y < area.y + self.head_clearance()
             || (0..=32).any(|step| {
                 let y = rect.y + 1.0 + (self.pos.y - rect.y - 36.0 * scale) * step as f64 / 32.0;
@@ -319,7 +319,7 @@ impl Pet {
                     // Attach at the current feet height: no vertical or horizontal teleport.
                     if self.pos.y
                         > world.windows[i].rect.bottom()
-                            + 40.0 * self.display_scale.clamp(0.5, 2.0)
+                            + 40.0 * self.display_scale.clamp(0.5, 3.0)
                             + 1e-6
                     {
                         self.abort_exploration(world);
@@ -452,7 +452,7 @@ impl Pet {
                 true
             }
             Phase::HopFlight(plan) => {
-                let scale = self.display_scale.clamp(0.5, 2.0);
+                let scale = self.display_scale.clamp(0.5, 3.0);
                 let found = world
                     .windows
                     .iter()
@@ -534,7 +534,7 @@ impl Pet {
                     return false;
                 };
                 let rect = world.windows[i].rect;
-                let scale = self.display_scale.clamp(0.5, 2.0);
+                let scale = self.display_scale.clamp(0.5, 3.0);
                 let edge_point = Vec2::new(
                     plan.grip_x(rect, scale),
                     (self.pos.y - 35.0 * scale).max(rect.y + 1.0),
@@ -604,7 +604,7 @@ fn ui_plan(pet: &Pet, world: &World, target: &crate::UiSurface) -> Option<UiJump
         .windows
         .iter()
         .find(|w| w.id == target.owner && w.active && !w.fullscreen && !w.is_desktop_icon)?;
-    let scale = pet.display_scale.clamp(0.5, 2.0);
+    let scale = pet.display_scale.clamp(0.5, 3.0);
     let half = BODY_HALF_WIDTH * scale;
     let head = pet.head_clearance();
     let floor = pet.floor_y(world);
@@ -654,8 +654,8 @@ fn ui_arc_clear(plan: UiJumpPlan, world: &World, scale: f64) -> bool {
     else {
         return false;
     };
-    let half = BODY_HALF_WIDTH * scale.clamp(0.5, 2.0);
-    let head = 55.0 * scale.clamp(0.5, 2.0) + 8.0;
+    let half = BODY_HALF_WIDTH * scale.clamp(0.5, 3.0);
+    let head = 55.0 * scale.clamp(0.5, 3.0) + 8.0;
     let mut previous_y = plan.start.y;
     for step in 0..=96 {
         let t = plan.duration * f64::from(step) / 96.0;

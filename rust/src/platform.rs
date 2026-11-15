@@ -658,14 +658,6 @@ unsafe fn icon_from_ico(ico: &[u8], requested: i32) -> HICON {
     )
 }
 
-const FPS_ITEMS: &[(u16, u32, &str)] = &[
-    (80, 30, "30 кадров/с"),
-    (81, 60, "60 кадров/с"),
-    (82, 120, "120 кадров/с"),
-    (83, 144, "144 кадра/с"),
-    (84, 240, "240 кадров/с"),
-];
-
 /// Owns a menu tree until it is attached to its parent (or explicitly destroyed).
 /// DestroyMenu recursively frees any submenus already attached to the root.
 struct MenuGuard(HMENU);
@@ -829,130 +821,7 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
         return None;
     }
 
-    let settings = MenuGuard::popup()?;
-    if !append_item(settings.raw(), 49, "Открыть настройки…", 0)
-        || AppendMenuW(settings.raw(), MF_SEPARATOR, 0, null()) == 0
-    {
-        return None;
-    }
-    for (id, label, checked) in [
-        (40, "Пауза", s.paused),
-        (41, "Скрывать в полноэкранном режиме", s.hide_fullscreen),
-        (42, "Запускать вместе с Windows", s.autostart),
-        (43, "Показывать реплики", s.show_bubbles),
-        (44, "Показывать настроение", s.show_mood),
-        (46, "Случайные занятия", s.auto_activities),
-        (47, "Реагировать на пользователя", s.auto_reactions),
-        (48, "Прыгать на значки рабочего стола", s.desktop_perches),
-    ] {
-        if !append_item(settings.raw(), id, label, 0) {
-            return None;
-        }
-        check_menu(settings.raw(), id, checked);
-    }
-    let size = MenuGuard::popup()?;
-    for (id, label, checked) in [
-        (50, "Маленький", s.scale < 0.9),
-        (51, "Обычный", (0.9..=1.25).contains(&s.scale)),
-        (52, "Большой", s.scale > 1.25),
-    ] {
-        if !append_item(size.raw(), id, label, 0) {
-            return None;
-        }
-        check_menu(size.raw(), id, checked);
-    }
-    CheckMenuRadioItem(
-        size.raw(),
-        50,
-        52,
-        if s.scale < 0.9 {
-            50
-        } else if s.scale > 1.25 {
-            52
-        } else {
-            51
-        },
-        MF_BYCOMMAND,
-    );
-    if !append_submenu(settings.raw(), size, "Размер") {
-        return None;
-    }
-    let palette = MenuGuard::popup()?;
-    for &(id, label, color) in crate::palette::PRESETS {
-        if !append_item(palette.raw(), id, label, 0) {
-            return None;
-        }
-        check_menu(palette.raw(), id, s.body_color == color);
-    }
-    if !append_item(palette.raw(), 188, "Свой цвет…", 0)
-        || !append_submenu(settings.raw(), palette, "Цвет этого Claude")
-    {
-        return None;
-    }
-
-    let spacing = MenuGuard::popup()?;
-    for (id, min, max, label) in [
-        (85, 12.0, 48.0, "Поближе: 12–48 px"),
-        (86, 24.0, 96.0, "Обычно: 24–96 px"),
-        (87, 48.0, 144.0, "Свободнее: 48–144 px"),
-    ] {
-        if !append_item(spacing.raw(), id, label, 0) {
-            return None;
-        }
-        check_menu(
-            spacing.raw(),
-            id,
-            s.personal_space_min == min && s.personal_space_max == max,
-        );
-    }
-    if !append_item(
-        spacing.raw(),
-        0,
-        &format!(
-            "Сейчас: {:.0}–{:.0} px между краями",
-            s.personal_space_min, s.personal_space_max
-        ),
-        MF_GRAYED,
-    ) || !append_submenu(settings.raw(), spacing, "Личное пространство")
-    {
-        return None;
-    }
-
-    let fps = MenuGuard::popup()?;
-    for &(id, value, label) in FPS_ITEMS {
-        if !append_item(fps.raw(), id, label, 0) {
-            return None;
-        }
-        check_menu(fps.raw(), id, s.target_fps == value);
-    }
-    if !FPS_ITEMS.iter().any(|&(_, value, _)| value == s.target_fps)
-        && !append_item(
-            fps.raw(),
-            0,
-            &format!("{} кадров/с (текущий режим)", s.target_fps),
-            MF_GRAYED,
-        )
-    {
-        return None;
-    }
-    if let Some(&(id, _, _)) = FPS_ITEMS
-        .iter()
-        .find(|&&(_, value, _)| value == s.target_fps)
-    {
-        CheckMenuRadioItem(fps.raw(), 80, 84, id as u32, MF_BYCOMMAND);
-    }
-    if !append_submenu(settings.raw(), fps, "Частота кадров")
-        || AppendMenuW(settings.raw(), MF_SEPARATOR, 0, null()) == 0
-        || !append_item(settings.raw(), 60, "Проверить обновления", 0)
-        || !append_item(settings.raw(), 61, "Автопроверка обновлений", 0)
-        || !append_item(settings.raw(), 62, "Устанавливать MSI автоматически", 0)
-        || !append_item(settings.raw(), 63, "Результат последнего обновления", 0)
-    {
-        return None;
-    }
-    check_menu(settings.raw(), 61, s.auto_updates);
-    check_menu(settings.raw(), 62, s.auto_install_updates);
-    if !append_submenu(root.raw(), settings, "Настройки")
+    if !append_item(root.raw(), 49, "Открыть настройки…", 0)
         || AppendMenuW(root.raw(), MF_SEPARATOR, 0, null()) == 0
         || !append_item(root.raw(), 31, "Выход", 0)
     {
@@ -1520,28 +1389,30 @@ mod tests {
             .expect("Windows should build the native menu tree");
 
             for id in [
-                1, 2, 3, 4, 5, 20, 30, 31, 40, 41, 42, 43, 44, 50, 51, 52, 60, 61, 62, 63, 70, 71,
-                72, 73, 45, 46, 47, 48, 74, 75, 76, 80, 81, 82, 83, 84, 90, 91, 92, 93, 94, 95, 96,
-                97, 98, 99,
+                1, 2, 3, 4, 5, 20, 30, 31, 49, 70, 71, 72, 73, 45, 74, 75, 76, 90, 91, 92, 93, 94,
+                95, 96, 97, 98, 99,
             ] {
                 let _ = command_state(menu.raw(), id);
             }
-            for id in [6, 7, 8, 10, 11, 21] {
+            for id in [
+                6, 7, 8, 10, 11, 21, 40, 41, 42, 43, 44, 46, 47, 48, 50, 51, 52, 60, 61, 62, 63,
+                80, 81, 82, 83, 84, 85, 86, 87, 180, 188,
+            ] {
                 assert!(
                     find_command(menu.raw(), id).is_none(),
-                    "removed command {id} must not exist"
+                    "removed command {id}"
                 );
             }
-
+            assert_eq!(
+                find_command(menu.raw(), 49),
+                Some(menu.raw()),
+                "direct settings entry"
+            );
             assert_eq!(command_state(menu.raw(), 2) & MF_CHECKED, 0);
             assert_ne!(command_state(menu.raw(), 5) & MF_CHECKED, 0);
             assert_ne!(command_state(menu.raw(), 74) & MF_CHECKED, 0);
             assert_eq!(command_state(menu.raw(), 75) & MF_CHECKED, 0);
-            assert_ne!(command_state(menu.raw(), 82) & MF_CHECKED, 0);
             assert_ne!(command_state(menu.raw(), 45) & MF_CHECKED, 0);
-            assert_ne!(command_state(menu.raw(), 46) & MF_CHECKED, 0);
-            assert_ne!(command_state(menu.raw(), 47) & MF_CHECKED, 0);
-            assert_ne!(command_state(menu.raw(), 48) & MF_CHECKED, 0);
             for scene in &crate::activities::CATALOG {
                 assert_eq!(
                     command_state(menu.raw(), 100 + scene.id.0 as u16) & MF_CHECKED,
@@ -1557,7 +1428,6 @@ mod tests {
             .unwrap();
             assert_ne!(command_state(selected_scene.raw(), 121) & MF_CHECKED, 0);
             assert_eq!(command_state(selected_scene.raw(), 45) & MF_CHECKED, 0);
-            assert_eq!(command_state(selected_scene.raw(), 46) & MF_CHECKED, 0);
         }
     }
 }

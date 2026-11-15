@@ -79,7 +79,7 @@ impl ContactCoordinator {
                 .map(|(_, pos)| *pos)
                 .unwrap_or(p.pos);
             let scale = if p.display_scale.is_finite() {
-                p.display_scale.clamp(0.5, 2.0)
+                p.display_scale.clamp(0.5, 3.0)
             } else {
                 1.0
             };

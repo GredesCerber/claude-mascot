@@ -46,6 +46,9 @@ const ID_RETURN_ALL: i32 = 2022;
 const ID_PET: i32 = 100;
 const ID_FPS: i32 = 101;
 const ID_SCALE: i32 = 102;
+const ID_RESET_SCALE: i32 = 106;
+const ID_HIDE_FULLSCREEN: i32 = 107;
+const ID_AUTOSTART: i32 = 108;
 const ID_INTENSITY: i32 = 103;
 const ID_MIN_GAP: i32 = 104;
 const ID_MAX_GAP: i32 = 105;
@@ -102,6 +105,8 @@ pub struct PreferencesState {
     pub desktop_perches: bool,
     pub ui_perches: bool,
     pub paused: bool,
+    pub hide_fullscreen: bool,
+    pub autostart: bool,
     pub auto_updates: bool,
     pub auto_install_updates: bool,
 }
@@ -127,6 +132,8 @@ impl Default for PreferencesState {
             desktop_perches: true,
             ui_perches: false,
             paused: false,
+            hide_fullscreen: true,
+            autostart: false,
             auto_updates: true,
             auto_install_updates: false,
         }
@@ -156,6 +163,8 @@ pub enum PreferencesEvent {
     ToggleDesktop(bool),
     ToggleUiPerches(bool),
     TogglePaused(bool),
+    ToggleHideFullscreen(bool),
+    ToggleAutostart(bool),
     ToggleAutoUpdates(bool),
     ToggleAutoInstall(bool),
     ChooseColor,
@@ -206,7 +215,8 @@ struct WindowState {
     pet_labels: Vec<String>,
     company_labels: Vec<String>,
     fps_combo: HWND,
-    scale_combo: HWND,
+    scale_slider: HWND,
+    scale_value: HWND,
     intensity: HWND,
     intensity_value: HWND,
     min_edit: HWND,
@@ -251,7 +261,8 @@ impl WindowState {
             pet_labels: Vec::new(),
             company_labels: Vec::new(),
             fps_combo: null_mut(),
-            scale_combo: null_mut(),
+            scale_slider: null_mut(),
+            scale_value: null_mut(),
             intensity: null_mut(),
             intensity_value: null_mut(),
             min_edit: null_mut(),
@@ -714,12 +725,39 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
     button(s, "Выбрать цвет…", ID_COLOR_BUTTON, 255, y, 150)?;
     button(s, "Сбросить", ID_RESET_COLOR, 435, y, 120)?;
     y += 46;
-    label(s, "Масштаб", 20, y, 150)?;
-    s.scale_combo = combo(s, ID_SCALE, 190, y, 400)?;
-    for item in ["75%", "100%", "150%"] {
-        combo_item(s.scale_combo, item);
+    label(s, "Размер всех", 20, y, 150)?;
+    s.scale_slider = add_child(
+        s,
+        "msctls_trackbar32",
+        "Размер всех питомцев",
+        ID_SCALE,
+        TBS_AUTOTICKS | TBS_HORZ | WS_TABSTOP,
+        0,
+        190,
+        y,
+        330,
+        34,
+    );
+    if s.scale_slider.is_null() {
+        return Err(last_error("CreateWindowExW size slider"));
     }
-    button(s, "Всем разные цвета", ID_DISTINCT_COLORS, 20, 234, 260)?;
+    SendMessageW(s.scale_slider, TBM_SETRANGEMIN, 1, 0);
+    SendMessageW(s.scale_slider, TBM_SETRANGEMAX, 1, 45);
+    SendMessageW(s.scale_slider, TBM_SETTICFREQ, 5, 0);
+    SendMessageW(s.scale_slider, TBM_SETPAGESIZE, 0, 5);
+    s.scale_value = add_child(s, "STATIC", "100%", 0, 0, 0, 530, y + 4, 65, 24);
+    if s.scale_value.is_null() {
+        return Err(last_error("CreateWindowExW size label"));
+    }
+    label(
+        s,
+        "75–300%, шаг 5%. Сразу для всей компании.",
+        190,
+        236,
+        400,
+    )?;
+    button(s, "Обычный размер (100%)", ID_RESET_SCALE, 20, 276, 260)?;
+    button(s, "Всем разные цвета", ID_DISTINCT_COLORS, 300, 276, 260)?;
     s.build_page = 1;
     y = 150;
     heading(s, "Поведение", 20, 112, 400)?;
@@ -935,6 +973,8 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         590,
     )?;
     for (id, text) in [
+        (ID_HIDE_FULLSCREEN, "Скрывать в полноэкранном режиме"),
+        (ID_AUTOSTART, "Запускать вместе с Windows"),
         (ID_MOOD, "Показывать настроение"),
         (ID_BUBBLES, "Показывать реплики"),
         (ID_REACTIONS, "Реакции на рабочий стол"),
@@ -950,8 +990,10 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         ),
     ] {
         let (page, top) = match id {
-            ID_MOOD => (0, 270),
-            ID_BUBBLES => (0, 307),
+            ID_MOOD => (0, 324),
+            ID_BUBBLES => (0, 361),
+            ID_HIDE_FULLSCREEN => (4, 230),
+            ID_AUTOSTART => (4, 267),
             ID_REACTIONS => (1, 510),
             ID_ACTIVITIES => (1, 547),
             ID_PAUSED => (1, 584),
@@ -1162,16 +1204,13 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
             });
         SendMessageW(s.fps_combo, CB_SETCURSEL, fps_index, 0);
     }
-    let scale_index = if (s.data.scale - 0.75).abs() < 0.01 {
-        0
-    } else if (s.data.scale - 1.5).abs() < 0.01 {
-        2
-    } else {
-        1
-    };
-    if force || focused != s.scale_combo {
-        SendMessageW(s.scale_combo, CB_SETCURSEL, scale_index, 0);
+    if force || focused != s.scale_slider {
+        let position = ((s.data.scale * 100.0 - 75.0) / 5.0)
+            .round()
+            .clamp(0.0, 45.0);
+        SendMessageW(s.scale_slider, TBM_SETPOS, 1, position as LPARAM);
     }
+    set_text(s.scale_value, &format!("{:.0}%", s.data.scale * 100.0));
     if force || focused != s.intensity {
         SendMessageW(
             s.intensity,
@@ -1213,6 +1252,8 @@ unsafe fn sync_controls(s: &mut WindowState, force: bool) {
         (s.data.pet_ids.len() > 1) as i32,
     );
     for (id, value) in [
+        (ID_HIDE_FULLSCREEN, s.data.hide_fullscreen),
+        (ID_AUTOSTART, s.data.autostart),
         (ID_MOOD, s.data.show_mood),
         (ID_BUBBLES, s.data.show_bubbles),
         (ID_REACTIONS, s.data.auto_reactions),
@@ -1420,6 +1461,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             handle_command(s, wparam, lparam);
             0
         }
+        WM_HSCROLL if lparam as HWND == s.scale_slider => {
+            let position = SendMessageW(s.scale_slider, WM_USER, 0, 0).clamp(0, 45);
+            let value = (75 + position * 5) as f64 / 100.0;
+            if (s.data.scale - value).abs() > f64::EPSILON {
+                s.data.scale = value;
+                set_text(s.scale_value, &format!("{:.0}%", value * 100.0));
+                s.events.push(PreferencesEvent::SetScale(value));
+            }
+            0
+        }
         WM_HSCROLL if lparam as HWND == s.intensity => {
             let value = SendMessageW(s.intensity, WM_USER, 0, 0).clamp(0, 100) as u8;
             s.data.intensity = value;
@@ -1615,13 +1666,11 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
             s.data.fps = fps;
             s.events.push(PreferencesEvent::SetFps(fps));
         }
-        (ID_SCALE, CBN_SELCHANGE) => {
-            let scale = [0.75, 1.0, 1.5]
-                .get(SendMessageW(s.scale_combo, CB_GETCURSEL, 0, 0) as usize)
-                .copied()
-                .unwrap_or(1.0);
-            s.data.scale = scale;
-            s.events.push(PreferencesEvent::SetScale(scale));
+        (ID_RESET_SCALE, BN_CLICKED) => {
+            s.data.scale = 1.0;
+            SendMessageW(s.scale_slider, TBM_SETPOS, 1, 5);
+            set_text(s.scale_value, "100%");
+            s.events.push(PreferencesEvent::SetScale(1.0));
         }
         (ID_DISTINCT_COLORS, BN_CLICKED) => s.events.push(PreferencesEvent::RunAction(189)),
         (ID_COLOR_BUTTON, BN_CLICKED) => s.events.push(PreferencesEvent::ChooseColor),
@@ -1655,6 +1704,8 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         }
         (_, BN_CLICKED)
             if id == ID_MOOD
+                || id == ID_HIDE_FULLSCREEN
+                || id == ID_AUTOSTART
                 || id == ID_BUBBLES
                 || id == ID_REACTIONS
                 || id == ID_ACTIVITIES
@@ -1667,6 +1718,14 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         {
             let value = SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
             match id {
+                ID_HIDE_FULLSCREEN => {
+                    s.data.hide_fullscreen = value;
+                    s.events.push(PreferencesEvent::ToggleHideFullscreen(value));
+                }
+                ID_AUTOSTART => {
+                    s.data.autostart = value;
+                    s.events.push(PreferencesEvent::ToggleAutostart(value));
+                }
                 ID_MOOD => {
                     s.data.show_mood = value;
                     s.events.push(PreferencesEvent::ToggleMood(value));
@@ -2219,6 +2278,68 @@ mod tests {
             let mut after: RECT = std::mem::zeroed();
             GetWindowRect(panel.state.pet_combo, &mut after);
             assert_eq!(before.top, after.top);
+        }
+    }
+    #[test]
+    fn size_slider_applies_three_hundred_percent_and_resets_without_duplicate_events() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        panel.sync(PreferencesState {
+            scale: 1.15,
+            autostart: true,
+            hide_fullscreen: false,
+            ..PreferencesState::default()
+        });
+        unsafe {
+            let slider = panel.state.scale_slider;
+            assert_eq!(SendMessageW(slider, WM_USER, 0, 0), 8);
+            SendMessageW(slider, TBM_SETPOS, 1, 45);
+            SendMessageW(
+                panel.hwnd,
+                WM_HSCROLL,
+                TB_THUMBTRACK as usize,
+                slider as LPARAM,
+            );
+            assert_eq!(panel.poll(), vec![PreferencesEvent::SetScale(3.0)]);
+            SendMessageW(
+                panel.hwnd,
+                WM_HSCROLL,
+                TB_ENDTRACK as usize,
+                slider as LPARAM,
+            );
+            assert!(panel.poll().is_empty());
+            handle_command(&mut panel.state, ID_RESET_SCALE as usize, 0);
+            assert_eq!(panel.poll(), vec![PreferencesEvent::SetScale(1.0)]);
+            assert_eq!(SendMessageW(slider, WM_USER, 0, 0), 5);
+            assert_eq!(
+                SendMessageW(GetDlgItem(panel.hwnd, ID_AUTOSTART), BM_GETCHECK, 0, 0),
+                BST_CHECKED as isize
+            );
+            assert_eq!(
+                SendMessageW(
+                    GetDlgItem(panel.hwnd, ID_HIDE_FULLSCREEN),
+                    BM_GETCHECK,
+                    0,
+                    0
+                ),
+                0
+            );
+            for (id, event) in [
+                (ID_AUTOSTART, PreferencesEvent::ToggleAutostart(false)),
+                (
+                    ID_HIDE_FULLSCREEN,
+                    PreferencesEvent::ToggleHideFullscreen(true),
+                ),
+            ] {
+                let control = GetDlgItem(panel.hwnd, id);
+                SendMessageW(
+                    control,
+                    BM_SETCHECK,
+                    if id == ID_AUTOSTART { 0 } else { 1 },
+                    0,
+                );
+                handle_command(&mut panel.state, id as usize, control as LPARAM);
+                assert_eq!(panel.poll(), vec![event]);
+            }
         }
     }
     #[test]

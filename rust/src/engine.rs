@@ -1060,9 +1060,9 @@ impl Pet {
                         old.y <= s.rect.y + 2.0
                             && !s.rect.contains(world.cursor)
                             && self.pos.y >= s.rect.y
-                            && self.pos.x - BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
+                            && self.pos.x - BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0)
                                 >= s.rect.x
-                            && self.pos.x + BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
+                            && self.pos.x + BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0)
                                 <= s.rect.right()
                             && world
                                 .windows
@@ -1367,7 +1367,7 @@ impl Pet {
         }
         if rise > 0.0 {
             self.pos.y = area.bottom();
-            let bounce_height = 24.0 * self.display_scale.clamp(0.5, 2.0);
+            let bounce_height = 24.0 * self.display_scale.clamp(0.5, 3.0);
             self.vel.y = -(2.0 * GRAVITY * bounce_height).sqrt();
             self.squash = 0.3;
             self.floor_bounce_cooldown = 0.8;
@@ -1391,12 +1391,12 @@ impl Pet {
     }
 
     fn overlaps_x(&self, r: Rect) -> bool {
-        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0);
         self.pos.x + half > r.x && self.pos.x - half < r.right()
     }
 
     fn platform_under(&self, x: f64, world: &World) -> bool {
-        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0);
         if let Some(s) = &self.ui_surface {
             return x + half > s.rect.x && x - half < s.rect.right();
         }
@@ -1409,7 +1409,7 @@ impl Pet {
     }
 
     fn follow_surface(&mut self, index: usize, world: &World) {
-        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+        let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0);
         if let Some(w) = world.windows.get(index) {
             if valid_rect(w.rect)
                 && self.pos.x >= w.rect.x - half
@@ -1443,7 +1443,7 @@ impl Pet {
         if let Some(current) = current {
             let dx = current.rect.x - old.rect.x;
             let dy = current.rect.y - old.rect.y;
-            let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0);
+            let half = BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0);
             let next_x = self.pos.x + dx;
             if dx.abs() <= 20.0
                 && dy.abs() <= 20.0
@@ -1483,7 +1483,7 @@ impl Pet {
         {
             return;
         }
-        let scale = self.display_scale.clamp(0.5, 2.0);
+        let scale = self.display_scale.clamp(0.5, 3.0);
         let area = world.area_at(self.pos);
         let half = BODY_HALF_WIDTH * scale;
         let preferred = if world.cursor.x >= self.pos.x {
@@ -1632,7 +1632,7 @@ impl Pet {
         self.pos.x = if self.climb_front {
             w.rect.x + w.rect.w * self.climb_face_fraction
         } else {
-            side + self.facing * BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 2.0)
+            side + self.facing * BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0)
         };
         self.pos.y -= 65.0 * dt;
         if self.pos.y <= w.rect.y {
@@ -1642,7 +1642,7 @@ impl Pet {
         }
         // Hands can grip a window whose bottom is slightly above the floor.
         // Keep the feet at their physical height instead of snapping them up.
-        if self.pos.y > w.rect.bottom() + 40.0 * self.display_scale.clamp(0.5, 2.0) {
+        if self.pos.y > w.rect.bottom() + 40.0 * self.display_scale.clamp(0.5, 3.0) {
             self.surface = None;
             self.surface_id = None;
             self.surface_prev = None;
@@ -1809,7 +1809,7 @@ impl Pet {
     }
 
     fn head_clearance(&self) -> f64 {
-        55.0 * self.display_scale.clamp(0.5, 2.0) + 8.0
+        55.0 * self.display_scale.clamp(0.5, 3.0) + 8.0
     }
 
     fn has_support(&self, world: &World) -> bool {
@@ -2002,7 +2002,7 @@ impl Pet {
         {
             return false;
         }
-        let scale = self.display_scale.clamp(0.5, 2.0);
+        let scale = self.display_scale.clamp(0.5, 3.0);
         let rise = 140.0 * scale;
         let area = world.area_at(self.pos);
         if !valid_rect(area) || self.pos.y - area.y < rise + self.head_clearance() {
@@ -2658,7 +2658,7 @@ impl Pet {
     fn clamp_to_area(&mut self, world: &World) {
         let a = world.area_at(self.pos);
         if valid_rect(a) {
-            let inset = BODY_HALF_WIDTH.min(a.w * 0.5);
+            let inset = (BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0)).min(a.w * 0.5);
             let (left_connected, right_connected) = horizontal_neighbors(a, self.pos.y, world);
             let left = if left_connected { a.x } else { a.x + inset };
             let right = if right_connected {
@@ -2680,7 +2680,7 @@ impl Pet {
         if !valid_rect(a) {
             return;
         }
-        let inset = BODY_HALF_WIDTH.min(a.w * 0.5);
+        let inset = (BODY_HALF_WIDTH * self.display_scale.clamp(0.5, 3.0)).min(a.w * 0.5);
         let (left_connected, right_connected) = horizontal_neighbors(a, self.pos.y, world);
         let left = if left_connected { a.x } else { a.x + inset };
         let right = if right_connected {

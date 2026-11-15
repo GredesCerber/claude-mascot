@@ -201,8 +201,8 @@ impl BehaviorCoordinator {
             self.entries[i] = Some(Entry {
                 id: p.id,
                 x: p.pos.x,
-                half: BODY_HALF * p.display_scale.clamp(0.5, 2.0),
-                scale: p.display_scale.clamp(0.5, 2.0),
+                half: BODY_HALF * p.display_scale.clamp(0.5, 3.0),
+                scale: p.display_scale.clamp(0.5, 3.0),
                 key,
                 movable: !state_owned,
                 active,

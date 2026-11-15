@@ -26,7 +26,7 @@ pub(crate) fn plan_jump(
     if world.fullscreen_active() {
         return None;
     }
-    let scale = pet.display_scale.clamp(0.5, 2.0);
+    let scale = pet.display_scale.clamp(0.5, 3.0);
     let mut targets = Vec::new();
     for (i, w) in world.windows.iter().enumerate().take(256) {
         if !valid_window(w) || pet.surface_id == Some(w.id) || pet.surface == Some(i) {
@@ -76,7 +76,7 @@ pub(crate) fn jump_to(
     window_id: Option<usize>,
     target: Vec2,
 ) -> Option<JumpPlan> {
-    let scale = pet.display_scale.clamp(0.5, 2.0);
+    let scale = pet.display_scale.clamp(0.5, 3.0);
     if world.fullscreen_active()
         || !target_valid(world, target, window_id, scale)
         || !reachable(pet.pos, target, scale)

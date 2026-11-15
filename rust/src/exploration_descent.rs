@@ -159,7 +159,7 @@ fn plan_from_position(pet: &Pet, world: &World, roll: f64) -> Option<crate::expl
 
 fn display_scale(pet: &Pet) -> f64 {
     if pet.display_scale.is_finite() {
-        pet.display_scale.clamp(0.75, 1.5)
+        pet.display_scale.clamp(0.75, 3.0)
     } else {
         1.0
     }
