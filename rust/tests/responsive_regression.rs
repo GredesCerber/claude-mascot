@@ -52,7 +52,7 @@ fn cursor_play_is_not_an_immediate_or_repeated_nearby_trigger() {
     let mut pet = settled();
     pet.auto_activities = false;
     let mut w = world();
-    for frame in 0..3600 {
+    for frame in 0..1200 {
         w.cursor = Vec2::new(
             pet.pos.x + 120.0 + (frame % 6) as f64 * 3.0,
             pet.pos.y - 25.0,

@@ -1553,6 +1553,12 @@ mod native {
             for skin in spawn_skins {
                 if entries.len() < 8 {
                     let area = world.area_at(world.cursor);
+                    let name = claude_mascot::company::available_name(entries.iter().map(|e| {
+                        (
+                            e.pet.id,
+                            settings.pet_names.get(&e.pet.id).map(String::as_str),
+                        )
+                    }));
                     entries.push(spawn(
                         Pet::new(
                             next_id,
@@ -1572,6 +1578,7 @@ mod native {
                         entries.len() - 1,
                     );
                     entries.last_mut().unwrap().pet.body_color = color;
+                    settings.pet_names.insert(next_id, name);
                     selected_pet_id = next_id;
                     next_id += 1;
                     if o.inspect {

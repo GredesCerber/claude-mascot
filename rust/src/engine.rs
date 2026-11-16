@@ -154,6 +154,9 @@ pub struct Pet {
     pub(crate) auto_pursuit_time: f64,
     pub(crate) pursuit_stationary: f64,
     pub(crate) auto_pursuit: bool,
+    cursor_play_runs_left: u8,
+    cursor_play_pause: f64,
+    cursor_play_remaining: f64,
     pub(crate) attention_time: f64,
     pub(crate) prior_reaction_windows: Vec<(usize, bool, bool, u64)>,
     pub(crate) current_reaction_windows: Vec<(usize, bool, bool, u64)>,
@@ -288,7 +291,7 @@ impl Pet {
             reaction_scan: 0.0,
             reaction_cooldown: 0.0,
             cursor_dwell: 0.0,
-            cursor_play_cooldown: 90.0 + (id.wrapping_mul(37) % 61) as f64,
+            cursor_play_cooldown: 25.0 + (id.wrapping_mul(37) % 26) as f64,
             cursor_greeting: CursorGreeting::default(),
             cursor_greeting_cooldown: 0.0,
             cursor_interest: false,
@@ -296,6 +299,9 @@ impl Pet {
             auto_pursuit_time: 0.0,
             pursuit_stationary: 0.0,
             auto_pursuit: false,
+            cursor_play_runs_left: 0,
+            cursor_play_pause: 0.0,
+            cursor_play_remaining: 0.0,
             attention_time: 0.0,
             prior_reaction_windows: Vec::with_capacity(256),
             current_reaction_windows: Vec::with_capacity(256),
@@ -363,6 +369,11 @@ impl Pet {
         self.reaction_scan = (self.reaction_scan - dt).max(0.0);
         self.reaction_cooldown = (self.reaction_cooldown - dt).max(0.0);
         self.cursor_play_cooldown = (self.cursor_play_cooldown - dt).max(0.0);
+        self.cursor_play_pause = (self.cursor_play_pause - dt).max(0.0);
+        self.cursor_play_remaining = (self.cursor_play_remaining - dt).max(0.0);
+        if self.cursor_play_remaining == 0.0 && !self.auto_pursuit {
+            self.cursor_play_runs_left = 0;
+        }
         self.cursor_greeting_cooldown = (self.cursor_greeting_cooldown - dt).max(0.0);
         self.attention_time = (self.attention_time - dt).max(0.0);
         if self.attention_time == 0.0 {
@@ -1655,7 +1666,7 @@ impl Pet {
         if self.auto_pursuit {
             self.auto_pursuit_time = (self.auto_pursuit_time - dt).max(0.0);
             let area = world.area_at(self.pos);
-            if distance(world.cursor, self.last_cursor) <= 2.5 {
+            if distance(world.cursor, self.last_cursor) <= 32.0 * dt {
                 self.pursuit_stationary += dt;
             } else {
                 self.pursuit_stationary = 0.0;
@@ -1665,14 +1676,19 @@ impl Pet {
                 && world.cursor.y <= area.bottom()
                 && world.cursor.x >= area.x
                 && world.cursor.x <= area.right();
-            if self.auto_pursuit_time <= 0.0
-                || self.pursuit_stationary >= 0.55
-                || !reachable
-                || distance(world.cursor, self.pos) > 420.0
-                || dx.abs() < 34.0
+            let radius = 34.0 * self.display_scale.clamp(0.75, 3.0);
+            if !reachable
+                || distance(world.cursor, self.pos) > 480.0
+                || self.cursor_play_remaining <= 0.0
+                || self.frequencies.cursor == 0
+                || self.activity_intensity == 0
             {
-                self.cancel_auto_pursuit();
-                self.set_state(State::Idle, 0.0);
+                self.finish_cursor_game();
+                return;
+            }
+            if self.auto_pursuit_time <= 0.0 || self.pursuit_stationary >= 0.75 || dx.abs() < radius
+            {
+                self.finish_cursor_run();
                 return;
             }
             self.facing = if dx < 0.0 { -1.0 } else { 1.0 };
@@ -1681,8 +1697,8 @@ impl Pet {
                 self.set_state(State::Idle, 0.0);
                 return;
             }
-            self.pos.x = (self.pos.x + self.facing * RUN_SPEED * dt)
-                .clamp(area.x + BODY_HALF_WIDTH, area.right() - BODY_HALF_WIDTH);
+            self.pos.x += self.facing * RUN_SPEED * dt;
+            self.clamp_to_area(world);
             self.set_state(State::Chase, 0.0);
             return;
         }
@@ -1715,7 +1731,11 @@ impl Pet {
         if valid_vec(cursor) {
             self.pos = Vec2::new(cursor.x + self.hold_offset.x, cursor.y + self.hold_offset.y);
         }
-        let movement = distance(cursor, self.last_cursor);
+        let delta = Vec2::new(cursor.x - self.last_cursor.x, cursor.y - self.last_cursor.y);
+        let movement = self
+            .shake_samples
+            .back()
+            .map_or(0.0, |(_, p)| distance(cursor, *p));
         if movement > 35.0 {
             self.shake_samples.push_back((self.time, cursor));
         }
@@ -1724,7 +1744,13 @@ impl Pet {
         let oscillations = direction_reversals(&self.shake_samples);
         if oscillations >= SHAKE_HITS {
             self.surface = None;
-            self.vel = Vec2::new((cursor.x - self.pos.x) * 5.0, -350.0);
+            self.cancel_auto_pursuit();
+            let elapsed = dt.max(1.0 / 1000.0);
+            self.vel = Vec2::new(
+                (delta.x / elapsed).clamp(-1800.0, 1800.0),
+                (delta.y / elapsed).clamp(-1800.0, 1800.0),
+            );
+            self.shake_samples.clear();
             self.grab_cooldown = 1.0;
             self.set_state(State::Thrown, 0.0);
             self.speak(SpeechEvent::Falling, 1.5);
@@ -1752,7 +1778,12 @@ impl Pet {
     }
 
     fn update_idle_animation(&mut self, dt: f64, world: &World) {
-        if self.state != State::Idle || self.dragging || self.chase || !self.has_support(world) {
+        if self.state != State::Idle
+            || self.dragging
+            || self.chase
+            || self.cursor_play_runs_left > 0
+            || !self.has_support(world)
+        {
             return;
         }
         if self.auto_activities
@@ -1969,8 +2000,7 @@ impl Pet {
             self.social_motion = None;
             self.activity = None;
             self.pending_activity = None;
-            self.auto_pursuit = false;
-            self.auto_pursuit_time = 0.0;
+            self.cancel_auto_pursuit();
             self.behavior_velocity = None;
             self.behavior_velocity_ttl = 0.0;
             self.exploration_route = None;
@@ -2142,7 +2172,7 @@ impl Pet {
             return;
         }
         self.cursor_motion_recent = (self.cursor_motion_recent - dt).max(0.0);
-        if distance(world.cursor, self.last_cursor) > 2.5 {
+        if distance(world.cursor, self.last_cursor) > 32.0 * dt {
             self.cursor_motion_recent = 0.2;
         }
         if self.reaction_scan <= 0.0 {
@@ -2242,32 +2272,71 @@ impl Pet {
             self.cursor_dwell = 0.0;
             self.cursor_interest = false;
         }
-        // Cursor play is an occasional whim, not a guaranteed response to
-        // every nearby movement. Cooldown is separate from window reactions.
-        if self.cursor_dwell >= 0.7
-            && self.reaction_cooldown <= 0.0
-            && eligible
-            && self.cursor_play_cooldown <= 0.0
-            && self.activity_intensity > 0
-            && self.frequencies.cursor > 0
+        let ready = eligible
             && self.behavior_manual_lock <= 0.0
             && self.social_motion.is_none()
             && !world.fullscreen_active()
+            && self.activity_intensity > 0
+            && self.frequencies.cursor > 0;
+        let moving_nearby = near
+            && self.cursor_motion_recent > 0.0
+            && (world.cursor.x - self.pos.x).abs() > 34.0 * self.display_scale.clamp(0.75, 3.0);
+        if self.cursor_play_runs_left > 0 {
+            if ready && moving_nearby && self.cursor_play_pause <= 0.0 {
+                self.cursor_play_runs_left -= 1;
+                self.start_cursor_run();
+            }
+            return;
+        }
+        // Rare short games, with a separate long cooldown between whole games.
+        if self.cursor_dwell >= 0.35
+            && self.reaction_cooldown <= 0.0
+            && ready
+            && moving_nearby
+            && self.cursor_play_cooldown <= 0.0
             && self.random_chance(
-                dt / 90.0
+                dt / 18.0
                     * (self.activity_intensity.min(100) as f64 / 50.0)
                     * self.frequencies.cursor as f64
                     / 50.0,
             )
         {
-            self.auto_pursuit = true;
-            self.pursuit_stationary = 0.0;
-            self.auto_pursuit_time = 3.5;
-            self.cursor_play_cooldown = 180.0 + self.random() * 180.0;
+            self.cursor_play_runs_left = (self.random() * 3.0) as u8;
+            self.cursor_play_remaining = 20.0;
+            self.cursor_play_cooldown = (120.0 + self.random() * 120.0) * 50.0
+                / f64::from(self.frequencies.cursor.clamp(25, 100));
             self.reaction_cooldown = 20.0;
             self.cursor_dwell = 0.0;
-            self.set_state(State::Chase, 0.0);
+            self.speak(SpeechEvent::Chase, 2.0);
+            self.start_cursor_run();
         }
+    }
+
+    fn start_cursor_run(&mut self) {
+        self.auto_pursuit = true;
+        self.pursuit_stationary = 0.0;
+        self.auto_pursuit_time = 2.5;
+        self.set_state(State::Chase, 0.0);
+    }
+
+    fn finish_cursor_run(&mut self) {
+        if self.cursor_play_runs_left > 0 && self.cursor_play_remaining > 0.0 {
+            self.auto_pursuit = false;
+            self.auto_pursuit_time = 0.0;
+            self.pursuit_stationary = 0.0;
+            self.vel = Vec2::default();
+            self.cursor_play_pause = 0.8 + self.random() * 0.6;
+            self.set_state(State::Sit, self.cursor_play_pause);
+        } else {
+            self.finish_cursor_game();
+        }
+    }
+
+    fn finish_cursor_game(&mut self) {
+        self.cancel_auto_pursuit();
+        self.vel = Vec2::default();
+        self.set_state(State::Sit, 3.0);
+        self.speak(SpeechEvent::Rest, 2.0);
     }
 
     fn eligible_for_reaction(&self, world: &World) -> bool {
@@ -2284,6 +2353,9 @@ impl Pet {
         self.auto_pursuit = false;
         self.auto_pursuit_time = 0.0;
         self.pursuit_stationary = 0.0;
+        self.cursor_play_runs_left = 0;
+        self.cursor_play_pause = 0.0;
+        self.cursor_play_remaining = 0.0;
         if was_automatic && !self.chase && self.state == State::Chase {
             self.set_state(State::Idle, 0.0);
         }
@@ -2748,6 +2820,9 @@ impl Pet {
         self.surface_id = None;
         self.surface_prev = None;
         self.vel = Vec2::default();
+        self.shake_samples.clear();
+        self.shake_samples.push_back((self.time, world.cursor));
+        self.last_cursor = world.cursor;
         self.hold_offset = Vec2::new(0.0, CURSOR_HOLD_DY);
         self.pos = Vec2::new(world.cursor.x, world.cursor.y + CURSOR_HOLD_DY);
         self.set_state(State::Hold, 0.0);
@@ -2815,18 +2890,19 @@ pub(crate) fn covered(world: &World, p: Vec2, index: usize) -> bool {
         .any(|w| valid_rect(w.rect) && w.rect.contains(p))
 }
 fn direction_reversals(samples: &VecDeque<(f64, Vec2)>) -> usize {
-    let mut last: Option<f64> = None;
+    let mut last: Option<Vec2> = None;
     let mut reversals = 0;
     for (a, b) in samples.iter().zip(samples.iter().skip(1)) {
-        let dx = b.1.x - a.1.x;
-        if dx.abs() < 10.0 {
+        let delta = Vec2::new(b.1.x - a.1.x, b.1.y - a.1.y);
+        let length = delta.x.hypot(delta.y);
+        if length < 10.0 {
             continue;
         }
-        let sign = dx.signum();
-        if last.is_some_and(|p| p != sign) {
+        let direction = Vec2::new(delta.x / length, delta.y / length);
+        if last.is_some_and(|p| p.x * direction.x + p.y * direction.y < -0.3) {
             reversals += 1;
         }
-        last = Some(sign);
+        last = Some(direction);
     }
     reversals
 }
@@ -3084,3 +3160,7 @@ mod responsive_engine_tests {
         assert!(!pet.try_start_window_jump(&constrained));
     }
 }
+
+#[cfg(test)]
+#[path = "engine_cursor_tests.rs"]
+mod cursor_event_tests;

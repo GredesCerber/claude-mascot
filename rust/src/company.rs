@@ -1,5 +1,19 @@
 //! Placement of a company in a work area. Positions are body feet anchors.
 use crate::{Rect, Vec2};
+/// Allocate a display name independently of stable simulation IDs.
+pub fn available_name<'a>(pets: impl IntoIterator<Item = (u64, Option<&'a str>)>) -> String {
+    let used: std::collections::BTreeSet<String> = pets
+        .into_iter()
+        .map(|(id, name)| {
+            name.map(str::to_owned)
+                .unwrap_or_else(|| format!("Клод №{id}"))
+        })
+        .collect();
+    (1..=used.len() + 1)
+        .map(|number| format!("Клод №{number}"))
+        .find(|name| !used.contains(name))
+        .unwrap()
+}
 /// Arrange up to eight pets without body contacts when the work area permits.
 pub fn positions(area: Rect, scale: f64, count: usize) -> Vec<Vec2> {
     let count = count.min(8);
@@ -27,6 +41,19 @@ pub fn positions(area: Rect, scale: f64, count: usize) -> Vec<Vec2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn names_fill_gaps_without_reusing_identity_or_overwriting_custom_names() {
+        assert_eq!(available_name([(28, None), (30, None)]), "Клод №1");
+        assert_eq!(
+            available_name([(91, Some("Клод №1")), (3, None)]),
+            "Клод №2"
+        );
+        assert_eq!(available_name([(91, Some("Мятный")), (2, None)]), "Клод №1");
+        assert_eq!(
+            available_name([(100, Some("Клод №1")), (101, Some("Клод №2"))]),
+            "Клод №3"
+        );
+    }
     #[test]
     fn all_supported_scales_and_counts_fit_without_contacts() {
         for area in [
