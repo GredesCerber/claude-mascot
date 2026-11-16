@@ -5,7 +5,7 @@
 //! occurs in the running application. The imported mascot bodies and faces
 //! are removed during import. This module only draws accessories and effects.
 
-use crate::render::{Canvas, FEET_X, FEET_Y};
+use crate::render::{alt, strength_raised, Canvas, FEET_X, FEET_Y, UNIT};
 use crate::Vec2;
 
 const SCENE_DATA: &[u8] = include_bytes!("../assets/activity-scenes.bin");
@@ -744,7 +744,7 @@ pub fn draw_activity(canvas: &mut Canvas, id: ActivityId, elapsed: f64, facing: 
     let duration = id.duration();
     let reveal = (t / 0.26).clamp(0.0, 1.0);
     let close = ((duration - t) / 0.34).clamp(0.0, 1.0);
-    let alpha = (reveal.min(close) * 255.0).round() as u32;
+    let alpha = ((reveal.min(close) * 3.0).ceil() / 3.0 * 255.0).round() as u32;
     let (chunks, remainder) = cells.as_chunks::<8>();
     debug_assert!(remainder.is_empty());
     let suppress_source_props = matches!(
@@ -771,18 +771,29 @@ pub fn draw_activity(canvas: &mut Canvas, id: ActivityId, elapsed: f64, facing: 
         let mut py = feet_y - (body_max_y as f64 - y) * cell_size - floor_lift;
         if tag == 1 {
             let dy = match id.spec().slug {
-                "rocket-launch-success" => -((t - 0.55).max(0.0) * 7.0).min(12.0),
+                "rocket-launch-success" => {
+                    -(((t - 0.55).max(0.0) * 7.0) / UNIT).floor().min(2.0) * UNIT
+                }
                 "lifting-heavy-barbell" => {
-                    let beat = (t * 1.9).fract();
-                    if beat > 0.19 && beat < 0.59 {
-                        -4.5
+                    if strength_raised(t) {
+                        -UNIT
                     } else {
                         0.0
                     }
                 }
-                "baking-steaming-pie" => (t * 4.0).sin() * 1.5,
+                "baking-steaming-pie" => {
+                    if alt(t, 3.0) {
+                        0.0
+                    } else {
+                        -UNIT
+                    }
+                }
                 "planting-small-trees" | "nature-growth-mushrooms" | "growing-pixel-nature" => {
-                    (t * 2.2).sin() * 1.0
+                    if alt(t, 2.0) {
+                        0.0
+                    } else {
+                        -UNIT
+                    }
                 }
                 _ => 0.0,
             };
@@ -863,6 +874,18 @@ struct EffectContext {
     height: f64,
 }
 
+/// Whole-logical-pixel block: position snaps to Claude's 5 px grid and size is
+/// counted in logical pixels, so effects share the body's pixel size.
+fn cell(canvas: &mut Canvas, x: f64, y: f64, w: f64, h: f64, color: u32) {
+    canvas.rect(
+        (x / UNIT).round() * UNIT,
+        (y / UNIT).round() * UNIT,
+        w * UNIT,
+        h * UNIT,
+        color,
+    );
+}
+
 fn draw_effect(canvas: &mut Canvas, effect: EffectContext) {
     let EffectContext {
         id,
@@ -876,131 +899,115 @@ fn draw_effect(canvas: &mut Canvas, effect: EffectContext) {
         width,
         height,
     } = effect;
-    let pulse = 0.5 + 0.5 * (t * 7.5).sin();
-    let a = (alpha as f64 * (0.45 + pulse * 0.45)).round() as u32;
+    // Accents blink on and off at 3 Hz instead of fading smoothly.
+    let on = alt(t, 6.0);
+    let a = alpha;
     let dir = if facing < 0.0 { -1.0 } else { 1.0 };
-    let gx = gaze.x.clamp(-1.0, 1.0) * 2.0;
-    let gy = gaze.y.clamp(-1.0, 1.0) * 1.0;
-    let cx = left + width * 0.5 + gx;
+    let gy = (gaze.y.clamp(-1.0, 1.0) * 1.0).round();
+    let cx = left + width * 0.5;
     let prop = left + width * (if dir > 0.0 { 0.73 } else { 0.27 });
     let sky = (top - 6.0).max(42.0);
     let floor = FEET_Y - 15.0;
     match group {
         ActivityGroup::Food => {
-            // Three separate soft puffs loop upward above the food prop.
+            // Three separate steam puffs step upward above the food prop.
             for n in 0..3 {
                 let phase = (t * 1.1 + n as f64 * 0.34).fract();
-                let x = prop + ((n as f64 - 1.0) * 5.0);
+                let x = prop + ((n as f64 - 1.0) * 2.0 * UNIT);
                 let y = floor - 34.0 - phase * 23.0;
-                canvas.rect(x.round(), (y + gy).round(), 3.0, 3.0, (a << 24) | 0xD8E4E7);
-                canvas.rect(
-                    (x + 3.0).round(),
-                    (y - 3.0 + gy).round(),
-                    2.0,
-                    2.0,
-                    (a << 24) | 0xF7F1DE,
-                );
+                let color = if n % 2 == 0 { 0xD8E4E7 } else { 0xF7F1DE };
+                cell(canvas, x, y + gy, 1.0, 1.0, (a << 24) | color);
             }
         }
         ActivityGroup::Nature => {
-            let grow = (t * 0.8).fract();
-            canvas.rect(
-                (cx - 1.0).round(),
-                (floor - grow * 9.0).round(),
-                2.0,
-                5.0 + grow * 5.0,
-                (a << 24) | 0x27B262,
-            );
-            canvas.rect(
-                (cx - 5.0).round(),
-                (floor - 7.0 - grow * 5.0).round(),
-                4.0,
-                2.0,
-                (a << 24) | 0x5BEF7E,
-            );
-            canvas.rect(
-                (cx + 1.0).round(),
-                (floor - 11.0 - grow * 5.0).round(),
-                4.0,
-                2.0,
-                (a << 24) | 0x169986,
-            );
+            // The sprout grows in three whole-pixel steps.
+            let steps = ((t * 0.8).fract() * 3.0).floor();
+            let stem = 1.0 + steps;
+            let base = floor - stem * UNIT;
+            cell(canvas, cx, base, 1.0, stem, (a << 24) | 0x27B262);
+            cell(canvas, cx - UNIT, base, 1.0, 1.0, (a << 24) | 0x5BEF7E);
+            if steps >= 1.0 {
+                cell(
+                    canvas,
+                    cx + UNIT,
+                    base + UNIT,
+                    1.0,
+                    1.0,
+                    (a << 24) | 0x169986,
+                );
+            }
         }
         ActivityGroup::Coding | ActivityGroup::Building => {
-            // A blinking pixel cursor and a small stroke of code/assembly.
-            let on = (t * 3.0).fract() < 0.64;
-            let px = prop + dir * 8.0;
+            // A blinking pixel cursor and two short strokes of code/assembly.
+            let px = prop + dir * 2.0 * UNIT;
             if on {
-                canvas.rect(
-                    px.round(),
-                    (floor - 32.0 + gy).round(),
-                    3.0,
-                    5.0,
+                cell(
+                    canvas,
+                    px,
+                    floor - 35.0 + gy,
+                    1.0,
+                    1.0,
                     (a << 24) | 0x51F4A3,
                 );
             }
-            canvas.rect(
-                (px - 5.0).round(),
-                (floor - 23.0 + gy).round(),
-                8.0,
+            cell(
+                canvas,
+                px - UNIT,
+                floor - 30.0 + gy,
                 2.0,
+                1.0,
                 (a << 24) | 0x55CFF4,
             );
-            canvas.rect(
-                (px - 2.0).round(),
-                (floor - 19.0 + gy).round(),
-                6.0,
+            cell(
+                canvas,
+                px,
+                floor - 25.0 + gy,
                 2.0,
+                1.0,
                 (a << 24) | 0xFFCC52,
             );
             if group == ActivityGroup::Building {
-                let beat = (t * 1.4).fract();
-                canvas.rect(
-                    (cx - 1.5).round(),
-                    (floor - 5.0 - beat * 7.0).round(),
-                    5.0,
-                    5.0,
+                let rise = ((t * 1.4).fract() * 3.0).floor();
+                cell(
+                    canvas,
+                    cx,
+                    floor - UNIT - rise * UNIT,
+                    1.0,
+                    1.0,
                     (a << 24) | 0xDA64DD,
                 );
             }
         }
         ActivityGroup::Celebration => {
-            // Short irregular burst; particles rise from the lifted-hand area,
-            // then fall/fade instead of making the whole character bob.
+            // Short irregular burst; confetti rises, then falls and fades in steps.
             let cycle = (t * 0.9).fract();
+            let fade = ((1.0 - cycle * 0.75) * 3.0).ceil() / 3.0;
             for n in 0..7 {
                 let seed = n as f64 * 1.618 + 0.37;
                 let x = cx + (seed.sin() * 25.0);
                 let y = sky + ((seed * 4.7).fract() * 12.0) + cycle * 18.0;
-                let fade = alpha as f64 * (1.0 - cycle * 0.75);
                 let colors = [0xFFFFC431, 0xFF55E233, 0xFFEA3F99, 0xFF55A8FF];
                 let c = colors[n % colors.len()];
-                canvas.rect(
-                    x.round(),
-                    y.round(),
-                    if n % 2 == 0 { 3.0 } else { 2.0 },
-                    3.0,
-                    ((fade as u32) << 24) | (c & 0x00FFFFFF),
+                cell(
+                    canvas,
+                    x,
+                    y,
+                    1.0,
+                    1.0,
+                    (((alpha as f64 * fade) as u32) << 24) | (c & 0x00FFFFFF),
                 );
             }
         }
         ActivityGroup::Error => {
-            // Pulse a small outlined warning tile, with uneven pixel cadence.
-            let x = prop;
-            let y = sky + 4.0;
+            // A small warning tile: a three-pixel frame with a blinking mark.
+            let (x, y) = (prop, sky + 2.0 * UNIT);
             let c = (a << 24) | 0xFF738E;
-            canvas.rect(x.round(), y.round(), 8.0, 2.0, c);
-            canvas.rect(x.round(), (y + 2.0).round(), 2.0, 5.0, c);
-            canvas.rect((x + 6.0).round(), (y + 2.0).round(), 2.0, 5.0, c);
-            canvas.rect(
-                (x + 3.0).round(),
-                (y + if pulse > 0.5 { 2.0 } else { 4.0 }).round(),
-                2.0,
-                3.0,
-                c,
-            );
-            if pulse > 0.78 {
-                canvas.rect((x + 3.0).round(), (y + 7.0).round(), 2.0, 2.0, c);
+            cell(canvas, x, y, 3.0, 1.0, c);
+            cell(canvas, x, y + 2.0 * UNIT, 3.0, 1.0, c);
+            cell(canvas, x, y + UNIT, 1.0, 1.0, c);
+            cell(canvas, x + 2.0 * UNIT, y + UNIT, 1.0, 1.0, c);
+            if on {
+                cell(canvas, x + UNIT, y + UNIT, 1.0, 1.0, c);
             }
         }
         ActivityGroup::Security => {
@@ -1012,11 +1019,12 @@ fn draw_effect(canvas: &mut Canvas, effect: EffectContext) {
                 } else {
                     0x34545C
                 };
-                canvas.rect(
-                    (prop + n as f64 * 4.0 - 4.0).round(),
-                    (floor - 20.0).round(),
-                    3.0,
-                    3.0,
+                cell(
+                    canvas,
+                    prop + (n as f64 - 1.0) * 2.0 * UNIT,
+                    floor - 20.0,
+                    1.0,
+                    1.0,
                     (a << 24) | color,
                 );
             }
@@ -1026,51 +1034,43 @@ fn draw_effect(canvas: &mut Canvas, effect: EffectContext) {
             let tears = matches!(id.spec().slug, "crying-sad-reaction" | "broken-heart-sad");
             if tears {
                 for n in 0..2 {
-                    let phase = (t * 1.3 + n as f64 * 0.5).fract();
-                    canvas.rect(
-                        (cx + (n as f64 * 5.0 - 4.0)).round(),
-                        (top + height * 0.42 + phase * 12.0).round(),
-                        2.0,
-                        3.0,
+                    let drop = ((t * 1.3 + n as f64 * 0.5).fract() * 3.0).floor();
+                    cell(
+                        canvas,
+                        cx + (n as f64 * 2.0 - 1.0) * UNIT,
+                        top + height * 0.42 + drop * UNIT,
+                        1.0,
+                        1.0,
                         (a << 24) | 0x3EADFF,
                     );
                 }
-            } else if pulse > 0.62 {
-                canvas.rect(
-                    (cx + dir * 23.0).round(),
-                    (top + height * 0.28 + gy).round(),
-                    2.0,
-                    2.0,
+            } else {
+                // The accent hops between two cells instead of vanishing.
+                let hop = if alt(t, 2.0) { 23.0 } else { 28.0 };
+                cell(
+                    canvas,
+                    cx + dir * hop,
+                    top + height * 0.28 + gy,
+                    1.0,
+                    1.0,
                     (a << 24) | 0xFFF2A4,
                 );
             }
         }
         ActivityGroup::Reflection => {
             // Orbiting thought pixels sit near the upper prop without shifting feet.
-            let angle = t * 2.2;
+            let angle = (t * 4.0).floor() * 0.55;
             let x = cx + angle.cos() * 10.0;
             let y = sky + 15.0 + angle.sin() * 5.0;
-            canvas.rect(x.round(), y.round(), 3.0, 3.0, (a << 24) | 0xA88AF4);
-            canvas.rect(
-                (x - 5.0).round(),
-                (y + 4.0).round(),
-                2.0,
-                2.0,
-                (a << 24) | 0x55D8B2,
-            );
+            cell(canvas, x, y, 1.0, 1.0, (a << 24) | 0xA88AF4);
+            cell(canvas, x - UNIT, y + UNIT, 1.0, 1.0, (a << 24) | 0x55D8B2);
         }
         ActivityGroup::Strength => {
             // A small effort sparkle; prop movement is applied to the imported
             // barbell component and no body/hand/limb pixels are added here.
-            let beat = (t * 1.9).fract();
-            let raised = beat > 0.19 && beat < 0.55;
-            canvas.rect(
-                (cx - 1.0).round(),
-                (floor - if raised { 39.0 } else { 35.0 }).round(),
-                2.0,
-                2.0,
-                (a << 24) | 0xFFC431,
-            );
+            let y = floor - if strength_raised(t) { 40.0 } else { 35.0 };
+            let x = cx + if alt(t, 2.0) { -UNIT } else { UNIT };
+            cell(canvas, x, y, 1.0, 1.0, (a << 24) | 0xFFC431);
         }
     }
 }
