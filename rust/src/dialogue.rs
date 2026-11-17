@@ -434,7 +434,7 @@ impl SpeechEvent {
     }
 }
 
-const KEYS: usize = EVENT_COUNT + 75;
+const KEYS: usize = EVENT_COUNT + crate::activities::CATALOG.len();
 #[derive(Clone, Debug)]
 pub struct Dialogue {
     rng: u64,

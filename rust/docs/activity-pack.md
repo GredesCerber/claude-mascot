@@ -1,62 +1,57 @@
 # Pixel activities
 
-The catalog adapts all 75 SVG scenes from the user-supplied Claude mascot art
-pack as **props and effects only**. The canonical Claude body, face, palette,
-and proportions remain renderer-owned. The importer removes the artwork's
-orange mascot pixels, attached skin-tone pixels, face details, alternate body
-fills in the source body region, and nearby secondary mascot fragments. It
-keeps accessory rectangles such as screens, cups, tools, books, plants, signs,
-and scene decorations. A small glasses-like cluster in the reading scene is
-preserved as an accessory.
+The catalog contains 78 activities: 75 stable source concepts plus three new
+procedural scenes (flag, confetti stomp, dumbbell workout). Original IDs 0–74
+are preserved. All 75 source concepts now have authored start/action/end
+sequences in `src/pack_actions/simple.rs` and `advanced.rs`; they are not a
+single per-category sparkle applied to static art.
 
-The pair-programming source includes a human figure with a different palette.
-That scene suppresses imported props entirely and uses our procedural laptop;
-only actual Claude pets appear, including in the separate shared-laptop scene.
+`pack_actions::Frame` shares physical palm geometry with the canonical renderer.
+Props have back and foreground passes; the latter holds cups, glasses and
+costume edges without replacing the body or eyes. An activity's visual rig
+ignores residual impact squash/rotation, while physics values keep updating.
+Positions use whole logical pixels and the shared 12Hz pose clock. Mirroring
+moves held objects and hands together; readable sign lettering stays readable.
+User body colors apply to every pose, and no secondary humans/pets are painted.
 
-The checked-in `assets/activity-scenes.bin` contains compact integer grid
-rectangles, colors, prop tags, and source body anchor coordinates. It is built
-into the executable. No source SVG/PNG parsing or external source-file lookup
-occurs at runtime. Props draw on the same five-renderer-pixel source grid as
-the canonical character and scale down only when a large scene would exceed
-the 140-by-128-pixel fit bounds. Each scene anchors to its source mascot's
-orange center and foot line; it never resizes or redraws the base mascot.
+The procedural scenes in `showcase.rs` use separate timed beats for the waving
+flag, two hand-launched confetti bursts and two dumbbell repetitions. They are
+original interpretations informed by
+[the Codrops motion study](https://tympanus.net/codrops/2026/05/05/reverse-engineering-claude-ais-mascot-animations-with-svg-and-gsap/),
+not imported SVG bodies or JavaScript animations. Grounded walking/jumping keeps
+the existing physics and now has a short palm settling pose on touchdown.
 
-## Updating the compiled scenes
+## Source records
 
-With Python 3, run:
+The user-supplied 75-image pack is recorded in `assets/activity-scenes.bin`.
+The importer and sanitized props remain as the legacy fallback/reference path.
+The authored activities replace these props at runtime; no source image/SVG
+is loaded from the user's filesystem. To rebuild source records with Python:
 
 ```powershell
-python tools/Import-ActivityPack.py
+python rust/tools/Import-ActivityPack.py
 ```
 
-The default source folder is the sibling workspace folder
-`work/idea-pack/claude-mascot-pack-SVG`. A different SVG folder can be supplied
-as the script's first argument. The importer expects exactly 75 crisp pixel
-scenes on the supplied 43.55-unit grid and rejects unsupported geometry or
-colors. Catalog IDs follow case-insensitively sorted SVG filenames; changing
-that order changes IDs and should be treated as a compatibility change.
+The default source is sibling `work/idea-pack/claude-mascot-pack-SVG`. The importer
+expects exactly 75 SVGs on the original source grid; changing their sorted order
+would change stable IDs and is a compatibility change.
 
-The active scene uses timed opening and closing fades. Baking steam, growth,
-code cursors, blinking status lights, tears, orbiting thought pixels,
-confetti, and lift beats add small theme-specific motion. Tagged props such as
-the rocket, barbell, and pie move independently while the base character stays
-fixed. Themes with no retained accessory still receive a cosmetic animated
-accent. Scenes with malware, server, or security names are illustrations only;
-they make no real scanning, network, security, or server claims.
+## Inspecting animations
 
-## Catalog API
+```powershell
+cargo run --manifest-path rust/Cargo.toml --example activity_frames -- rust/work/activity-review --samples 5
+cargo run --manifest-path rust/Cargo.toml --example activity_frames -- rust/work/activity-left --facing -1 --scale 3 --samples 5 pixel-flag-waver reading-data-document
+```
 
-`src/activities.rs` exports `ActivityId`, `ActivitySpec`, `ActivityGroup`,
-`CATALOG`, and `draw_activity`. `ActivityId::new(index)` validates the stable
-0–74 range. Each catalog item has a Russian title, cosmetic speech phrase,
-category, source slug, and duration. `draw_activity` paints only props/effects;
-the renderer draws canonical Claude separately. Category names are available
-through `ActivityGroup::label_ru()`.
+Without `--samples`, the exporter writes the full 12Hz sequence. It uses the
+actual renderer, not separate demonstration artwork. Coverage and review notes:
+[rollout](planning/activity-animation-rollout.md),
+[simple scenes](handoffs/sol-simple-actions.md),
+[advanced scenes](handoffs/sol-advanced-actions.md).
 
-## Source and rights note
+## Provenance
 
-The underlying archive and its SVG/PNG files were supplied by the user for this
-integration. No redistribution license or public-release permission was
-identified in the supplied materials. Keep the raw source bundles outside the
-executable. This note records provenance only; it does not infer or grant a
-license for redistributing the original artwork or its adaptation.
+Source concepts: [Claude Mascot Pack](https://getillustrations.com/illustration-pack/claude-mascot-pack).
+The original archive was supplied by the user. The runtime props and timelines
+are procedural reinterpretations; raw source artwork is kept outside release
+packages. Names and character remain subject to their owners' rights.

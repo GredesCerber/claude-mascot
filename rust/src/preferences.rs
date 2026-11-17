@@ -2359,7 +2359,7 @@ mod tests {
             assert_eq!(SendMessageW(panel.state.fps_combo, CB_GETCURSEL, 0, 0), 2);
             assert_eq!(
                 SendMessageW(panel.state.activity_combo, CB_GETCOUNT, 0, 0),
-                75
+                CATALOG.len() as isize
             );
             // TBM_GETPOS is WM_USER (not exported by this windows-sys version).
             assert_eq!(SendMessageW(panel.state.intensity, WM_USER, 0, 0), 80);

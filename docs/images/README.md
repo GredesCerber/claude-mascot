@@ -15,3 +15,8 @@ cargo run --manifest-path rust/Cargo.toml --example readme_gallery -- docs/image
 Башня из четырёх петов фиксируется только после её успешной сборки в симуляции
 с `SocialCoordinator` и `ContactCoordinator`; при неудаче экспорт завершается ошибкой.
 Масштабирование целочисленное, без сглаживания пикселей.
+
+
+The three GIF demos use actual `activity_frames` output at 12 pose frames/second,
+cropped to the union of visible bounds and enlarged with nearest-neighbor scaling.
+Scenes: `pixel-flag-waver`, `pixel-confetti-stomp`, `pixel-dumbbell-workout`.

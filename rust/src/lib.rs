@@ -13,6 +13,7 @@ pub(crate) mod exploration_descent;
 pub(crate) mod leapfrog;
 #[cfg(windows)]
 pub mod media;
+pub(crate) mod pack_actions;
 pub mod palette;
 #[cfg(windows)]
 pub mod platform;
@@ -20,6 +21,7 @@ pub mod platform;
 pub mod preferences;
 pub mod render;
 pub mod settings;
+pub(crate) mod showcase;
 pub mod social;
 pub mod timing;
 #[cfg(windows)]

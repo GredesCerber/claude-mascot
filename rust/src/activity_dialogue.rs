@@ -1,5 +1,5 @@
 //! Short scene-specific Russian dialogue. Indices match the stable activity catalog.
-pub const ACTIVITY_LINES: [&[&str]; 75] = [
+pub const ACTIVITY_LINES: [&[&str]; 78] = [
     // angry-at-laptop
     &[
         "Печатаю сердитый код!",
@@ -525,8 +525,26 @@ pub const ACTIVITY_LINES: [&[&str]; 75] = [
         "Лапки печатают историю",
         "Ещё одна строчка кода",
     ],
+    &[
+        "Поднимаю наш флаг!",
+        "Ветер в пикселях",
+        "Маленький флаг, большое настроение",
+        "Всем видно?",
+    ],
+    &[
+        "Праздник на обе лапки!",
+        "Конфетти направо! Теперь налево!",
+        "Топ-топ, ура!",
+        "Ещё горсточку радости",
+    ],
+    &[
+        "Ещё два повторения!",
+        "Лапки становятся сильнее",
+        "Поднять, задержать, опустить",
+        "Всё, теперь отдыхаю",
+    ],
 ];
-pub const ACTIVITY_SLUGS: [&str; 75] = [
+pub const ACTIVITY_SLUGS: [&str; 78] = [
     "angry-at-laptop",
     "angry-pixel-coffee",
     "angry-powerful-lightning",
@@ -602,6 +620,9 @@ pub const ACTIVITY_SLUGS: [&str; 75] = [
     "welcome-pixel-banner",
     "with-success-checkmark",
     "writing-software-code",
+    "pixel-flag-waver",
+    "pixel-confetti-stomp",
+    "pixel-dumbbell-workout",
 ];
 #[cfg(test)]
 mod tests {

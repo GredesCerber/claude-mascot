@@ -10,6 +10,7 @@ use crate::Vec2;
 
 const SCENE_DATA: &[u8] = include_bytes!("../assets/activity-scenes.bin");
 const SCENE_COUNT: usize = 75;
+const ACTIVITY_COUNT: usize = 78;
 const GRID_UNIT: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -17,7 +18,7 @@ pub struct ActivityId(pub u8);
 
 impl ActivityId {
     pub const fn new(index: usize) -> Option<Self> {
-        if index < SCENE_COUNT {
+        if index < ACTIVITY_COUNT {
             Some(Self(index as u8))
         } else {
             None
@@ -33,7 +34,7 @@ impl ActivityId {
             .unwrap_or(&CATALOG[0])
     }
     pub const fn duration(self) -> f64 {
-        if self.index() < SCENE_COUNT {
+        if self.index() < ACTIVITY_COUNT {
             CATALOG[self.index()].duration
         } else {
             3.8
@@ -96,8 +97,8 @@ macro_rules! entry {
     };
 }
 
-/// Stable catalog order: case-insensitively sorted source SVG filenames.
-pub const CATALOG: [ActivitySpec; SCENE_COUNT] = [
+/// Stable IDs: 75 sorted imported SVGs, followed by procedural activities.
+pub const CATALOG: [ActivitySpec; ACTIVITY_COUNT] = [
     entry!(
         0,
         "angry-at-laptop",
@@ -698,11 +699,44 @@ pub const CATALOG: [ActivitySpec; SCENE_COUNT] = [
         "Печатаю пиксельный код!",
         3.9
     ),
+    entry!(
+        75,
+        "pixel-flag-waver",
+        "Махать флагом",
+        Celebration,
+        "Поднимаю наш флаг!",
+        6.0
+    ),
+    entry!(
+        76,
+        "pixel-confetti-stomp",
+        "Топать с конфетти",
+        Celebration,
+        "Праздник на обе лапки!",
+        5.0
+    ),
+    entry!(
+        77,
+        "pixel-dumbbell-workout",
+        "Тренировка с гантелью",
+        Strength,
+        "Ещё два повторения!",
+        8.0
+    ),
 ];
 
 /// Draw props and cosmetic effects for one activity. The caller draws its
 /// canonical Claude body separately; this function never paints a mascot.
 pub fn draw_activity(canvas: &mut Canvas, id: ActivityId, elapsed: f64, facing: f64, gaze: Vec2) {
+    if (SCENE_COUNT..ACTIVITY_COUNT).contains(&id.index()) {
+        crate::showcase::draw(canvas, id.index(), elapsed, facing, id.duration());
+        return;
+    }
+    let authored = crate::pack_actions::frame(id.index(), elapsed, id.duration());
+    if authored.is_some_and(|frame| frame.replace_props) {
+        crate::pack_actions::draw(canvas, id.index(), elapsed, facing, id.duration());
+        return;
+    }
     let id = if id.index() < SCENE_COUNT {
         id
     } else {
@@ -767,41 +801,52 @@ pub fn draw_activity(canvas: &mut Canvas, id: ActivityId, elapsed: f64, facing: 
         let tag = chunk[7];
         let mirror = facing < 0.0;
         let source_x = if mirror { 2.0 * body_cx - x - w } else { x };
-        let px = FEET_X + (source_x - body_cx) * cell_size;
+        let mut px = FEET_X + (source_x - body_cx) * cell_size;
         let mut py = feet_y - (body_max_y as f64 - y) * cell_size - floor_lift;
         if tag == 1 {
-            let dy = match id.spec().slug {
-                "rocket-launch-success" => {
-                    -(((t - 0.55).max(0.0) * 7.0) / UNIT).floor().min(2.0) * UNIT
-                }
-                "lifting-heavy-barbell" => {
-                    if strength_raised(t) {
-                        -UNIT
-                    } else {
-                        0.0
+            let dy = if let Some(frame) = authored {
+                px += frame.primary_shift.x * UNIT * if mirror { -1.0 } else { 1.0 };
+                frame.primary_shift.y * UNIT
+            } else {
+                match id.spec().slug {
+                    "rocket-launch-success" => {
+                        -(((t - 0.55).max(0.0) * 7.0) / UNIT).floor().min(2.0) * UNIT
                     }
-                }
-                "baking-steaming-pie" => {
-                    if alt(t, 3.0) {
-                        0.0
-                    } else {
-                        -UNIT
+                    "lifting-heavy-barbell" => {
+                        if strength_raised(t) {
+                            -UNIT
+                        } else {
+                            0.0
+                        }
                     }
-                }
-                "planting-small-trees" | "nature-growth-mushrooms" | "growing-pixel-nature" => {
-                    if alt(t, 2.0) {
-                        0.0
-                    } else {
-                        -UNIT
+                    "baking-steaming-pie" => {
+                        if alt(t, 3.0) {
+                            0.0
+                        } else {
+                            -UNIT
+                        }
                     }
+                    "planting-small-trees" | "nature-growth-mushrooms" | "growing-pixel-nature" => {
+                        if alt(t, 2.0) {
+                            0.0
+                        } else {
+                            -UNIT
+                        }
+                    }
+                    _ => 0.0,
                 }
-                _ => 0.0,
             };
             py += dy;
         }
         canvas.rect(px, py, w * cell_size, h * cell_size, color);
     }
     if alpha < 24 {
+        return;
+    }
+    if authored.is_some() {
+        crate::pack_actions::draw(canvas, id.index(), elapsed, facing, id.duration());
+    }
+    if authored.is_some_and(|frame| frame.replace_effects) {
         return;
     }
     draw_effect(
@@ -1080,16 +1125,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_75_unique_stable_entries_and_bounded_durations() {
-        assert_eq!(CATALOG.len(), 75);
+    fn catalog_has_stable_imported_ids_and_appended_procedural_entries() {
+        assert_eq!(CATALOG.len(), 78);
         for (index, spec) in CATALOG.iter().enumerate() {
             assert_eq!(spec.id.index(), index);
-            assert!((3.0..=5.0).contains(&spec.duration));
+            assert!((3.0..=8.0).contains(&spec.duration));
             assert!(!spec.slug.is_empty() && !spec.title_ru.is_empty());
             assert!(CATALOG[..index].iter().all(|other| other.slug != spec.slug));
         }
         assert!(ActivityId::new(74).is_some());
-        assert!(ActivityId::new(75).is_none());
+        assert!(ActivityId::new(77).is_some());
+        assert!(ActivityId::new(78).is_none());
     }
 
     #[test]
@@ -1128,9 +1174,10 @@ mod tests {
 
     #[test]
     fn activity_layer_never_draws_the_imported_mascot_body_or_face() {
-        for i in 0..SCENE_COUNT {
+        for (i, spec) in CATALOG.iter().enumerate() {
             let mut canvas = Canvas::new(280, 240);
             draw_activity(&mut canvas, ActivityId(i as u8), 1.2, 1.0, Vec2::default());
+            crate::pack_actions::draw_foreground(&mut canvas, i, 1.2, 1.0, spec.duration);
             assert!(
                 !canvas.pixels.contains(&0xFFD97757),
                 "scene {i} drew source body orange"
@@ -1159,30 +1206,46 @@ mod tests {
     }
 
     #[test]
-    fn every_catalog_scene_changes_during_its_active_timeline() {
-        let mut first = Canvas::new(280, 240);
-        let mut second = Canvas::new(280, 240);
+    fn every_catalog_scene_has_multiple_held_poses_and_clears_both_prop_layers() {
+        use std::hash::{Hash, Hasher};
+        let mut renderer = crate::render::Renderer::new().unwrap();
+        renderer.show_mood = false;
         for spec in &CATALOG {
-            first.clear();
-            second.clear();
-            draw_activity(&mut first, spec.id, 1.13, 1.0, Vec2::default());
-            draw_activity(&mut second, spec.id, 1.61, 1.0, Vec2::default());
-            assert_ne!(
-                first.pixels, second.pixels,
-                "{} must animate during its active phase",
-                spec.slug
+            let mut pet = crate::engine::Pet::new(1, crate::engine::Skin::Claude, Vec2::default());
+            pet.state = crate::engine::State::Activity;
+            pet.activity = Some(spec.id);
+            pet.time = 1.0;
+            let mut poses = std::collections::BTreeSet::new();
+            for sample in 1..12 {
+                pet.state_time = spec.duration * sample as f64 / 12.0;
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                renderer.frame(&pet, false).pixels.hash(&mut hash);
+                poses.insert(hash.finish());
+            }
+            assert!(
+                poses.len() >= 3,
+                "{} has too few genuine poses: {}",
+                spec.slug,
+                poses.len()
             );
-            first.clear();
+            let mut props = Canvas::new(280, 240);
             draw_activity(
-                &mut first,
+                &mut props,
                 spec.id,
                 spec.duration + 0.1,
                 1.0,
                 Vec2::default(),
             );
+            crate::pack_actions::draw_foreground(
+                &mut props,
+                spec.id.index(),
+                spec.duration + 0.1,
+                1.0,
+                spec.duration,
+            );
             assert!(
-                first.pixels.iter().all(|&pixel| pixel == 0),
-                "{} must remove all props after closing",
+                props.pixels.iter().all(|p| *p == 0),
+                "{} leaves props after ending",
                 spec.slug
             );
         }

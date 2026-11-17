@@ -1422,7 +1422,7 @@ mod native {
                             social.request_for(e.pet.id, kind);
                         }
                     }
-                    100..=174 => {
+                    100..=177 => {
                         if let Some(activity) =
                             claude_mascot::activities::ActivityId::new((c - 100) as usize)
                         {

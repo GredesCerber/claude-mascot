@@ -19,6 +19,9 @@ const ROTATION_STEP: f64 = std::f64::consts::PI / 12.0;
 pub(crate) fn body_angle(p: &Pet) -> f64 {
     // `visual_tilt` is the physical tilt sampled on the 12 Hz pose clock, so
     // the sprite holds each rotated pose like every other pixel pose.
+    if p.state == State::Activity && !p.dragging && p.activity.is_some() {
+        return 0.0;
+    }
     let held = p.visual_tilt();
     if p.dragging || !held.is_finite() {
         return 0.0;
@@ -255,6 +258,17 @@ impl Renderer {
             self.body.clear();
             draw_claude(&mut self.body, pet);
             blit_rotated(&self.body, &mut self.canvas, angle);
+        }
+        if pet.state == State::Activity && !pet.dragging {
+            if let Some(activity) = pet.activity {
+                crate::pack_actions::draw_foreground(
+                    &mut self.canvas,
+                    activity.index(),
+                    pose_time(pet.state_time),
+                    pet.facing,
+                    activity.duration(),
+                );
+            }
         }
         if pet.state == State::Dizzy && !pet.dragging {
             dizzy_stars(&mut self.canvas, pose_time(pet.state_time));
@@ -618,6 +632,12 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         None
     };
+    let authored = activity
+        .and_then(|spec| crate::pack_actions::frame(spec.id.index(), state_time, spec.duration));
+    let replacement_props = authored.is_some_and(|frame| frame.replace_props);
+    let showcase_pose = activity
+        .and_then(|spec| crate::showcase::pose(spec.id.index(), state_time))
+        .or_else(|| authored.map(|frame| frame.body));
     let activity_group = activity.map(|spec| spec.group);
     let activity_slug = activity.map_or("", |spec| spec.slug);
     let activity_food = activity_group == Some(ActivityGroup::Food);
@@ -629,18 +649,18 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let activity_laptop = matches!(
         activity_slug,
         "angry-at-laptop" | "writing-software-code" | "developer-pair-programming-scene"
-    );
+    ) && !replacement_props;
     let activity_angry = matches!(
         activity_slug,
         "angry-at-laptop" | "angry-pixel-coffee" | "angry-powerful-lightning"
     );
     let activity_sad = matches!(activity_slug, "crying-sad-reaction" | "broken-heart-sad");
     let activity_sleepy = matches!(activity_slug, "sleeping-soundly" | "artboard-24cla2");
-    let activity_lightning = activity_slug == "angry-powerful-lightning";
-    let activity_wizard = activity_slug == "artboard-2cla3";
-    let activity_document = activity_slug == "reading-data-document";
-    let activity_malware = activity_slug == "malware-detection-window";
-    let activity_ninja = activity_slug == "stealth-ninja-security";
+    let activity_lightning = activity_slug == "angry-powerful-lightning" && !replacement_props;
+    let activity_wizard = activity_slug == "artboard-2cla3" && !replacement_props;
+    let activity_document = activity_slug == "reading-data-document" && !replacement_props;
+    let activity_malware = activity_slug == "malware-detection-window" && !replacement_props;
+    let activity_ninja = activity_slug == "stealth-ninja-security" && !replacement_props;
     let dancing = p.state == State::Dance || social_dance;
     let waving = p.state == State::Wave || social_greeting;
     let typing = p.state == State::Laptop && !p.dragging;
@@ -655,7 +675,9 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         state_time.clamp(0.0, 10.0)
     };
     let angry = p.satisfaction < 30.0 || activity_angry;
-    let bob = if climbing {
+    let bob = if let Some(pose) = showcase_pose {
+        pose.bob
+    } else if climbing {
         if climb_phase < 2 {
             -1.0
         } else {
@@ -683,12 +705,29 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else {
         -11.0
     } + bob;
+    let upper_shift = std::cell::Cell::new(0.0);
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
-        let sx = 1.0 + ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.16;
-        let sy = 1.0 - ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.32;
+        let sx = 1.0
+            + (((if activity.is_some() {
+                0.0
+            } else {
+                p.squash.clamp(0.0, 1.0)
+            }) * 4.0)
+                .round()
+                / 4.0)
+                * 0.16;
+        let sy = 1.0
+            - (((if activity.is_some() {
+                0.0
+            } else {
+                p.squash.clamp(0.0, 1.0)
+            }) * 4.0)
+                .round()
+                / 4.0)
+                * 0.32;
         let xx = if p.facing >= 0.0 { x } else { -x - w };
         c.rect(
-            FEET_X + xx * 5.0 * sx,
+            FEET_X + (xx + upper_shift.get() * p.facing.signum()) * 5.0 * sx,
             FEET_Y + y * 5.0 * sy,
             w * 5.0 * sx,
             h * 5.0 * sy,
@@ -696,7 +735,16 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         );
     };
     for (i, lx) in [-5.0, -3.0, 2.0, 4.0].iter().enumerate() {
-        if climbing {
+        if let Some(pose) = showcase_pose {
+            let lifted = pose.lifted_pair == Some(i / 2);
+            px(
+                *lx,
+                -3.0 - if lifted { 1.0 } else { 0.0 },
+                1.0,
+                if lifted { 2.0 } else { 3.0 },
+                palette.shadow,
+            );
+        } else if climbing {
             let pair_phase = climb_phase % 2;
             let pair = i / 2;
             let lifted = pair == pair_phase;
@@ -752,7 +800,44 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             px(*lx, -3.0 + bob, 1.0, h, palette.shadow);
         }
     }
-    let torso_shift = if social_high_five || social_watching_laptop || activity_nature {
+    upper_shift.set(showcase_pose.map_or(0.0, |pose| pose.body_x));
+    if let Some(pose) = showcase_pose {
+        // A short pixel staircase joins each shoulder and palm behind the
+        // torso. Cross-body reaches are occluded instead of outlining a loop.
+        for (shoulder, hand) in [(-8.0, pose.hands[0]), (6.0, pose.hands[1])] {
+            let mut x = (shoulder + 1.0_f64).round() as i32;
+            let mut y = (top + 3.0).round() as i32;
+            let end_x = (hand.x + 1.0).round() as i32;
+            let end_y = (hand.y + pose.bob + 1.0).round() as i32;
+            let dx = (end_x - x).abs();
+            let dy = -(end_y - y).abs();
+            let sx = if x < end_x { 1 } else { -1 };
+            let sy = if y < end_y { 1 } else { -1 };
+            let mut error = dx + dy;
+            loop {
+                px(x as f64, y as f64, 1.0, 1.0, palette.body);
+                if x == end_x && y == end_y {
+                    break;
+                }
+                let twice = 2 * error;
+                let previous_y = y;
+                if twice >= dy {
+                    error += dy;
+                    x += sx;
+                }
+                if twice <= dx {
+                    error += dx;
+                    y += sy;
+                }
+                if previous_y != y {
+                    px(x as f64, previous_y as f64, 1.0, 1.0, palette.body);
+                }
+            }
+        }
+    }
+    let torso_shift = if showcase_pose.is_some() {
+        0.0
+    } else if social_high_five || social_watching_laptop || activity_nature {
         0.3
     } else if climbing {
         (climb_phase as f64 - 1.5) * 0.12
@@ -794,11 +879,27 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         );
     }
     let mut px = |x: f64, y: f64, w: f64, h: f64, col: u32| {
-        let sx = 1.0 + ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.16;
-        let sy = 1.0 - ((p.squash.clamp(0.0, 1.0) * 4.0).round() / 4.0) * 0.32;
+        let sx = 1.0
+            + (((if activity.is_some() {
+                0.0
+            } else {
+                p.squash.clamp(0.0, 1.0)
+            }) * 4.0)
+                .round()
+                / 4.0)
+                * 0.16;
+        let sy = 1.0
+            - (((if activity.is_some() {
+                0.0
+            } else {
+                p.squash.clamp(0.0, 1.0)
+            }) * 4.0)
+                .round()
+                / 4.0)
+                * 0.32;
         let xx = if p.facing >= 0.0 { x } else { -x - w };
         c.rect(
-            FEET_X + xx * 5.0 * sx,
+            FEET_X + (xx + upper_shift.get() * p.facing.signum()) * 5.0 * sx,
             FEET_Y + y * 5.0 * sy,
             w * 5.0 * sx,
             h * 5.0 * sy,
@@ -821,7 +922,20 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         } else {
             3.0
         };
-    if edge_climbing {
+    if let Some(pose) = showcase_pose {
+        for (shoulder_x, hand) in [(-8.0, pose.hands[0]), (6.0, pose.hands[1])] {
+            let shoulder_y = top + 2.0;
+            px(shoulder_x, shoulder_y, 2.0, 2.0, palette.body);
+
+            px(hand.x, hand.y + pose.bob, 2.0, 2.0, palette.body);
+            px(hand.x, hand.y + pose.bob, 1.0, 1.0, palette.highlight);
+        }
+    } else if p.state == State::Land && state_time < 0.25 {
+        // The palms overshoot on touchdown, then settle on the next pose.
+        let drop = if state_time < 1.0 / 12.0 { 6.0 } else { 4.0 };
+        px(-8.0, top + drop, 2.0, 2.0, palette.body);
+        px(6.0, top + drop, 2.0, 2.0, palette.body);
+    } else if edge_climbing {
         // Facing points away from the window: both hands must stay on the
         // inward edge (negative local x), mirrored together at the other side.
         let reach = if climb_phase < 2 { -2.0 } else { 1.0 };
@@ -1037,9 +1151,17 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     let gaze_x = if eyes_closed {
         0.0
     } else {
-        (cursor_gaze_x + look_around_x + social_look).clamp(-1.0, 1.0)
+        (cursor_gaze_x
+            + look_around_x
+            + social_look
+            + authored.map_or(0.0, |f| f.gaze.x) * facing_sign)
+            .clamp(-1.0, 1.0)
     };
-    let gaze_y = if eyes_closed { 0.0 } else { cursor_gaze_y };
+    let gaze_y = if eyes_closed {
+        0.0
+    } else {
+        (cursor_gaze_y + authored.map_or(0.0, |f| f.gaze.y)).clamp(-1.0, 1.0)
+    };
     // Keep a visible glance at 100% scale while staying within the face.
     // The local pixel unit is 5 physical pixels.
     let eye_offset_x = gaze_x * facing_sign * 0.5 + if edge_climbing { 1.0 } else { 0.0 };
@@ -1269,26 +1391,35 @@ mod tests {
         assert!(pose_time(2.09) > 2.0);
     }
     #[test]
-    fn document_remains_held_when_facing_either_direction() {
+    fn document_keeps_its_page_and_glasses_when_facing_either_direction() {
         let mut renderer = Renderer::new().unwrap();
         renderer.show_mood = false;
         let mut pet = Pet::new(1, Skin::Claude, crate::Vec2::default());
         pet.state = State::Activity;
-        pet.activity = crate::activities::CATALOG
-            .iter()
-            .find(|scene| scene.slug == "reading-data-document")
-            .map(|scene| scene.id);
-        pet.time = 1.9;
+        pet.activity = crate::activities::ActivityId::new(54);
+        pet.time = 1.0;
         pet.state_time = 1.9;
         for facing in [-1.0, 1.0] {
             pet.facing = facing;
-            let frame = renderer.frame(&pet, false);
-            let hand_x = (FEET_X + facing * 6.0 * UNIT) as usize;
-            let hand_y = (FEET_Y - 4.0 * UNIT) as usize;
-            assert_eq!(
-                frame.pixels[hand_y * WIDTH + hand_x],
-                0xFFD97757,
-                "the hand should overlap the document edge when facing {facing}"
+            let pixels = &renderer.frame(&pet, false).pixels;
+            assert!(
+                pixels.iter().filter(|&&c| c == 0xFFD97757).count() > 500,
+                "canonical body"
+            );
+            assert!(
+                pixels.iter().filter(|&&c| c == 0xFF1B1B1B).count() >= 40,
+                "visible eyes"
+            );
+            assert!(
+                pixels
+                    .iter()
+                    .filter(|&&c| c >> 24 == 255
+                        && (c >> 16 & 255) > 180
+                        && (c >> 8 & 255) > 150
+                        && (c & 255) > 100)
+                    .count()
+                    >= 20,
+                "readable paper still present"
             );
         }
     }
@@ -1669,8 +1800,10 @@ mod tests {
                 spec.slug
             );
             for (eye_x, label) in [(120, "left"), (155, "right")] {
-                let eye_present = (170..184)
-                    .any(|y| (eye_x..eye_x + 12).any(|x| activity[y * WIDTH + x] == 0xFF1B1B1B));
+                // Counterweight sway moves the entire canonical face by one cell.
+                let eye_present = (165..189).any(|y| {
+                    (eye_x - 5..eye_x + 17).any(|x| activity[y * WIDTH + x] == 0xFF1B1B1B)
+                });
                 assert!(eye_present, "{} canonical {label} eye", spec.slug);
             }
             assert_eq!(activity[0], 0, "{} transparent margin", spec.slug);
@@ -1694,9 +1827,27 @@ mod tests {
         pet.time = 1.0;
         let frame = renderer.frame(&pet, false);
         assert_eq!(frame.pixels[184 * WIDTH + 140], 0xFFD97757);
+        let authored = crate::pack_actions::frame(26, 2.0, 4.1).unwrap();
         assert!(
-            (130..220).all(|y| (185..260).all(|x| frame.pixels[y * WIDTH + x] == 0)),
-            "the imported human beside Claude must not reappear"
+            authored.replace_props,
+            "the original human-containing art must stay suppressed"
+        );
+        let mut props = Canvas::new(WIDTH, HEIGHT);
+        crate::activities::draw_activity(
+            &mut props,
+            pet.activity.unwrap(),
+            2.0,
+            1.0,
+            crate::Vec2::default(),
+        );
+        crate::pack_actions::draw_foreground(&mut props, 26, 2.0, 1.0, 4.1);
+        assert!(
+            !props.pixels.contains(&0xFFD97757),
+            "props cannot introduce another Claude body"
+        );
+        assert!(
+            props.pixels.iter().any(|&p| p != 0),
+            "the authored laptop is present"
         );
     }
     #[test]

@@ -741,7 +741,11 @@ unsafe fn build_menu_tree(s: MenuState) -> Option<MenuGuard> {
             return None;
         }
     }
-    if !append_submenu(activities.raw(), scenes, "Все занятия (75)") {
+    if !append_submenu(
+        activities.raw(),
+        scenes,
+        &format!("Все занятия ({})", crate::activities::CATALOG.len()),
+    ) {
         return None;
     }
     if !append_submenu(root.raw(), activities, "Заняться")

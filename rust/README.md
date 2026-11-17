@@ -1,6 +1,8 @@
 # Claude Mascot Rust
 
 Windows-first native Rust port maintained at [GredesCerber/claude-mascot](https://github.com/GredesCerber/claude-mascot).
+Version 0.14.0 adds individually authored action timelines for all 75 source concepts plus flag, confetti and dumbbell scenes; the catalog now has 78 entries. Props share hand geometry and preserve the canonical Claude palette.
+
 Version 0.13.3 reuses free display-name numbers, groups automatic cursor pursuits into 1–3 short runs followed by rest, and fixes frame-rate-dependent pointer motion and directional shake-off throws.
 
 Version 0.13.2 adds a live 75–300% size slider and a direct settings entry in the context menu; Windows startup and fullscreen visibility controls are in the preferences window.
@@ -20,7 +22,7 @@ impulses, ordinary jump-over avoidance, leapfrog and group towers of up to eight
 It includes varied window/landing selection, deliberate approaches to window edges,
 a 0.22-second pixel crouch before exploration jumps, voluntary ledge descent,
 desktop-icon perches, adaptive jumps, cursor/Explorer reactions,
-75 activities from the supplied pixel pack and nine friendly social activities.
+78 activities (75 source concepts and three additional scenes) and nine friendly social activities.
 Hard hits now produce bounded tumbling, bounces and a short dizzy recovery.
 Floating windows can be reached by a hop to their side followed by climbing;
 safe routes are chosen randomly rather than by shortest distance. Covered desktop
@@ -67,7 +69,7 @@ the pets running. Intensity changes optional behavior frequency, not FPS.
 | Menu | Actions |
 | --- | --- |
 | Заняться | Jump, pet, dance, wave, laptop, stretch, look around |
-| Заняться → Все занятия (75) | All pack scenes grouped by mood, code, workshop, nature, food, celebration, adventure, reflection and sport |
+| Заняться → Все занятия (78) | All pack scenes grouped by mood, code, workshop, nature, food, celebration, adventure, reflection and sport |
 | Поведение | Wander, sit, sleep, climb, chase the cursor |
 | Друзья | Invite another Claude (up to eight), remove the selected pet |
 | Друзья → Вместе с другом | Greeting, high-five, dance together, share a laptop, comfort a friend, tag, group tower, leapfrog, friendly rough play |
