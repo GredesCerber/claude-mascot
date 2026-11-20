@@ -1,6 +1,7 @@
 //! Modeless native preferences window. It owns only controls and a small event
 //! queue; the application frame loop remains the sole message pump.
 use crate::activities::CATALOG;
+use crate::animation_gallery::{AnimationGallery, CHANGED as GALLERY_CHANGED};
 use crate::settings::Frequencies;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -221,7 +222,8 @@ struct WindowState {
     intensity_value: HWND,
     min_edit: HWND,
     max_edit: HWND,
-    activity_combo: HWND,
+    activity_gallery: HWND,
+    gallery: Option<AnimationGallery>,
     color_swatch: HWND,
     built: bool,
 }
@@ -267,7 +269,8 @@ impl WindowState {
             intensity_value: null_mut(),
             min_edit: null_mut(),
             max_edit: null_mut(),
-            activity_combo: null_mut(),
+            activity_gallery: null_mut(),
+            gallery: None,
             color_swatch: null_mut(),
             built: false,
         }
@@ -371,6 +374,9 @@ impl PreferencesWindow {
             // its first normal-show request suppressed. Follow with SW_SHOW.
             ShowWindow(self.hwnd, SW_SHOW);
             SetForegroundWindow(self.hwnd);
+            if let Some(gallery) = self.state.gallery.as_mut() {
+                gallery.set_active(self.state.page == 5);
+            }
         }
     }
     pub fn company_message(&mut self, message: &str) {
@@ -380,6 +386,14 @@ impl PreferencesWindow {
     }
     /// Drain actions emitted by native controls since the previous frame.
     pub fn poll(&mut self) -> Vec<PreferencesEvent> {
+        if let Some(gallery) = self.state.gallery.as_mut() {
+            self.state.events.extend(
+                gallery
+                    .take_runs()
+                    .into_iter()
+                    .map(|id| PreferencesEvent::RunAction(100 + id as u16)),
+            );
+        }
         std::mem::take(&mut self.state.events)
     }
     /// Update values while preserving actively edited spacing fields.
@@ -687,7 +701,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         "Опоры",
         "Компания",
         "Производительность",
-        "Занятия",
+        "Галерея",
         "Обновления",
     ]
     .iter()
@@ -1007,8 +1021,7 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         checkbox(s, text, id, 25, top)?;
     }
     s.build_page = 5;
-    y = 112;
-    heading(s, "Выбрать занятие", 20, y, 400)?;
+    heading(s, "Галерея анимаций", 20, 112, 500)?;
     label(s, "Поиск по названию или группе", 20, 150, 570)?;
     let search = add_child(
         s,
@@ -1023,19 +1036,39 @@ unsafe fn build_controls(s: &mut WindowState) -> Result<(), String> {
         30,
     );
     if search.is_null() {
-        return Err(last_error("CreateWindowExW activity search"));
+        return Err(last_error("CreateWindowExW gallery search"));
     }
-    s.activity_combo = combo(s, ID_ACTIVITY, 20, 228, 570)?;
-    button(s, "Запустить", ID_RUN_ACTIVITY, 20, 274, 160)?;
-    s.activity_status = add_child(s, "STATIC", "", 0, 0, 0, 200, 280, 390, 22);
-    filter_activities(s, "");
+    button(s, "Запустить у питомца", ID_RUN_ACTIVITY, 20, 224, 220)?;
+    s.activity_status = add_child(
+        s, "STATIC", "", 0, 0x4000, // SS_ENDELLIPSIS
+        0, 255, 230, 335, 22,
+    );
     label(
         s,
-        "Занятие выполняет выбранный в шапке питомец.",
+        "Выберите карточку. Двойной клик или Enter — запустить.",
         20,
-        330,
+        263,
         590,
     )?;
+    {
+        let x = scale(220, s.dpi);
+        let y = scale(292, s.dpi);
+        let w = scale(570, s.dpi);
+        let h = scale(270, s.dpi);
+        let gallery = AnimationGallery::new(s.hwnd, ID_ACTIVITY, x, y, w, h, s.dpi, s.font)?;
+        s.activity_gallery = gallery.hwnd();
+        s.children.push(Child {
+            page: 5,
+            hwnd: s.activity_gallery,
+            x,
+            y,
+            w,
+            h,
+        });
+        s.page_heights[5] = y + h + scale(20, s.dpi);
+        s.gallery = Some(gallery);
+    }
+    filter_activities(s, "");
     s.build_page = 3;
     s.friends_status = add_child(s, "STATIC", "", 0, 0, 0, 20, 600, 590, 22);
     y = 644;
@@ -1115,41 +1148,66 @@ fn activity_matches(index: usize, query: &str) -> bool {
         .split_whitespace()
         .all(|term| text.contains(term))
 }
-unsafe fn filter_activities(s: &mut WindowState, query: &str) {
-    let previous = s
-        .activity_items
-        .get(SendMessageW(s.activity_combo, CB_GETCURSEL, 0, 0) as usize)
-        .copied();
-    s.activity_items = (0..CATALOG.len())
-        .filter(|&i| activity_matches(i, query))
-        .collect();
-    SendMessageW(s.activity_combo, CB_RESETCONTENT, 0, 0);
-    for &index in &s.activity_items {
-        let spec = &CATALOG[index];
-        combo_item(
-            s.activity_combo,
-            &format!("{} · {}", spec.group.label_ru(), spec.title_ru),
-        );
-    }
-    let selected = previous
-        .and_then(|id| s.activity_items.iter().position(|&i| i == id))
-        .unwrap_or(0);
-    SendMessageW(s.activity_combo, CB_SETCURSEL, selected, 0);
+unsafe fn update_activity_status(s: &mut WindowState) {
+    let selected = s.gallery.as_ref().and_then(|g| g.selected());
     EnableWindow(
         GetDlgItem(s.hwnd, ID_RUN_ACTIVITY),
-        i32::from(!s.activity_items.is_empty()),
+        i32::from(selected.is_some()),
     );
+    let count = s.gallery.as_ref().map_or(0, |g| g.item_count());
     set_text(
         s.activity_status,
-        &if s.activity_items.is_empty() {
-            "Ничего не найдено. Измените запрос.".to_owned()
+        &if let Some(id) = selected {
+            format!(
+                "{} из {} · {:.1} с",
+                count,
+                CATALOG.len(),
+                CATALOG[id].duration
+            )
         } else {
-            format!("Найдено: {} из {}", s.activity_items.len(), CATALOG.len())
+            "Ничего не найдено. Измените запрос.".into()
         },
     );
 }
+unsafe fn filter_activities(s: &mut WindowState, query: &str) {
+    s.activity_items = (0..CATALOG.len())
+        .filter(|&i| activity_matches(i, query))
+        .collect();
+    if let Some(gallery) = s.gallery.as_mut() {
+        gallery.set_items(s.activity_items.clone());
+    }
+    update_activity_status(s);
+}
+unsafe fn layout_gallery(s: &mut WindowState) {
+    if s.activity_gallery.is_null() {
+        return;
+    }
+    let mut rect: RECT = std::mem::zeroed();
+    GetClientRect(s.hwnd, &mut rect);
+    if let Some(child) = s
+        .children
+        .iter_mut()
+        .find(|child| child.hwnd == s.activity_gallery)
+    {
+        child.w = (rect.right - child.x - scale(20, s.dpi)).max(scale(180, s.dpi));
+        child.h = (s.client_height - child.y - scale(20, s.dpi)).max(scale(120, s.dpi));
+        s.page_heights[5] = (child.y + child.h + scale(20, s.dpi)).max(s.client_height);
+        SetWindowPos(
+            child.hwnd,
+            null_mut(),
+            child.x,
+            child.y - if s.page == 5 { s.scroll.max(0) } else { 0 },
+            child.w,
+            child.h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
 
 unsafe fn sync_controls(s: &mut WindowState, force: bool) {
+    if let Some(gallery) = s.gallery.as_mut() {
+        gallery.set_color(s.data.body_color);
+    }
     let focused = GetFocus();
     if force
         || (focused != s.pet_combo
@@ -1371,6 +1429,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CLOSE => {
+            if let Some(gallery) = s.gallery.as_mut() {
+                gallery.set_active(false);
+            }
             ShowWindow(hwnd, SW_HIDE);
             0
         }
@@ -1389,6 +1450,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SIZE => {
             s.client_height = (lparam as u32 >> 16) as i32;
+            layout_gallery(s);
             update_scroll(s);
             0
         }
@@ -1453,6 +1515,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_MOUSEWHEEL => {
+            if s.page == 5 && !s.activity_gallery.is_null() {
+                let mut point: POINT = std::mem::zeroed();
+                let mut bounds: RECT = std::mem::zeroed();
+                GetCursorPos(&mut point);
+                GetWindowRect(s.activity_gallery, &mut bounds);
+                if point.x >= bounds.left
+                    && point.x < bounds.right
+                    && point.y >= bounds.top
+                    && point.y < bounds.bottom
+                {
+                    SendMessageW(s.activity_gallery, WM_MOUSEWHEEL, wparam, lparam);
+                    return 0;
+                }
+            }
+
             let delta = ((wparam >> 16) as i16) as i32;
             scroll(s, if delta > 0 { SB_PAGEUP } else { SB_PAGEDOWN }, 0);
             0
@@ -1675,9 +1752,9 @@ unsafe fn handle_command(s: &mut WindowState, wparam: WPARAM, lparam: LPARAM) {
         (ID_DISTINCT_COLORS, BN_CLICKED) => s.events.push(PreferencesEvent::RunAction(189)),
         (ID_COLOR_BUTTON, BN_CLICKED) => s.events.push(PreferencesEvent::ChooseColor),
         (ID_RESET_COLOR, BN_CLICKED) => s.events.push(PreferencesEvent::ResetColor),
+        (ID_ACTIVITY, GALLERY_CHANGED) => update_activity_status(s),
         (ID_RUN_ACTIVITY, BN_CLICKED) => {
-            let index = SendMessageW(s.activity_combo, CB_GETCURSEL, 0, 0);
-            if let Some(&catalog_index) = s.activity_items.get(index as usize) {
+            if let Some(catalog_index) = s.gallery.as_ref().and_then(|g| g.selected()) {
                 s.events
                     .push(PreferencesEvent::RunAction(100 + catalog_index as u16));
             }
@@ -1954,9 +2031,14 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
     SetFocus(GetDlgItem(s.hwnd, ID_NAV_BASE + page as i32));
     s.page_scroll[s.page] = s.scroll.max(0);
     s.page = page;
+    layout_gallery(s);
     let pos = s.page_scroll[page].min((s.page_heights[page] - s.client_height).max(0));
     s.scroll = -1;
     scroll_to(s, pos);
+    if let Some(gallery) = s.gallery.as_mut() {
+        gallery.set_active(page == 5 && IsWindowVisible(s.hwnd) != 0);
+    }
+
     EnableWindow(s.pet_combo, i32::from(matches!(page, 0 | 1 | 3 | 5)));
     set_text(
         s.scope_label,
@@ -1964,7 +2046,7 @@ unsafe fn select_page(s: &mut WindowState, page: usize) {
             0 => "Цвет — выбранному питомцу. Масштаб и видимость — всем.",
             1 => "Настройки — всем. Команды — выбранному питомцу.",
             3 => "Расстояние — всем. Игры — с участием выбранного питомца.",
-            5 => "Занятия для выбранного питомца",
+            5 => "Галерея: превью в цвете выбранного питомца. Запуск — только по команде.",
             _ => "Общие настройки для всех питомцев",
         },
     );
@@ -2143,18 +2225,35 @@ mod tests {
         }
     }
     #[test]
+    fn gallery_keyboard_launches_the_filtered_catalog_item() {
+        let mut panel = PreferencesWindow::new().unwrap();
+        unsafe {
+            filter_activities(&mut panel.state, "гантель");
+            assert_eq!(panel.state.gallery.as_ref().unwrap().item_count(), 1);
+            let id = panel.state.gallery.as_ref().unwrap().selected().unwrap();
+            SendMessageW(panel.state.activity_gallery, WM_KEYDOWN, 0x0D, 0);
+            assert_eq!(
+                panel.poll(),
+                vec![PreferencesEvent::RunAction(100 + id as u16)]
+            );
+            filter_activities(&mut panel.state, "");
+            SendMessageW(panel.state.activity_gallery, WM_KEYDOWN, 0x23, 0);
+            assert_eq!(
+                panel.state.gallery.as_ref().unwrap().selected(),
+                Some(CATALOG.len() - 1)
+            );
+            SendMessageW(panel.state.activity_gallery, WM_KEYDOWN, 0x24, 0);
+            assert_eq!(panel.state.gallery.as_ref().unwrap().selected(), Some(0));
+        }
+    }
+    #[test]
     fn filtered_activity_runs_catalog_identity_and_empty_search_is_safe() {
         let mut panel = PreferencesWindow::new().unwrap();
         unsafe {
             let target = CATALOG.len() - 1;
             filter_activities(&mut panel.state, CATALOG[target].title_ru);
-            let row = panel
-                .state
-                .activity_items
-                .iter()
-                .position(|&i| i == target)
-                .unwrap();
-            SendMessageW(panel.state.activity_combo, CB_SETCURSEL, row, 0);
+            assert!(panel.state.activity_items.contains(&target));
+            panel.state.gallery.as_mut().unwrap().select(target);
             handle_command(&mut panel.state, ID_RUN_ACTIVITY as usize, 0);
             assert_eq!(
                 panel.state.events.pop(),
@@ -2358,8 +2457,8 @@ mod tests {
             assert_eq!(SendMessageW(panel.state.pet_combo, CB_GETCURSEL, 0, 0), 2);
             assert_eq!(SendMessageW(panel.state.fps_combo, CB_GETCURSEL, 0, 0), 2);
             assert_eq!(
-                SendMessageW(panel.state.activity_combo, CB_GETCOUNT, 0, 0),
-                CATALOG.len() as isize
+                panel.state.gallery.as_ref().unwrap().item_count(),
+                CATALOG.len()
             );
             // TBM_GETPOS is WM_USER (not exported by this windows-sys version).
             assert_eq!(SendMessageW(panel.state.intensity, WM_USER, 0, 0), 80);

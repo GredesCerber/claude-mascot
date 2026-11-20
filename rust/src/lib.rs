@@ -1,5 +1,7 @@
 pub mod activities;
 pub mod activity_dialogue;
+#[cfg(windows)]
+pub(crate) mod animation_gallery;
 pub mod behavior;
 pub mod company;
 pub mod contacts;
