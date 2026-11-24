@@ -248,3 +248,26 @@ fn two_through_five_mixed_resting_friends_build_complete_towers() {
         );
     }
 }
+
+#[test]
+fn grabbing_active_tower_jumper_does_not_apply_planned_velocity() {
+    let w = world(1040.);
+    let mut ps = pets(4, 1040., 1.);
+    let mut c = SocialCoordinator::new();
+    c.request_tower(Some(1));
+    c.update(0., ps.iter_mut(), &w);
+    let jumper = ps
+        .iter_mut()
+        .find(|p| matches!(p.social_motion, Some(SocialMotion::Leap { .. })))
+        .unwrap();
+    let id = jumper.id;
+    jumper.dragging = true;
+    jumper.pos.y = 100.;
+    jumper.vel = Vec2::new(123., -45.);
+    c.update(1. / 240., ps.iter_mut(), &w);
+    let jumper = ps.iter().find(|p| p.id == id).unwrap();
+    assert_eq!(jumper.vel.x, 123.);
+    assert_eq!(jumper.vel.y, -45.);
+    assert!(ps.iter().all(|p| p.social.is_none()));
+    assert_eq!(c.stats.cancelled, 1);
+}

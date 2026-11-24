@@ -129,7 +129,7 @@ pub const CATALOG: [ActivitySpec; ACTIVITY_COUNT] = [
         "Удачный API",
         Coding,
         "Нарисую ответ API!",
-        3.7
+        3.0
     ),
     entry!(
         4,
@@ -321,7 +321,7 @@ pub const CATALOG: [ActivitySpec; ACTIVITY_COUNT] = [
         "Вилка и розетка",
         Coding,
         "Проверю соединение на рисунке!",
-        3.7
+        3.1
     ),
     entry!(
         28,
@@ -337,7 +337,7 @@ pub const CATALOG: [ActivitySpec; ACTIVITY_COUNT] = [
         "Розовое предупреждение",
         Error,
         "Ой, что-то пошло не так!",
-        3.8
+        3.0
     ),
     entry!(
         30,
@@ -681,7 +681,7 @@ pub const CATALOG: [ActivitySpec; ACTIVITY_COUNT] = [
         "Добро пожаловать",
         Celebration,
         "Рад тебя видеть!",
-        4.0
+        3.2
     ),
     entry!(
         73,

@@ -2361,6 +2361,10 @@ impl Pet {
         }
     }
 
+    pub(crate) fn cancel_leapfrog(&mut self) {
+        self.leapfrog_arc = None;
+    }
+
     pub(crate) fn prepare_leapfrog(
         &mut self,
         target: Vec2,

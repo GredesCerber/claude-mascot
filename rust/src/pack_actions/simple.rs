@@ -219,16 +219,7 @@ fn tracks(id: usize) -> (Track, Track) {
                 (-10., -8.),
                 REST_L,
             ],
-            [
-                REST_R,
-                (5., -8.),
-                (-3., -11.),
-                (-11., -17.),
-                (-11., -16.),
-                (-3., -11.),
-                (5., -8.),
-                REST_R,
-            ],
+            r,
         ),
         36 => (
             l,
@@ -412,16 +403,7 @@ fn tracks(id: usize) -> (Track, Track) {
                 (-9., -9.),
                 REST_L,
             ],
-            [
-                REST_R,
-                (6., -8.),
-                (-2., -16.),
-                (-11., -21.),
-                (-11., -21.),
-                (-2., -16.),
-                (6., -8.),
-                REST_R,
-            ],
+            r,
         ),
         67 => (
             l,
@@ -443,7 +425,7 @@ fn tracks(id: usize) -> (Track, Track) {
                 (-8., -14.),
                 (-8., -17.),
                 (-8., -17.),
-                (-8., -17.),
+                (-8., -15.),
                 (-8., -10.),
                 REST_L,
             ],
@@ -453,7 +435,7 @@ fn tracks(id: usize) -> (Track, Track) {
                 (6., -14.),
                 (6., -17.),
                 (6., -17.),
-                (6., -17.),
+                (6., -15.),
                 (6., -10.),
                 REST_R,
             ],
@@ -490,8 +472,8 @@ pub(crate) fn frame(id: usize, t: f64, duration: f64) -> Option<Frame> {
         // Hearts must clear the forehead in preparation and recovery too,
         // rather than becoming a pair of partially hidden pink protrusions.
         let hand_raise = match id {
-            16 => 4.,
-            45 => 5.,
+            16 => 2.,
+            45 => 3.,
             _ => 0.,
         };
         for palm in &mut f.body.hands {
@@ -521,6 +503,11 @@ pub(crate) fn frame(id: usize, t: f64, duration: f64) -> Option<Frame> {
                     f.body.body_x = 1.;
                 }
                 f.gaze = Vec2::new(-1., -1.);
+            }
+            3 if s == 4 => f.body.bob = -1.,
+            72 if s == 4 => {
+                f.body.bob = -1.;
+                f.gaze.y = -1.;
             }
             16 | 38 | 42 | 72 => {
                 f.gaze = Vec2::new(0., -1.);
@@ -708,22 +695,19 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
     }
     match id {
         1 => {
-            // Handle and cup travel together through lift, sip and return.
+            // Hold by the handle; keep the rim below the eyes during the sip.
             let x = r.x + 1.;
-            let y = r.y;
-            p.r(x, y, 5., 4., 0x384B4E);
-            p.r(x + 1., y + 1., 3., 2., 0xA5C7AB);
-            p.r(x - 1., y + 1., 1., 2., 0x384B4E);
-            p.r(x - 2., y + 1., 1., 1., 0x384B4E);
-            p.r(x - 2., y + 2., 1., 1., 0x384B4E);
-            p.r(x - 1., y - 1., 7., 1., 0x5B48A0);
+            let y = (r.y + 1.).min(-5.);
+            p.r(x, y, 5., 4., 0xA5C7AB);
+            p.r(x, y + 4., 4., 1., 0x526C64);
+            p.r(x - 2., y + 1., 2., 1., 0x526C64);
+            p.dot(x - 2., y + 2., 0x526C64);
+            p.r(x - 2., y + 3., 2., 1., 0x526C64);
             p.r(x, y, 5., 1., 0xF2D4A2);
+            p.r(x + 1., y, 3., 1., 0x704C36);
             if s == 2 || s == 5 {
-                p.dot(x + 1., y - 3., 0xD4DAD4);
-                p.dot(x + 2., y - 4., 0xD4DAD4);
-            }
-            if s == 4 {
-                p.r(x + 1., y, 3., 1., 0x704C36);
+                p.dot(x + 2., y - 2., 0xD4DAD4);
+                p.dot(x + 3., y - 3., 0xD4DAD4);
             }
         }
         3 => {
@@ -820,14 +804,14 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
                         0xC0CBEA,
                     );
                 }
-                if s <= 3 {
+                if s == 3 {
                     p.r(x + 2., y + 2., 3., 1., 0xF1D16E);
                     p.dot(x + 3., y + 3., 0xF1D16E);
                 }
                 if s == 3 || s == 4 {
                     p.r(x + 3., y + 4., 1., 2., 0xF1D16E);
                 }
-                if s >= 4 {
+                if s == 1 || s >= 4 {
                     p.r(x + 2., y + 7., 3., 1., 0xF1D16E);
                     p.dot(x + 3., y + 6., 0xF1D16E);
                 }
@@ -882,7 +866,7 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
             }
         }
         30 => {
-            // Handle and globe travel together; a free hand turns continents.
+            // Handle and globe travel together; the holding wrist turns the globe.
             let x = l.x - 7.;
             let y = l.y - 8.;
             p.r(l.x - 2., l.y - 2., 3., 1., 0x6E5BD2);
@@ -932,9 +916,9 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
             let tilt = if s == 4 { 1. } else { 0. };
             p.r(x, y + tilt, 4., 1., 0x4CA74D);
             p.r(x + 1., y + 1. + tilt, 5., 2., 0x4CA74D);
-            p.r(x + 3., y + 3., 4., 1., 0x4CA74D);
+            p.r(x + 3., y + 3. + tilt, 4., 1., 0x4CA74D);
             for n in 0..5 {
-                p.dot(x + 2. + n as f64, y + 1. + (n / 2) as f64, 0x96CE65);
+                p.dot(x + 2. + n as f64, y + 1. + tilt + (n / 2) as f64, 0x96CE65);
             }
             p.r(l.x - 1., l.y - 1., 2., 1., 0x78A34C);
         }
@@ -1078,10 +1062,10 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
             }
         }
         64 => {
-            // Raise alert window, press close box, fold the window away.
-            let x = l.x - 12.;
-            let y = l.y - 8.;
+            // Raise alert window, flash the alert, fold the window away.
             let w = if s == 6 { 7. } else { 13. };
+            let x = l.x + 1. - w;
+            let y = l.y - 8.;
             p.r(x, y, w, 10., 0xE94CC8);
             p.r(x, y, w, 2., 0xB937A7);
             p.dot(x + 1., y + 1., 0xF6B4DE);
@@ -1131,7 +1115,7 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
             p.r(x, y, 1., 7., 0xE996C2);
             p.r(x + w - 1., y, 1., 7., 0xE996C2);
             if w == 30. {
-                p.text(-13., y + 1., "WELCOME", 0xDC72AF);
+                p.text(-13., y + 1., "WELCOME", 0x95406D);
             }
             p.r(l.x + 1., l.y - 1., 1., 2., 0xD49E7A);
             p.r(r.x + 1., r.y - 1., 1., 2., 0xD49E7A);
@@ -1143,14 +1127,16 @@ fn draw_layer(c: &mut Canvas, id: usize, t: f64, facing: f64, duration: f64, fro
             p.r(x + 1., y, 7., 1., 0x159F65);
             p.r(x, y + 1., 9., 6., 0x159F65);
             p.r(x + 1., y + 7., 7., 1., 0x159F65);
+            // Keep the badge symbol readable when the holding palm is mirrored.
+            let column = |n: f64| if facing < 0. { x + 8. - n } else { x + n };
             if s >= 2 {
-                p.dot(x + 2., y + 3., 0x50DE9C);
-                p.dot(x + 3., y + 4., 0x50DE9C);
+                p.dot(column(2.), y + 3., 0x50DE9C);
+                p.dot(column(3.), y + 4., 0x50DE9C);
             }
             if s >= 3 {
-                p.dot(x + 4., y + 3., 0x50DE9C);
-                p.dot(x + 5., y + 2., 0x50DE9C);
-                p.dot(x + 6., y + 1., 0x50DE9C);
+                p.dot(column(4.), y + 3., 0x50DE9C);
+                p.dot(column(5.), y + 2., 0x50DE9C);
+                p.dot(column(6.), y + 1., 0x50DE9C);
             }
         }
         _ => {}
@@ -1218,9 +1204,9 @@ mod tests {
                     for x in 0..a.width {
                         let v = a.pixels[y * a.width + x];
                         let mirrored = b.pixels[y * b.width + (a.width - 1 - x)];
-                        // Letters stay readable when the card changes sides. The
+                        // Glyphs stay readable when the card changes sides. The
                         // card's silhouette still mirrors exactly around FEET_X.
-                        if [3, 42, 72].contains(&id) {
+                        if [3, 42, 72, 73].contains(&id) {
                             assert_eq!(v >> 24, mirrored >> 24, "id {id}");
                         } else {
                             assert_eq!(v, mirrored, "id {id}, t {t}, x {x}, y {y}");

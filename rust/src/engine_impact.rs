@@ -153,6 +153,7 @@ impl Pet {
         }
         self.social = None;
         self.social_motion = None;
+        self.leapfrog_arc = None;
         self.activity = None;
         self.pending_activity = None;
         if self.pending_ground == Some(State::Activity) {
@@ -160,9 +161,7 @@ impl Pet {
         }
         self.forced_sleep = false;
         self.forced_sleep_armed = false;
-        self.auto_pursuit = false;
-        self.auto_pursuit_time = 0.0;
-        self.pursuit_stationary = 0.0;
+        self.cancel_auto_pursuit();
         self.behavior_velocity = None;
         self.behavior_velocity_ttl = 0.0;
         self.exploration_route = None;
@@ -350,6 +349,30 @@ fn ease_upright(angle: f64, step: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn impact_cancels_remaining_cursor_runs_and_planned_leap() {
+        let mut pet = Pet::new(1, crate::engine::Skin::Claude, Vec2::new(300., 900.));
+        pet.auto_pursuit = true;
+        pet.cursor_play_runs_left = 2;
+        pet.cursor_play_remaining = 20.;
+        pet.cursor_play_pause = 1.;
+        pet.leapfrog_arc = Some(crate::leapfrog::Arc {
+            launch: 600.,
+            vx: 200.,
+            start_y: 800.,
+        });
+        assert!(pet.knock_back(Knock {
+            direction: -1.,
+            strength: 900.
+        }));
+        assert!(!pet.auto_pursuit);
+        assert_eq!(pet.cursor_play_runs_left, 0);
+        assert_eq!(pet.cursor_play_remaining, 0.);
+        assert_eq!(pet.cursor_play_pause, 0.);
+        assert!(pet.leapfrog_arc.is_none());
+        assert_eq!(pet.state, State::Thrown);
+    }
+
     #[test]
     fn angles_wrap_and_ease_by_the_shortest_path() {
         assert!((wrap_angle(3.0 * PI) - PI).abs() < 1e-9);

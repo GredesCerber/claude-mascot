@@ -898,15 +898,6 @@ impl SocialCoordinator {
     ) {
         let Some(mut g) = self.tower else { return };
         g.formation_time += dt;
-        if g.active_id != 0 && !g.horizontal_started {
-            if let Some(i) = find(refs, n, g.active_id) {
-                let p = refs[i].as_deref_mut().unwrap();
-                if p.pos.y <= g.active_target.y {
-                    p.vel.x = g.active_vx;
-                    g.horizontal_started = true;
-                }
-            }
-        }
         let valid = (0..g.len).all(|k| {
             find(refs, n, g.ids[k]).is_some_and(|i| {
                 let p = refs[i].as_deref().unwrap();
@@ -929,6 +920,15 @@ impl SocialCoordinator {
             self.tower = None;
             self.finish_tower(g, refs, n, world, false);
             return;
+        }
+        if g.active_id != 0 && !g.horizontal_started {
+            if let Some(i) = find(refs, n, g.active_id) {
+                let p = refs[i].as_deref_mut().unwrap();
+                if p.pos.y <= g.active_target.y {
+                    p.vel.x = g.active_vx;
+                    g.horizontal_started = true;
+                }
+            }
         }
         match g.phase {
             TowerPhase::Forming => {
@@ -1678,6 +1678,13 @@ impl SocialCoordinator {
                         )
                     {
                         pet.social_motion = None;
+                        pet.cancel_leapfrog();
+                        if p.kind == SocialKind::Leapfrog
+                            && pet.state == State::Crouch
+                            && !pet.dragging
+                        {
+                            pet.set_social_end(world);
+                        }
                         if p.kind == SocialKind::Tower && id == p.upper {
                             if completed && was_perched {
                                 let room_left = pet.pos.x - (p.support.x + 25.0);

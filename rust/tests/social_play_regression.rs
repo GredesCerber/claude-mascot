@@ -468,3 +468,19 @@ fn busy_selected_pet_does_not_start_a_tower_without_him() {
     assert_eq!(c.stats.started, 0);
     assert!(pets.iter().all(|p| p.social.is_none()));
 }
+
+#[test]
+fn cancelled_leapfrog_releases_the_crouching_jumper() {
+    let w = world();
+    let mut pets = pair();
+    let mut c = SocialCoordinator::new();
+    c.request_for(1, Some(SocialKind::Leapfrog));
+    c.update(0., pets.iter_mut(), &w);
+    assert!(pets.iter().any(|p| p.state == State::Crouch));
+    c.enabled = false;
+    c.update(1. / 240., pets.iter_mut(), &w);
+    assert!(pets
+        .iter()
+        .all(|p| p.social.is_none() && p.social_motion.is_none()));
+    assert!(pets.iter().all(|p| p.state != State::Crouch));
+}

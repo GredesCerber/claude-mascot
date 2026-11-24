@@ -400,8 +400,14 @@ impl GalleryState {
         let next = match key {
             0x25 => row.saturating_sub(1),
             0x27 => row + 1,
-            0x26 => row.saturating_sub(cols),
-            0x28 => row + cols,
+            0x26 => row.checked_sub(cols).unwrap_or(row),
+            0x28 => {
+                if row + cols < self.items.len() {
+                    row + cols
+                } else {
+                    row
+                }
+            }
             0x24 => 0,
             0x23 => self.items.len() - 1,
             0x21 => row.saturating_sub(page),
@@ -466,7 +472,17 @@ impl GalleryState {
             let pet = &mut self.pets[id];
             pet.body_color = self.color;
             pet.time = phase;
-            pet.state_time = phase;
+            pet.state = if phase < spec.duration {
+                State::Activity
+            } else {
+                State::Idle
+            };
+            pet.activity = (pet.state == State::Activity).then_some(spec.id);
+            pet.state_time = if pet.activity.is_some() {
+                phase
+            } else {
+                phase - spec.duration
+            };
             let frame = self.renderer.frame(pet, false);
             self.pixels.clear();
             for &pixel in &frame.pixels {
@@ -487,13 +503,15 @@ impl GalleryState {
             let pad = (12.0 * self.dpi).round() as i32;
             let picture_h = (148.0 * self.dpi).round() as i32;
             SetStretchBltMode(target, COLORONCOLOR);
-            let picture_w = (picture_h * WIDTH as i32 / HEIGHT as i32).min(layout.card_w - pad * 2);
+            let picture_w =
+                (picture_h * WIDTH as i32 / HEIGHT as i32).min((layout.card_w - pad * 2).max(1));
+            let scaled_height = picture_w * HEIGHT as i32 / WIDTH as i32;
             StretchDIBits(
                 target,
                 rect.left + (layout.card_w - picture_w) / 2,
-                rect.top + pad,
+                rect.top + pad + (picture_h - scaled_height) / 2,
                 picture_w,
-                picture_h,
+                scaled_height,
                 0,
                 0,
                 WIDTH as i32,
@@ -633,7 +651,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CHAR if wparam == 0x0D || wparam == 0x20 => 0,
         WM_KEYDOWN => {
-            s.key(wparam as u32);
+            let repeated = lparam & (1 << 30) != 0;
+            let activates = wparam == 0x0D || wparam == 0x20;
+            if !activates || !repeated {
+                s.key(wparam as u32);
+            }
             0
         }
         WM_GETDLGCODE => {

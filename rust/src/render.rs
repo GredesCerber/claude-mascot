@@ -655,7 +655,6 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         "angry-at-laptop" | "angry-pixel-coffee" | "angry-powerful-lightning"
     );
     let activity_sad = matches!(activity_slug, "crying-sad-reaction" | "broken-heart-sad");
-    let activity_sleepy = matches!(activity_slug, "sleeping-soundly" | "artboard-24cla2");
     let activity_lightning = activity_slug == "angry-powerful-lightning" && !replacement_props;
     let activity_wizard = activity_slug == "artboard-2cla3" && !replacement_props;
     let activity_document = activity_slug == "reading-data-document" && !replacement_props;
@@ -872,7 +871,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
             laptop_phase,
             FEET_X
                 + if shared_laptop_owner {
-                    peer_dx.clamp(-110.0, 110.0) * 0.5
+                    (peer_dx * 0.5).clamp(-105.0, 105.0)
                 } else {
                     0.0
                 },
@@ -999,8 +998,9 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
     } else if social_watching_laptop || shared_laptop_owner {
         // Both poses reach toward the same world-space laptop, not two
         // unrelated centers. Only the owner draws the shared prop.
-        let target = (peer_dx.abs() / 10.0).clamp(6.0, 11.0);
-        let tap = if shared_laptop_owner {
+        // Reach the near edge of the deck, which spans five cells either side.
+        let target = (peer_dx.abs() / (2.0 * UNIT) - 4.0).clamp(6.0, 17.0);
+        let tap = if shared_laptop_owner && (1.0..9.0).contains(&laptop_phase) {
             if alt(state_time, 6.0) {
                 0.0
             } else {
@@ -1062,7 +1062,7 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         px(4.0, top + 3.0, 2.0, 2.0, palette.highlight);
     } else if typing_pose {
         // Arms angle inward from Claude's shoulders to the laptop keyboard.
-        let tapping = alt(laptop_phase, 3.0);
+        let tapping = (1.0..9.0).contains(&laptop_phase) && alt(laptop_phase, 3.0);
         px(-7.0, top + 2.0, 2.0, 2.0, palette.body);
         px(5.0, top + 2.0, 2.0, 2.0, palette.body);
         px(-5.0, top + 4.0, 2.0, 2.0, palette.body);
@@ -1120,7 +1120,13 @@ fn draw_claude(c: &mut Canvas, p: &Pet) {
         }
     }
     let blink = (animation_time * 0.2).fract() > 0.98;
-    let activity_closed_eyes = activity_sleepy && (state_time * 1.5).fract() > 0.35;
+    let activity_closed_eyes = match activity_slug {
+        "sleeping-soundly" => {
+            activity.is_some_and(|spec| (0.25..spec.duration - 0.35).contains(&state_time))
+        }
+        "artboard-24cla2" => (state_time * 1.5).fract() > 0.35,
+        _ => false,
+    };
     let eyes_closed =
         p.state == State::Sleep || p.state == State::Happy || activity_closed_eyes || blink;
     let facing_sign = if p.facing < 0.0 { -1.0 } else { 1.0 };
@@ -1756,7 +1762,7 @@ mod tests {
             role: SocialRole::Initiator,
             partner_id: 2,
             elapsed: 2.0,
-            partner_offset: crate::Vec2::new(90.0, 0.0),
+            partner_offset: crate::Vec2::new(160.0, 0.0),
         });
         let frame = renderer.frame(&pet, false);
         let xs: Vec<_> = frame
@@ -1771,7 +1777,7 @@ mod tests {
             + xs.iter().copied().fold(f64::NEG_INFINITY, f64::max))
             * 0.5;
         assert!(
-            (center - (FEET_X + 45.0)).abs() < 3.0,
+            (center - (FEET_X + 80.0)).abs() < 3.0,
             "shared prop must be halfway to the partner"
         );
         pet.state = State::Social;

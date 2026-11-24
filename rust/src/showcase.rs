@@ -89,7 +89,7 @@ pub(crate) fn pose(id: usize, t: f64) -> Option<Pose> {
             if (0.25..0.5).contains(&t) || (6.75..7.0).contains(&t) {
                 p.hands[1] = Vec2::new(7.0, -6.0 - p.bob);
             } else if (0.5..6.75).contains(&t) {
-                p.hands[1] = Vec2::new(8.0, h - p.bob);
+                p.hands[1] = Vec2::new(10.0, h - p.bob);
             }
         }
         _ => return None,
@@ -116,7 +116,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, elapsed: f64, facing: f64, duratio
     let color = |rgb| opacity << 24 | rgb;
     match id {
         FLAG => {
-            let frame = flag_frame(t);
+            let frame = tick(t, 12.0);
             let hand = p.hands[1];
             let pole_x = hand.x + p.body_x + 1.0;
             cell(c, facing, pole_x, -24.0, 1.0, 16.0, color(0xB7A28B));

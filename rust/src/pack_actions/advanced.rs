@@ -65,10 +65,12 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
         }
         return Some(f);
     }
+    // Fingers alternate on whole pose ticks while the lid is fully open.
+    let key_down = (3..=8).contains(&q) && crate::render::alt(t, 3.0);
     match id {
         0 => {
-            rh(&mut f, 9., if q.is_multiple_of(2) { -5. } else { -6. });
-            lh(&mut f, 5., -5.);
+            lh(&mut f, 6., if key_down { -5. } else { -6. });
+            rh(&mut f, 8., if key_down { -6. } else { -5. });
             f.gaze = Vec2::new(2., 1.);
         }
         2 => {
@@ -139,19 +141,20 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
             f.gaze.x = if q.is_multiple_of(2) { -2. } else { 2. };
         }
         19 => {
-            both(&mut f, -3.);
+            rh(&mut f, 7., if (4..=8).contains(&q) { -6. } else { -4. });
             f.gaze.y = 2.;
             if q == 6 {
                 f.body.body_x = -1.;
             }
         }
         21 => {
+            // Lift each new cube off to the side, then settle it on the stack.
+            let level = q.saturating_sub(2) / 2;
+            let lifting = q.is_multiple_of(2);
             rh(
                 &mut f,
-                10.,
-                [
-                    -8., -8., -4., -8., -8., -12., -12., -16., -16., -16., -8., -8.,
-                ][q],
+                if lifting { 8. } else { 11. },
+                -1. - level as f64 * 4. - if lifting { 3. } else { 0. },
             );
             f.gaze.x = 2.;
         }
@@ -160,10 +163,15 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
             f.gaze.x = [-2., 0., 2., 0.][q % 4];
         }
         24 => {
+            let slot = (q.saturating_sub(2) / 2).min(2);
             rh(
                 &mut f,
-                if q < 6 { 10. } else { 16. },
-                if q.is_multiple_of(3) { -5. } else { -8. },
+                9. + slot as f64 * 4.,
+                if q < 8 && q.is_multiple_of(2) {
+                    -8.
+                } else {
+                    -3.
+                },
             );
             f.gaze = Vec2::new(2., 2.);
         }
@@ -173,8 +181,8 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
             f.gaze.x = 2.;
         }
         26 => {
-            lh(&mut f, 5., if q.is_multiple_of(2) { -5. } else { -6. });
-            rh(&mut f, 9., if q.is_multiple_of(2) { -6. } else { -5. });
+            lh(&mut f, 6., if key_down { -5. } else { -6. });
+            rh(&mut f, 8., if key_down { -6. } else { -5. });
             f.gaze = Vec2::new(2., 1.);
         }
         27 => {
@@ -183,7 +191,7 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
                 if q < 5 {
                     9.
                 } else if q < 9 {
-                    13.
+                    15.
                 } else {
                     9.
                 },
@@ -205,10 +213,11 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
             f.body.bob = if q == 6 { 1. } else { 0. };
         }
         32 => {
-            f.body.body_x = if q < 5 { -1. } else { 1. };
-            f.body.lifted_pair = Some(q % 2);
-            lh(&mut f, -8., if q.is_multiple_of(2) { -11. } else { -7. });
-            rh(&mut f, 6., if q.is_multiple_of(2) { -7. } else { -11. });
+            let stride = crate::render::alt(t, 5.);
+            f.body.body_x = if stride { 1. } else { 0. };
+            f.body.lifted_pair = Some(usize::from(stride));
+            lh(&mut f, -8., if stride { -11. } else { -7. });
+            rh(&mut f, 6., if stride { -7. } else { -11. });
         }
         33 => {
             rh(&mut f, 9., if q == 5 || q == 6 { -11. } else { -7. });
@@ -278,7 +287,8 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
             f.gaze.x = 2.;
         }
         48 => {
-            rh(&mut f, 7., -15.);
+            let tip_x = [-3., -2., -1., 0., 1., 2., 3., 4.][q - 2];
+            rh(&mut f, tip_x + 2., -16.);
             f.gaze.y = -2.;
         }
         49 => {
@@ -326,7 +336,12 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
         }
         56 => {
             lh(&mut f, -9., -8.);
-            rh(&mut f, 13., if q == 4 || q == 6 { -13. } else { -8. });
+            let hammer_y = match q {
+                4 | 6 => -15.,
+                5 | 7 => -10.,
+                _ => -12.,
+            };
+            rh(&mut f, 14., hammer_y);
             f.gaze.x = 2.;
         }
         57 => {
@@ -420,8 +435,8 @@ pub(crate) fn frame(id: usize, t: f64, d: f64) -> Option<Frame> {
             f.gaze.x = 2.;
         }
         74 => {
-            lh(&mut f, 5., if q.is_multiple_of(2) { -6. } else { -5. });
-            rh(&mut f, 9., if q.is_multiple_of(2) { -5. } else { -6. });
+            lh(&mut f, 6., if key_down { -5. } else { -6. });
+            rh(&mut f, 8., if key_down { -6. } else { -5. });
             f.gaze = Vec2::new(2., 1.);
         }
         _ => unreachable!(),
@@ -486,20 +501,24 @@ impl Ink<'_> {
         self.r(x, y + 4., 6., 4., 0xA6C8CA);
         self.r(x + 1., y + 8. - fill, 4., fill, col);
     }
-    fn laptop(&mut self, open: bool, col: u32) {
+    fn laptop(&mut self, phase: usize, color: u32) {
         self.r(6., -3., 17., 2., INK);
         self.r(7., -4., 15., 1., 0xB2A5C7);
-        // Only matte lid back faces the viewer, never an outward-facing screen.
-        if open {
-            self.r(9., -12., 13., 8., col);
-            self.r(10., -11., 1., 6., 0xAEA0C4);
-            self.r(15., -9., 2., 1., 0xC8BED5);
+        // The hinge stays fixed while the projected lid grows in pixel steps.
+        let height = match phase {
+            1 | 10 => 1.,
+            2 | 9 => 4.,
+            _ => 8.,
+        };
+        self.r(9., -4. - height, 13., height, color);
+        if height >= 4. {
+            self.r(10., -3. - height, 1., height - 2., 0xAEA0C4);
+            self.r(15., -4. - height / 2., 2., 1., 0xC8BED5);
         }
     }
     fn arrow(&mut self, x: f64, y: f64, col: u32) {
-        self.r(x, y + 2., 2., 5., col);
-        self.r(x, y, 5., 2., col);
-        self.r(x + 3., y + 2., 2., 2., col);
+        self.line(x - 3., y, 5., col);
+        self.r(x, y + 1., 2., 4., col);
     }
 }
 
@@ -518,7 +537,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
     };
     // Keep completed structures and marks during cleanup. They fade as a whole;
     // the tower must not suddenly lose three blocks and the map must retain pins.
-    let exit = q == 10;
+    let presentation_phase = q;
     let q = q.min(9);
     let on = active(q);
     let k = if on { q - 2 } else { 0 };
@@ -526,7 +545,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
     let l = palm(&f, 0);
     match id {
         0 => {
-            p.laptop(on && !exit, PURPLE);
+            p.laptop(presentation_phase, PURPLE);
             if (4..=7).contains(&q) {
                 for n in 0..3 {
                     let x = 11. + n as f64 * 4.;
@@ -538,14 +557,15 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         }
         2 => {
             if on {
-                for j in 0..(k.min(4) + 1) {
-                    p.r(
-                        if j % 2 == 0 { -1. } else { 1. },
-                        -26. + j as f64 * 2.,
-                        3.,
-                        2.,
-                        if q < 7 { GREEN } else { GOLD },
-                    );
+                let bolt = [
+                    (1., -26., 3.),
+                    (0., -24., 3.),
+                    (-1., -22., 5.),
+                    (1., -20., 2.),
+                    (0., -18., 2.),
+                ];
+                for &(x, y, width) in bolt.iter().take(k + 1) {
+                    p.r(x, y, width, 2., if q < 7 { GREEN } else { GOLD });
                 }
                 if q >= 5 {
                     p.plus(-13., -21., GOLD);
@@ -556,10 +576,12 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         4 => {
             p.r(-10., -1., 20., 1., GREEN);
             if on {
-                for n in 0..(k + 1).min(4) {
-                    p.r(-8. + n as f64 * 5., -21., 3., 2., GOLD);
-                    p.r(-8. + n as f64 * 5., -23., 1., 2., GOLD);
+                let y = -17. - k.min(3) as f64;
+                p.r(-7., y, 14., 3., GOLD);
+                for (x, height) in [(-7., 3.), (-1., 4.), (5., 3.)] {
+                    p.r(x, y - height, 2., height, GOLD);
                 }
+                p.r(-1., y, 2., 2., PINK);
                 if q >= 5 {
                     for n in 0..4 {
                         p.plus(-15. + n as f64 * 9., -10. - ((q + n) % 3) as f64 * 3., GOLD);
@@ -581,17 +603,6 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             }
         }
         8 => {
-            p.r(-7., -4., 14., 3., BLUE);
-            p.r(-6., -5., 12., 1., BLUE);
-            p.plus(-5., -4., INK);
-            p.r(
-                3.,
-                -3.,
-                1.,
-                1.,
-                if q.is_multiple_of(2) { GREEN } else { PINK },
-            );
-            p.r(5., -2., 1., 1., GOLD);
             if (5..10).contains(&q) {
                 p.panel(-5., -24., 10., 7., INK);
                 p.r(-3. + (k % 4) as f64, -21., 2., 2., GREEN);
@@ -608,8 +619,11 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
                     );
                 }
                 if q < 6 {
-                    p.r(r.x + 1., r.y, 3., 3., GOLD);
-                    p.r(14., -4., 1., 2., BLUE);
+                    let x = r.x + 1.;
+                    p.r(x, r.y - 1., 4., 3., GOLD);
+                    p.r(x + 4., r.y - 1., 2., 1., GOLD);
+                    p.r(x + 5., r.y - 2., 2., 1., GOLD);
+                    p.r(x + 6., r.y + (k % 2) as f64, 1., 1., BLUE);
                 }
             }
         }
@@ -617,7 +631,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             p.panel(10., -22., 12., 17., 0xD9E7D3);
             if on {
                 for n in 0..3 {
-                    let h = (k.saturating_sub(n) + 1).min(5) as f64 * 2.;
+                    let h = (k.saturating_sub(n) + 1).min(2 + n * 2) as f64 * 2.;
                     p.r(12. + n as f64 * 3., -6. - h, 2., h, GREEN);
                 }
                 if q >= 8 {
@@ -642,30 +656,38 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         }
         13 => {
             if on {
-                if q < 8 {
-                    p.panel(-18., -23., 11., 6., GREEN);
-                    p.line(-16., -20., 6., PAPER);
-                    p.r(-9., -17., 2., 2., GREEN);
-                }
-                if q >= 5 {
-                    p.panel(7., -25., 12., 6., PINK);
-                    p.line(9., -22., 8., PAPER);
-                    p.r(8., -19., 2., 2., PINK);
+                // A tail points to the speaker; each reply arrives one dot at a time.
+                for (start, end, x, y, color, tail) in
+                    [(2, 8, -19., -24., GREEN, 8.), (5, 10, 7., -26., PINK, 2.)]
+                {
+                    if (start..end).contains(&q) {
+                        p.r(x + 1., y, 10., 6., color);
+                        p.r(x, y + 1., 12., 4., color);
+                        p.r(x + tail, y + 6., 2., 1., color);
+                        p.r(x + tail, y + 7., 1., 1., color);
+                        for dot in 0..(q - start + 1).min(3) {
+                            p.r(x + 2. + dot as f64 * 3., y + 2., 2., 2., PAPER);
+                        }
+                    }
                 }
             }
         }
         14 => {
             if on {
-                let side = if q.is_multiple_of(2) { -1. } else { 1. };
-                let age = (k % 4) as f64;
-                for n in 0..5 {
-                    p.r(
-                        side * (9. + n as f64 * 2.),
-                        -17. - age * 2. + (n % 3) as f64,
-                        1.,
-                        2.,
-                        [GREEN, GOLD, PINK, BLUE, PURPLE][n],
-                    );
+                // Each hand releases a separate burst. Keep its side while it travels.
+                for (start, side) in [(2, -1.), (5, 1.)] {
+                    if (start..start + 5).contains(&q) {
+                        let age = (q - start) as f64;
+                        for (dx, dy, color) in [(1., -2., GOLD), (2., -1., PINK), (2., 0., GREEN)] {
+                            p.r(
+                                side * (9. + age * dx),
+                                -16. + age * dy + (age - 2.).max(0.),
+                                1.,
+                                2.,
+                                color,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -701,16 +723,20 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             }
         }
         19 => {
-            p.r(-9., -2., 18., 1., INK);
-            p.r(-8., -5., 16., 3., GOLD);
-            p.r(-6., -6., 12., 1., PAPER);
-            p.r(-4., -5., 1., 2., 0xB87A51);
-            p.r(1., -5., 1., 2., 0xB87A51);
+            // Balance the near edge on the palm; steam rises from the crust.
+            let x = r.x + 1.;
+            let y = r.y;
+            p.r(x, y, 15., 1., INK);
+            p.r(x + 1., y - 3., 13., 3., GOLD);
+            p.r(x + 3., y - 4., 9., 1., PAPER);
+            for vent in [4., 9.] {
+                p.r(x + vent, y - 3., 1., 2., 0xB87A51);
+            }
             if on && q >= 4 {
                 for n in 0..3 {
                     p.r(
-                        -4. + n as f64 * 4.,
-                        -13. - ((k + n) % 3) as f64 * 2.,
+                        x + 3. + n as f64 * 4.,
+                        y - 8. - ((k + n) % 3) as f64 * 2.,
                         1.,
                         3.,
                         0xACB9BD,
@@ -719,13 +745,13 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             }
         }
         21 => {
-            let cols = [BLUE, PINK, GREEN, GOLD];
-            let count = (k / 2 + 1).min(4);
-            for (n, col) in cols.iter().enumerate().take(count) {
-                p.cube(12., -4. - n as f64 * 4., *col);
+            let colors = [BLUE, PINK, GREEN, GOLD];
+            let placed = q.saturating_sub(1) / 2;
+            for (n, &color) in colors.iter().take(placed).enumerate() {
+                p.cube(12., -4. - n as f64 * 4., color);
             }
-            if on && q < 9 {
-                p.cube(r.x + 1., r.y - 3., cols[(k / 2 + 1).min(3)]);
+            if on && q.is_multiple_of(2) {
+                p.cube(r.x + 1., r.y - 3., colors[placed]);
             }
         }
         22 => {
@@ -733,9 +759,9 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
                 let path = [
                     (-5., -23., 10., 1.),
                     (4., -22., 1., 8.),
-                    (-4., -15., 8., 1.),
+                    (-5., -15., 9., 1.),
                     (-5., -21., 1., 6.),
-                    (-3., -21., 5., 1.),
+                    (-4., -21., 6., 1.),
                     (1., -20., 1., 4.),
                     (-2., -17., 3., 1.),
                 ];
@@ -750,12 +776,13 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         24 => {
             p.r(9., -1., 15., 1., PURPLE);
             if on {
-                let n = (k / 2).min(2);
-                for j in 0..=n {
-                    p.cube(10. + j as f64 * 4., -5., [GREEN, BLUE, GOLD][j]);
+                let colors = [GREEN, BLUE, GOLD];
+                let placed = ((q - 1) / 2).min(colors.len());
+                for (slot, &color) in colors.iter().take(placed).enumerate() {
+                    p.cube(10. + slot as f64 * 4., -5., color);
                 }
-                if q.is_multiple_of(2) {
-                    p.cube(r.x + 1., r.y - 2., [GREEN, BLUE, GOLD][n]);
+                if placed < colors.len() && q.is_multiple_of(2) {
+                    p.cube(r.x + 1., r.y - 2., colors[placed]);
                 }
             }
         }
@@ -775,8 +802,8 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             }
         }
         26 => {
-            p.laptop(on && !exit, BLUE);
-            if on && q >= 5 {
+            p.laptop(presentation_phase, BLUE);
+            if (5..=8).contains(&presentation_phase) {
                 p.panel(9., -25., 14., 7., 0xD8E7DA);
                 for n in 0..(k - 2).min(3) {
                     p.line(11., -22. + n as f64, 8. - n as f64, GREEN);
@@ -785,14 +812,14 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         }
         27 => {
             p.r(20., -12., 4., 7., PAPER);
-            p.r(21., -10., 1., 2., INK);
-            p.r(23., -10., 1., 2., INK);
+            p.r(20., -9., 2., 1., INK);
+            p.r(20., -7., 2., 1., INK);
             if on {
                 p.r(r.x + 1., r.y, 4., 3., BLUE);
                 p.r(r.x + 5., r.y, 2., 1., GOLD);
                 p.r(r.x + 5., r.y + 2., 2., 1., GOLD);
-                p.r(r.x - 1., r.y + 2., 2., 4., PURPLE);
-                p.line(8., -3., r.x - 6., PURPLE);
+                p.r(r.x, r.y + 2., 1., -3. - r.y - 1., PURPLE);
+                p.line(7., -3., r.x - 6., PURPLE);
                 if (5..9).contains(&q) {
                     p.plus(21., -18., GREEN);
                 }
@@ -825,8 +852,11 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             p.panel(10., -19., 12., 11., BLUE);
             if on {
                 if q < 6 {
-                    p.r(13., -15., 5., 1., PINK);
-                    p.r(15., -17., 1., 5., PINK);
+                    for offset in 0..5 {
+                        let step = offset as f64;
+                        p.r(13. + step, -16. + step, 1., 1., PINK);
+                        p.r(17. - step, -16. + step, 1., 1., PINK);
+                    }
                 } else {
                     p.line(12., -15., (k - 2) as f64 * 2., GREEN);
                     if q >= 8 {
@@ -853,8 +883,10 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         }
         33 => {
             p.r(9., -2., 5., 1., INK);
-            p.r(10., -5., 3., 3., PAPER);
-            p.r(13., -4., 1., 2., PAPER);
+            let cup_y = if on { r.y } else { -5. };
+            p.r(10., cup_y, 4., 3., PAPER);
+            p.r(9., cup_y, 1., 2., PAPER);
+            p.r(11., cup_y, 2., 1., 0x946845);
             if on {
                 for n in 0..5 {
                     let h = if q < 7 { ((k + n) % 3 + 2) as f64 } else { 1. };
@@ -870,9 +902,10 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             if on {
                 for n in 0..5 {
                     let x = -12. + n as f64 * 6.;
-                    p.plant(x, -2., (k + 1).min(4) as f64);
-                    if q >= 5 {
-                        p.plant(x, -14., (k - 2).min(5) as f64);
+                    let delay = [0, 2, 1, 2, 0][n];
+                    let height = (k + 1).saturating_sub(delay) as f64 * 2.;
+                    if height > 0. {
+                        p.plant(x, -2., height);
                     }
                 }
             }
@@ -921,7 +954,11 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             let count = if on { (k / 2 + 1).min(3) } else { 1 };
             for n in 0..count {
                 let x = -15. + n as f64 * 10.;
-                p.r(x + 3., -15., 1., 4., BLUE);
+                let base = if n == 1 { -18. } else { -15. };
+                p.r(x + 3., base, 1., -10. - base, BLUE);
+                if n > 0 {
+                    p.line(x - 7., -11., 10., BLUE);
+                }
                 p.server(
                     x,
                     -20. - if n == 1 { 3. } else { 0. },
@@ -934,13 +971,24 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             }
         }
         43 => {
-            p.flask(l.x - 3., l.y - 4., PURPLE, if q >= 6 { 3. } else { 1. });
-            p.flask(r.x, r.y - 5., if q >= 6 { GREEN } else { BLUE }, 3.);
-            if (4..7).contains(&q) {
-                p.r(r.x - 2., r.y - 3., 2., 1., BLUE);
-                p.r(r.x - 3., r.y - 1., 1., 2., BLUE);
-                p.r(r.x - 5., r.y, 2., 1., BLUE);
-                p.r(r.x - 8., r.y, 3., 1., BLUE);
+            let pouring = (4..7).contains(&q);
+            let transferred = q.saturating_sub(4).min(2) as f64;
+            p.flask(
+                l.x - 3.,
+                l.y - 4.,
+                if transferred > 0. { GREEN } else { PURPLE },
+                1. + transferred,
+            );
+            if pouring {
+                // Turn the neck toward the receiving flask, with the palm under the body.
+                p.r(r.x, r.y - 4., 6., 5., 0xA6C8CA);
+                p.r(r.x, r.y - 2., 5., 3. - transferred, BLUE);
+                p.r(r.x - 3., r.y - 3., 3., 2., 0xA6C8CA);
+                p.r(r.x - 5., r.y - 2., 2., 1., BLUE);
+                p.r(r.x - 7., r.y - 1., 2., 1., BLUE);
+                p.r(l.x, r.y, 1., 2., BLUE);
+            } else {
+                p.flask(r.x, r.y - 5., BLUE, 3. - transferred);
             }
             if (7..10).contains(&q) {
                 p.r(-10., -20., 1., 1., GREEN);
@@ -982,7 +1030,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         47 => {
             let count = if on { (k / 2 + 1).min(3) } else { 1 };
             for n in 0..count {
-                p.server(12., -5. - n as f64 * 6., PURPLE, q >= 4 + n);
+                p.server(12., -5. - n as f64 * 5., PURPLE, q >= 4 + n);
             }
             if on && q.is_multiple_of(2) {
                 p.r(r.x + 1., r.y, 2., 2., GOLD);
@@ -998,15 +1046,25 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
                     p.r(-4., -21., 8., 1., PAPER);
                     p.check(-2., -21.);
                 }
-                p.r(r.x + 1., r.y - 4., 1., 5., GOLD);
+                for step in 0..4 {
+                    p.r(r.x - step as f64 + 1., r.y - step as f64, 2., 1., GOLD);
+                }
+                p.r(r.x - 2., r.y - 4., 1., 1., INK);
             }
         }
         49 => {
             let cards = [(-21., -23., BLUE), (9., -27., PURPLE), (10., -10., GOLD)];
-            let count = if on { (k / 2 + 1).min(3) } else { 1 };
+            let selected = if q < 5 {
+                0
+            } else if q < 8 {
+                1
+            } else {
+                2
+            };
+            let count = selected + 1;
             for (n, &(x, y, col)) in cards.iter().take(count).enumerate() {
                 p.panel(x, y, 11., 7., col);
-                if n == k / 3 {
+                if n == selected {
                     p.line(x + 2., y + 4., 7., PAPER);
                 }
             }
@@ -1015,7 +1073,10 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             if on {
                 for n in 0..2 {
                     let x = if n == 0 { -14. } else { 10. };
-                    let h = (k.saturating_sub(n) + 1).min(5) as f64;
+                    if k < n {
+                        continue;
+                    }
+                    let h = (k - n + 1).min(5) as f64;
                     p.r(x, -1. - h, 2., h, PAPER);
                     p.r(x - 3., -3. - h, 8., 2., PURPLE);
                     p.r(x - 1., -4. - h, 4., 1., BLUE);
@@ -1076,22 +1137,23 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         }
         55 => {
             if on {
-                let pts = [
-                    (-8., -24.),
-                    (0., -24.),
-                    (8., -22.),
-                    (10., -5.),
-                    (0., -2.),
-                    (-10., -4.),
-                ];
-                for &(x, y) in pts.iter().take((k + 2).min(6)) {
-                    p.line(x, y, 5., GREEN);
+                // Build two clockwise arrows around the pet, one pixel step at a time.
+                let span = (k + 1).min(4) as f64 * 4.;
+                p.line(-8., -24., span, GREEN);
+                p.line(8. - span, -3., span, GREEN);
+                if k >= 3 {
+                    p.r(7., -24., 2., 4., GREEN);
+                    p.r(9., -21., 2., 3., GREEN);
+                    p.r(-9., -6., 2., 4., GREEN);
+                    p.r(-11., -8., 2., 3., GREEN);
                 }
-                if q >= 4 {
-                    p.arrow(9., -23., GREEN);
-                }
-                if q >= 7 {
-                    p.arrow(-13., -7., GREEN);
+                if k >= 4 {
+                    p.line(7., -19., 6., GREEN);
+                    p.line(8., -18., 4., GREEN);
+                    p.line(9., -17., 2., GREEN);
+                    p.line(-13., -8., 6., GREEN);
+                    p.line(-12., -9., 4., GREEN);
+                    p.line(-11., -10., 2., GREEN);
                 }
             }
         }
@@ -1108,7 +1170,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             p.r(r.x + 1., r.y, 1., 5., BLUE);
             p.r(r.x - 1., r.y + 4., 5., 2., 0xAABDC9);
             if q == 5 || q == 7 {
-                p.plus(17., -9., GOLD);
+                p.plus(19., -8., GOLD);
             }
         }
         57 => {
@@ -1125,7 +1187,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
                         INK,
                     );
                 }
-                p.r(-10., -22. + (k % 6) as f64 * 2., 1., 2., GOLD);
+                p.r(-22. + w, -21. + k.min(5) as f64 * 2., 1., 2., GOLD);
             }
         }
         58 => {
@@ -1206,7 +1268,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
                 for n in 0..3 {
                     p.r(
                         13. + n as f64 * 3.,
-                        -7.,
+                        -6. - ((k + n) % 3) as f64,
                         2.,
                         1. + ((k + n) % 3) as f64,
                         BLUE,
@@ -1220,8 +1282,9 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
                     let x = side * 10.;
                     let y = -22. + if q < 6 { 0. } else { 2. };
                     p.r(x, y, 1., 6., GREEN);
-                    p.r(x + side * 2., y - 2., 1., 2., GREEN);
-                    p.r(x + side * 2., y + 6., 1., 2., GREEN);
+                    let lip = x - side.max(0.) * 2.;
+                    p.line(lip, y, 3., GREEN);
+                    p.line(lip, y + 5., 3., GREEN);
                 }
                 if q >= 6 {
                     p.line(-4., -26., 8., BLUE);
@@ -1247,10 +1310,10 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
         69 => {
             if on {
                 for n in 0..(k + 1).min(5) {
-                    p.r(9. + n as f64 * 2., -8. - n as f64 * 3., 2., 3., GREEN);
+                    p.r(9. + n as f64 * 2., -8. - n as f64 * 2., 3., 2., GREEN);
                 }
                 if q >= 6 {
-                    p.arrow(17., -24., GREEN);
+                    p.arrow(18., -17., GREEN);
                     p.plus(-11., -18., BLUE);
                 }
             }
@@ -1272,6 +1335,7 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             if on {
                 p.r(14., -8., 1., 6., PURPLE);
                 if q >= 4 {
+                    p.r(14., -13., 1., 5., PURPLE);
                     p.r(10., -13., 9., 1., PURPLE);
                     p.r(10., -13., 1., 4., PURPLE);
                     p.r(18., -13., 1., 4., PURPLE);
@@ -1288,13 +1352,13 @@ pub(crate) fn draw(c: &mut Canvas, id: usize, t: f64, facing: f64, d: f64) {
             }
         }
         74 => {
-            p.laptop(on && !exit, GREEN);
-            if on {
+            p.laptop(presentation_phase, GREEN);
+            if (3..=8).contains(&presentation_phase) {
                 p.panel(9., -27., 15., 11., INK);
-                for n in 0..(k + 1).min(5) {
+                for n in 0..k.min(4) {
                     p.line(
                         11. + (n % 2) as f64,
-                        -24. + n as f64,
+                        -24. + n as f64 * 2.,
                         7. - (n % 3) as f64,
                         GREEN,
                     );
@@ -1324,8 +1388,25 @@ pub(crate) fn draw_foreground(c: &mut Canvas, id: usize, t: f64, facing: f64, d:
     };
     let x = f.body.body_x;
     let y = f.body.bob;
+    if id == 8 {
+        let top = -5. + y;
+        p.r(-7. + x, top, 14., 3., BLUE);
+        p.r(-6. + x, top - 1., 12., 1., BLUE);
+        p.plus(-5. + x, top, INK);
+        p.r(
+            3. + x,
+            top,
+            1.,
+            1.,
+            if q.is_multiple_of(2) { GREEN } else { PINK },
+        );
+        p.r(5. + x, top + 1., 1., 1., GOLD);
+    }
     if id == 12 {
-        p.r(-6. + x, -4. + y, 12., 1., PURPLE);
+        p.r(-6. + x, -6. + y, 12., 3., BLUE);
+        p.r(-2. + x, -6. + y, 1., 1., PAPER);
+        p.r(1. + x, -6. + y, 1., 1., PAPER);
+        p.r(x, -5. + y, 1., 2., GOLD);
     }
     if id == 62 {
         p.r(-6. + x, -12. + y, 12., 1., GREEN);
